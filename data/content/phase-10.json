@@ -1,0 +1,1202 @@
+{
+  "10.1.1": {
+    "body": "## Design a URL Shortener (TinyURL)\n\n### Requirements\n- Shorten long URLs to compact aliases (e.g., 7-character base62 codes)\n- Redirect short URLs to original destinations with minimal latency\n- Support custom aliases, expiration, and analytics\n- Handle 100M+ URLs with 10:1 read-to-write ratio\n\n### Architecture\nA stateless API layer sits behind a load balancer, backed by a distributed key-value store for URL mappings. A separate ID generation service produces unique short codes. A cache layer (Redis) handles hot URLs to reduce database reads.\n\n### Key Components\n- **ID Generator**: Base62 encoding of auto-increment IDs or pre-generated random keys stored in a key range table\n- **Database**: NoSQL store (DynamoDB) mapping short code to long URL, creation time, and expiry\n- **Cache**: LRU cache for frequently accessed URLs\n- **Analytics Service**: Async event pipeline tracking clicks, referrers, and geolocation\n\n### Scaling\nHorizontally scale the API tier. Partition the database by hash of short code. Use consistent hashing for cache distribution. Pre-generate key ranges to avoid collisions without coordination.\n\n### Trade-offs\n- Sequential IDs are predictable but simple; random codes need collision checks but are secure\n- 301 (permanent) redirects reduce server load but lose analytics; 302 (temporary) keeps tracking intact",
+    "intuition": "A URL shortener is fundamentally a distributed hash map that converts long URLs into short keys and retrieves them with single-digit millisecond latency. The core challenge is generating globally unique short codes at scale without coordination bottlenecks.",
+    "exercises": [
+      {
+        "title": "Implement Base62 Encoding",
+        "description": "Write a service that takes a numeric ID and converts it to a base62 string (a-z, A-Z, 0-9). Then implement the reverse decoding. Ensure the output is always exactly 7 characters by zero-padding.",
+        "hint": "Use modulo and division operations iteratively, mapping remainders to characters from your 62-character alphabet."
+      },
+      {
+        "title": "Design a Key Range Pre-generation Service",
+        "description": "Build a service that pre-generates batches of unique 7-character keys and stores them in a database. Worker nodes request a batch of unused keys, mark them as allocated, and use them for new URL mappings without coordination.",
+        "hint": "Use a two-table approach: one for unused keys and one for used keys. Each worker takes a range atomically using a compare-and-swap operation."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Multiple servers generate the same short code simultaneously, causing URL overwrites.",
+        "cause": "Lack of coordination in distributed ID generation leads to collisions when using random generation or shared auto-increment counters.",
+        "solution": "Use a key pre-generation service (KGS) that allocates unique key ranges to each server. Alternatively, use a Zookeeper-based counter with range reservations so each node gets a dedicated block of IDs."
+      },
+      {
+        "problem": "Database reads become a bottleneck as popular URLs get millions of redirects per second.",
+        "cause": "Hot keys in the datastore overwhelm a single partition, causing high latency and timeouts.",
+        "solution": "Place a multi-tier caching layer (local in-memory + distributed Redis) in front of the database. Use consistent hashing to spread cache load and implement read replicas for the database."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "System Design: URL Shortener",
+        "url": "https://systemdesign.one/url-shortening-system-design/",
+        "type": "article"
+      },
+      {
+        "title": "Designing a URL Shortening Service like TinyURL",
+        "url": "https://www.designgurus.io/course-play/grokking-the-system-design-interview/doc/638c0b5dac93e7ae59a1af6b",
+        "type": "course"
+      }
+    ]
+  },
+  "10.1.2": {
+    "body": "## Design a Rate Limiter\n\n### Requirements\n- Limit requests per user/IP/API-key within configurable time windows\n- Support multiple algorithms: fixed window, sliding window, token bucket, leaky bucket\n- Return appropriate HTTP 429 responses with retry-after headers\n- Operate in a distributed environment with minimal latency overhead\n\n### Architecture\nA rate limiter middleware intercepts requests before they reach the application. It checks counters stored in a fast in-memory store (Redis). Configuration rules are stored in a database and cached locally. The middleware returns pass/reject decisions in under 1ms.\n\n### Key Components\n- **Rules Engine**: Configurable rules per endpoint, user tier, or API key stored in a config DB\n- **Counter Store**: Redis with atomic INCR and TTL operations for tracking request counts\n- **Middleware**: Lightweight interceptor deployed as a sidecar or library in the API gateway\n- **Response Handler**: Returns 429 status with X-RateLimit-Remaining and Retry-After headers\n\n### Scaling\nUse Redis Cluster for partitioned counter storage. Deploy rate limiter logic at the API gateway level for centralized enforcement. Use local counters with periodic sync for approximate but faster limiting.\n\n### Trade-offs\n- Centralized counters are accurate but add network latency; local counters are fast but may allow brief bursts above limits\n- Token bucket allows bursts up to bucket size; sliding window log is precise but uses more memory",
+    "intuition": "A rate limiter is a gatekeeper that counts requests in time windows and rejects excess traffic to protect backend services from overload. The fundamental tension is between precision (exact counts) and performance (minimal latency overhead per request).",
+    "exercises": [
+      {
+        "title": "Implement a Sliding Window Rate Limiter",
+        "description": "Build a rate limiter that uses the sliding window log algorithm. Track timestamps of each request in a sorted set. For each incoming request, remove entries outside the window, count remaining entries, and accept or reject.",
+        "hint": "Use Redis ZRANGEBYSCORE to remove old entries and ZCARD to count current entries, all within a single pipeline for atomicity."
+      },
+      {
+        "title": "Build a Token Bucket Implementation",
+        "description": "Create a token bucket rate limiter where tokens refill at a fixed rate. Each request consumes one token. If the bucket is empty, reject the request. Support configurable bucket size and refill rate per user.",
+        "hint": "Instead of a background refill thread, calculate tokens lazily: tokens = min(max_tokens, last_tokens + (now - last_refill) * refill_rate)."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Rate limits are not enforced accurately in a multi-node deployment, allowing users to exceed limits by hitting different servers.",
+        "cause": "Each server maintains its own local counters without synchronization, so a user sending requests to N servers effectively gets N times the intended limit.",
+        "solution": "Use a centralized Redis instance for counter storage with atomic Lua scripts for check-and-increment. Alternatively, use sticky sessions to route a user to the same server."
+      },
+      {
+        "problem": "Redis becomes a single point of failure, and its downtime disables all rate limiting.",
+        "cause": "The system depends entirely on Redis availability for every rate limit decision with no fallback mechanism.",
+        "solution": "Implement a local in-memory fallback rate limiter that activates when Redis is unavailable. Use Redis Sentinel or Cluster for high availability, and consider allowing requests through (fail-open) during brief outages."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Rate Limiting Fundamentals",
+        "url": "https://blog.bytebytego.com/p/rate-limiting-fundamentals",
+        "type": "article"
+      },
+      {
+        "title": "An Alternative Approach to Rate Limiting",
+        "url": "https://www.figma.com/blog/an-alternative-approach-to-rate-limiting/",
+        "type": "article"
+      }
+    ]
+  },
+  "10.1.3": {
+    "body": "## Design a Notification Service\n\n### Requirements\n- Support push notifications, SMS, email, and in-app channels\n- Handle millions of notifications per day with at-least-once delivery\n- Support user preferences, templates, scheduling, and priority levels\n- Provide delivery tracking and analytics\n\n### Architecture\nA notification API accepts requests and publishes to a message queue (Kafka). Channel-specific workers consume messages and dispatch via third-party providers (APNs, FCM, Twilio, SendGrid). A preference service filters and routes notifications. A tracking service records delivery status.\n\n### Key Components\n- **API Gateway**: Accepts notification requests, validates, and enqueues\n- **Message Queue**: Kafka topics partitioned by channel type for parallel processing\n- **Channel Workers**: Dedicated consumers for each channel with provider-specific adapters\n- **Preference Service**: Stores user opt-in/out, quiet hours, and channel preferences\n- **Template Engine**: Renders notification content from templates with variable substitution\n\n### Scaling\nScale workers independently per channel based on volume. Use Kafka partitions for parallelism. Batch SMS and email sends for efficiency. Use priority queues to ensure critical notifications (2FA codes) are not delayed by marketing blasts.\n\n### Trade-offs\n- At-least-once delivery may cause duplicates; exactly-once adds complexity and latency\n- Third-party provider dependencies require fallback providers and circuit breakers",
+    "intuition": "A notification service is an event-driven pipeline that transforms a notification intent into multi-channel deliveries while respecting user preferences. The key challenge is reliable delivery at scale without overwhelming downstream providers or annoying users with duplicates.",
+    "exercises": [
+      {
+        "title": "Design a Priority Queue System",
+        "description": "Implement a notification prioritization system with three levels: critical (OTP/2FA), high (order updates), and normal (marketing). Ensure critical notifications are processed within seconds even when millions of normal notifications are queued.",
+        "hint": "Use separate Kafka topics or queue lanes per priority level with dedicated consumer groups. Allocate more consumer instances to higher-priority topics."
+      },
+      {
+        "title": "Build a Rate-Limited Provider Adapter",
+        "description": "Create an adapter for an SMS provider that enforces rate limits (e.g., 100 messages/second). Buffer excess messages and retry with exponential backoff when the provider returns 429 or 503 errors.",
+        "hint": "Use a token bucket for outgoing rate control and a dead-letter queue for messages that fail after max retries."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Users receive duplicate notifications for the same event, especially during retries.",
+        "cause": "Worker crashes after sending but before acknowledging the message, causing the queue to redeliver the same notification.",
+        "solution": "Implement idempotency by generating a unique notification ID per event and checking a deduplication store (Redis with TTL) before sending. Track sent notification IDs to skip duplicates."
+      },
+      {
+        "problem": "Notification delivery latency spikes during marketing campaign blasts, delaying critical OTP notifications.",
+        "cause": "All notifications share the same queue and worker pool, so a flood of low-priority messages starves high-priority ones.",
+        "solution": "Separate queues by priority with dedicated worker pools. Reserve capacity for critical notifications. Implement backpressure on low-priority queues during high load."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Designing a Notification System",
+        "url": "https://blog.bytebytego.com/p/designing-a-notification-system",
+        "type": "article"
+      },
+      {
+        "title": "How Does Push Notification Work?",
+        "url": "https://dev.to/karanpratapsingh/system-design-notification-service-3k3g",
+        "type": "article"
+      }
+    ]
+  },
+  "10.1.4": {
+    "body": "## Design a Chat System (WhatsApp)\n\n### Requirements\n- Support 1:1 and group messaging with real-time delivery\n- Handle online/offline status, read receipts, and typing indicators\n- Store message history and sync across devices\n- Support media sharing (images, videos, documents)\n- Scale to billions of messages per day\n\n### Architecture\nClients maintain persistent WebSocket connections to chat servers. A connection manager tracks which user is connected to which server. Messages are routed through a message service that stores them in a database and forwards to recipients. Offline messages are queued for later delivery. Media is uploaded to object storage with CDN.\n\n### Key Components\n- **WebSocket Servers**: Maintain persistent bidirectional connections with clients\n- **Connection Manager**: Maps user IDs to WebSocket server addresses (Redis)\n- **Message Service**: Persists messages and routes them to recipient connections\n- **Group Service**: Manages group membership and fans out messages to members\n- **Media Service**: Handles upload, compression, thumbnail generation, and CDN distribution\n\n### Scaling\nPartition WebSocket servers by user ID ranges. Use Kafka for async message fanout in large groups. Shard message storage by conversation ID. Use a push notification fallback when WebSocket is disconnected.\n\n### Trade-offs\n- WebSockets provide real-time delivery but require stateful connections and sticky routing\n- Fan-out on write (pre-deliver to all members) is fast for reads but expensive for large groups",
+    "intuition": "A chat system is a real-time message routing network where persistent connections enable instant delivery and a store-and-forward mechanism handles offline users. The core challenge is maintaining millions of stateful WebSocket connections while ensuring no messages are lost.",
+    "exercises": [
+      {
+        "title": "Implement a Message Sync Protocol",
+        "description": "Design a protocol where clients track the last message sequence number they received. On reconnection, the client sends its last sequence number and the server sends all missed messages. Handle the case where history is too large by paginating.",
+        "hint": "Assign monotonically increasing sequence numbers per conversation. Store messages in order and use the sequence number as a cursor for efficient range queries."
+      },
+      {
+        "title": "Design Group Message Fanout",
+        "description": "Build a system that delivers a message to all members of a group chat. For small groups (< 100), fan out on write. For large groups (100+), fan out on read. Implement both strategies and a routing decision layer.",
+        "hint": "For write fanout, insert a message copy into each member's inbox. For read fanout, store one copy and have members pull from the group timeline on demand."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Messages are delivered out of order or lost when the WebSocket server crashes mid-delivery.",
+        "cause": "The server acknowledged receipt from the sender but crashed before forwarding to the recipient, and the message was only in memory.",
+        "solution": "Persist messages to the database before acknowledging to the sender. Use message sequence numbers per conversation to detect gaps. Clients request missing messages on reconnection."
+      },
+      {
+        "problem": "Group chats with thousands of members cause massive write amplification and high latency.",
+        "cause": "Fan-out on write creates a database entry per member per message, overwhelming write capacity for large groups.",
+        "solution": "Switch to fan-out on read for groups above a threshold. Store one copy of the message and have members pull updates. Use a hybrid approach where active members get push delivery and inactive members pull on open."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "How WhatsApp Scaled to 1 Billion Users",
+        "url": "https://blog.bytebytego.com/p/how-does-whatsapp-work",
+        "type": "article"
+      },
+      {
+        "title": "Design a Chat System - System Design Interview",
+        "url": "https://www.karanpratapsingh.com/courses/system-design/whatsapp",
+        "type": "article"
+      }
+    ]
+  },
+  "10.1.5": {
+    "body": "## Design a News Feed (Twitter/Instagram)\n\n### Requirements\n- Users post content and see a personalized feed of posts from followed accounts\n- Feed generation must handle celebrity accounts with millions of followers\n- Support ranking by relevance, not just chronological order\n- Handle text, images, and video content with real-time updates\n\n### Architecture\nA post service stores new content and triggers fanout. A feed service assembles personalized timelines. For regular users, fan-out on write pre-computes feeds in a cache (Redis sorted sets). For celebrity accounts, fan-out on read merges their posts at query time. A ranking service scores and orders posts.\n\n### Key Components\n- **Post Service**: Stores posts in a database and publishes events to Kafka\n- **Fanout Service**: Pushes post IDs to follower feed caches for normal users\n- **Feed Cache**: Redis sorted sets per user storing ranked post IDs\n- **Feed Service**: Assembles feed by merging cached posts with celebrity posts at read time\n- **Ranking Service**: ML-based scoring considering engagement, recency, and user preferences\n\n### Scaling\nUse a hybrid fanout approach: push for users with fewer followers, pull for celebrities. Shard feed caches by user ID. Use a graph database or adjacency list for the follow relationship. Pre-compute and cache trending content.\n\n### Trade-offs\n- Fan-out on write is fast for reads but slow and expensive for celebrity posts with millions of followers\n- Chronological feeds are simple but less engaging; ranked feeds increase engagement but add ML complexity",
+    "intuition": "A news feed system is a content distribution network that balances pre-computation (push) for fast reads against on-demand assembly (pull) for high-follower accounts. The hybrid fanout model is the key insight that makes platforms like Twitter and Instagram scale.",
+    "exercises": [
+      {
+        "title": "Implement Hybrid Fanout Logic",
+        "description": "Build a fanout service that decides between push and pull based on follower count. Users with < 10,000 followers get fan-out on write. Celebrity posts are merged at read time. Implement the feed assembly that combines both sources.",
+        "hint": "Maintain a set of celebrity user IDs. When assembling a feed, merge the user's pre-computed cache with a real-time query of recent posts from followed celebrities, then sort by rank score."
+      },
+      {
+        "title": "Design a Feed Ranking System",
+        "description": "Create a ranking function that scores posts based on: recency (time decay), engagement (likes, comments, shares), relationship strength (interaction frequency with the author), and content type preference. Return the top N posts.",
+        "hint": "Use a weighted scoring formula: score = w1*recency + w2*engagement + w3*affinity + w4*content_type_boost. Normalize each factor to [0,1] before combining."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "A celebrity with 50 million followers publishes a post, and the fanout service takes minutes to update all follower feeds.",
+        "cause": "Fan-out on write for high-follower accounts creates massive write amplification, overwhelming the cache layer and delaying all other fanouts.",
+        "solution": "Implement hybrid fanout: skip cache pre-computation for users above a follower threshold. At read time, merge the user's cached feed with recent posts from followed celebrities fetched on demand."
+      },
+      {
+        "problem": "Feed cache memory usage grows unbounded as users accumulate thousands of posts in their timelines.",
+        "cause": "Every post fanout adds entries to follower caches without eviction, and inactive users' caches consume memory without being read.",
+        "solution": "Limit feed cache to the most recent N posts (e.g., 800). Evict caches for users inactive beyond a threshold. When an inactive user returns, rebuild their feed on demand and re-cache it."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Designing Instagram News Feed",
+        "url": "https://www.designgurus.io/course-play/grokking-the-system-design-interview/doc/638c0b7eac93e7ae59a1af7e",
+        "type": "course"
+      },
+      {
+        "title": "How Twitter's Timeline Works",
+        "url": "https://blog.bytebytego.com/p/design-a-news-feed-system",
+        "type": "article"
+      }
+    ]
+  },
+  "10.2.1": {
+    "body": "## Design a File Storage System (Dropbox)\n\n### Requirements\n- Upload, download, and sync files across multiple devices\n- Support large files (up to several GB) with resumable uploads\n- Detect and sync only changed portions of files (delta sync)\n- Handle concurrent edits with conflict resolution\n- Provide file versioning and sharing capabilities\n\n### Architecture\nClients use a sync agent that monitors local file changes and communicates with a metadata service. Files are split into chunks (4MB blocks), deduplicated, and stored in object storage (S3). A metadata database tracks file hierarchy, chunks, and versions. A notification service pushes sync events to connected clients.\n\n### Key Components\n- **Sync Agent**: Client-side daemon that watches file changes and computes deltas\n- **Chunking Service**: Splits files into fixed or content-defined chunks using rolling hash (Rabin fingerprinting)\n- **Metadata Service**: Tracks file paths, chunk lists, versions, and permissions in a relational DB\n- **Block Storage**: S3-compatible object store holding deduplicated chunks\n- **Notification Service**: Long polling or WebSocket to alert clients of remote changes\n\n### Scaling\nChunk deduplication reduces storage by 30-50%. Use content-defined chunking so insertions don't invalidate all chunks. Shard metadata by user ID. Use CDN for frequently downloaded files.\n\n### Trade-offs\n- Fixed-size chunks are simpler but wasteful on edits; content-defined chunks optimize delta sync but add CPU cost\n- Strong consistency for metadata ensures correctness but adds latency; eventual consistency risks conflicts",
+    "intuition": "A file storage system is a chunk-based synchronization engine that breaks files into blocks, deduplicates them, and only transfers changed chunks across devices. The delta sync mechanism is what makes it bandwidth-efficient and fast.",
+    "exercises": [
+      {
+        "title": "Implement Content-Defined Chunking",
+        "description": "Build a chunking algorithm using a rolling hash (e.g., Rabin fingerprint) that splits a file into variable-size chunks at content-defined boundaries. Chunks should average 4MB with min 1MB and max 8MB.",
+        "hint": "Slide a window over the file computing a rolling hash. When the hash modulo a target value equals zero, cut a chunk boundary. This ensures insertions only affect the adjacent chunk."
+      },
+      {
+        "title": "Design a Conflict Resolution System",
+        "description": "Implement a system that detects when two clients edit the same file simultaneously. Use vector clocks or version numbers to detect conflicts. When a conflict occurs, save both versions and let the user resolve.",
+        "hint": "Each file has a version number. On upload, the client sends its base version. If the server's current version differs, a conflict is detected and both versions are preserved with a naming convention."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Uploading a large 5GB file fails at 80% completion, and the user must restart from the beginning.",
+        "cause": "The upload is not chunked or resumable, so any network interruption loses all progress.",
+        "solution": "Implement chunked, resumable uploads. Track which chunks have been received server-side. On retry, the client queries for missing chunks and uploads only those. Use multipart upload APIs."
+      },
+      {
+        "problem": "A small edit to a large file causes the entire file to be re-uploaded and re-synced to all devices.",
+        "cause": "Fixed-offset chunking means a small insertion shifts all subsequent chunk boundaries, making every chunk appear changed.",
+        "solution": "Use content-defined chunking with a rolling hash so chunk boundaries depend on content, not position. An insertion only affects the chunk where the edit occurred, minimizing data transfer."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "How Dropbox Syncs Files",
+        "url": "https://dropbox.tech/infrastructure/rewriting-the-heart-of-our-sync-engine",
+        "type": "article"
+      },
+      {
+        "title": "System Design: Dropbox or Google Drive",
+        "url": "https://www.karanpratapsingh.com/courses/system-design/google-docs",
+        "type": "article"
+      }
+    ]
+  },
+  "10.2.2": {
+    "body": "## Design a Video Streaming Platform (YouTube)\n\n### Requirements\n- Upload, transcode, and stream videos to millions of concurrent viewers\n- Support adaptive bitrate streaming for varying network conditions\n- Handle content recommendation, search, and engagement features\n- Minimize startup latency and buffering during playback\n\n### Architecture\nUploaded videos go through a transcoding pipeline that produces multiple resolutions and formats. Transcoded segments are stored on object storage and distributed via CDN. A video metadata service stores titles, descriptions, and engagement data. An adaptive streaming protocol (HLS/DASH) serves video segments based on client bandwidth.\n\n### Key Components\n- **Upload Service**: Accepts video uploads, validates, and queues for transcoding\n- **Transcoding Pipeline**: Distributed workers (FFmpeg-based) that encode videos into multiple bitrates (240p to 4K) and segment them\n- **CDN**: Edge servers cache popular video segments close to viewers\n- **Streaming Service**: Serves manifest files (m3u8/mpd) and video segments via HTTP\n- **Recommendation Engine**: ML-based collaborative filtering and content-based suggestions\n\n### Scaling\nUse a DAG-based transcoding pipeline for parallel processing of different resolutions. Pre-warm CDN for trending videos. Use edge computing for live stream processing. Shard metadata by video ID.\n\n### Trade-offs\n- More transcoding profiles cover more devices but multiply storage and processing costs\n- Pre-loading video segments reduces buffering but wastes bandwidth if the user navigates away",
+    "intuition": "A video streaming platform is a content processing and distribution pipeline that transforms raw uploads into multi-bitrate segments served from edge locations close to viewers. Adaptive bitrate streaming is the key technique that enables smooth playback across varying network conditions.",
+    "exercises": [
+      {
+        "title": "Design a Transcoding Pipeline",
+        "description": "Build a DAG-based transcoding workflow where an uploaded video is split into segments, each segment is transcoded to multiple resolutions in parallel, and results are merged into a streaming manifest. Handle failures by retrying individual segment-resolution pairs.",
+        "hint": "Model the pipeline as a directed acyclic graph: split -> [transcode_240p, transcode_480p, transcode_720p, transcode_1080p] -> generate_manifest. Use a workflow engine like Temporal or Step Functions."
+      },
+      {
+        "title": "Implement Adaptive Bitrate Selection",
+        "description": "Create a client-side algorithm that monitors download throughput and buffer level, then selects the optimal video quality for the next segment. Switch up gradually but drop quality immediately when bandwidth drops.",
+        "hint": "Track a moving average of throughput. If throughput > next_higher_bitrate * 1.5 for 3 segments, switch up. If buffer drops below 2 seconds, immediately switch to the lowest available bitrate."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "A viral video causes CDN cache misses and overwhelms the origin storage with millions of concurrent requests.",
+        "cause": "The video was not pre-cached at edge locations, and the sudden traffic spike causes a thundering herd at the origin.",
+        "solution": "Implement request coalescing at the CDN (only one origin fetch per cache miss). Pre-warm CDN for videos with rapidly increasing view counts. Use a predictive model to identify potentially viral content and proactively cache it."
+      },
+      {
+        "problem": "The transcoding pipeline creates a huge backlog during peak upload hours, delaying video availability by hours.",
+        "cause": "Fixed-capacity transcoding workers cannot handle upload spikes, and all resolutions are transcoded before any version is available.",
+        "solution": "Transcode the most common resolution (720p) first and make the video available immediately. Process remaining resolutions in the background. Use auto-scaling worker pools that expand during peak hours."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "How YouTube Serves 1 Billion Hours of Video Per Day",
+        "url": "https://blog.bytebytego.com/p/how-does-youtube-work",
+        "type": "article"
+      },
+      {
+        "title": "Netflix Video Encoding at Scale",
+        "url": "https://netflixtechblog.com/high-quality-video-encoding-at-scale-d159f2c0bce7",
+        "type": "article"
+      }
+    ]
+  },
+  "10.2.3": {
+    "body": "## Design a Key-Value Store (Redis/DynamoDB)\n\n### Requirements\n- Support GET, PUT, DELETE operations with single-digit millisecond latency\n- Handle billions of key-value pairs across a distributed cluster\n- Provide tunable consistency (strong or eventual) and high availability\n- Support automatic partitioning, replication, and failure recovery\n\n### Architecture\nData is partitioned across nodes using consistent hashing with virtual nodes. Each partition is replicated to N nodes for durability. A coordinator node handles client requests and manages quorum reads/writes. An anti-entropy protocol (Merkle trees) detects and repairs inconsistencies between replicas.\n\n### Key Components\n- **Consistent Hash Ring**: Maps keys to nodes with virtual nodes for balanced distribution\n- **Replication Manager**: Copies data to N successor nodes on the hash ring\n- **Quorum Protocol**: Configurable W (write) and R (read) quorum values (W + R > N for strong consistency)\n- **Gossip Protocol**: Nodes exchange heartbeats to detect failures and propagate membership changes\n- **Merkle Trees**: Per-partition hash trees for efficient replica synchronization\n\n### Scaling\nAdd nodes and rebalance partitions with minimal data movement. Use virtual nodes to handle heterogeneous hardware. Implement hinted handoff for temporary failure handling. Use SSTables and LSM trees for efficient disk storage.\n\n### Trade-offs\n- W=1 gives fast writes but risks data loss; W=N ensures durability but is slow and less available\n- LSM trees optimize writes but reads may check multiple levels; B-trees optimize reads but have write amplification",
+    "intuition": "A distributed key-value store is a partitioned, replicated hash map that uses consistent hashing for data distribution and quorum protocols for tunable consistency. The CAP theorem trade-off between consistency and availability is controlled by adjusting quorum parameters.",
+    "exercises": [
+      {
+        "title": "Implement Consistent Hashing with Virtual Nodes",
+        "description": "Build a consistent hashing ring that maps keys to nodes. Support adding and removing nodes with minimal key reassignment. Use 150 virtual nodes per physical node to ensure even distribution.",
+        "hint": "Hash each virtual node ID to a position on the ring. To find the node for a key, hash the key and walk clockwise to the first virtual node. Map that virtual node back to its physical node."
+      },
+      {
+        "title": "Build a Quorum Read/Write System",
+        "description": "Implement a coordinator that sends write requests to N replicas and waits for W acknowledgments. For reads, query N replicas, wait for R responses, and return the value with the highest version number. Make W and R configurable.",
+        "hint": "Use async requests to all replicas in parallel. Collect responses and proceed once the quorum threshold is met. Attach vector clocks or timestamps to values for version comparison."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "After adding new nodes to the cluster, some keys become temporarily unavailable or return stale data.",
+        "cause": "During rebalancing, key ownership transfers between nodes, but data migration has not completed, leaving gaps in the new owner's data.",
+        "solution": "Implement a two-phase rebalancing: first copy data to new owners while old owners continue serving, then atomically switch ownership once migration is verified. Use Merkle trees to verify data completeness."
+      },
+      {
+        "problem": "Concurrent writes to the same key on different replicas create conflicting versions that cannot be automatically resolved.",
+        "cause": "With eventual consistency (W=1), two clients can write different values to different replicas simultaneously, creating sibling values.",
+        "solution": "Use vector clocks to track causal relationships between versions. When siblings are detected, return all conflicting versions to the client for application-level resolution, or use last-write-wins with synchronized timestamps."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Dynamo: Amazon's Highly Available Key-Value Store",
+        "url": "https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf",
+        "type": "paper"
+      },
+      {
+        "title": "Design a Key-Value Store",
+        "url": "https://www.karanpratapsingh.com/courses/system-design/key-value-store",
+        "type": "article"
+      }
+    ]
+  },
+  "10.2.4": {
+    "body": "## Design a Search Engine (Google)\n\n### Requirements\n- Crawl billions of web pages and build a searchable index\n- Return relevant results for keyword queries in under 200ms\n- Rank results by relevance using link analysis and content signals\n- Handle typos, synonyms, and natural language queries\n- Update the index continuously as web content changes\n\n### Architecture\nA web crawler discovers and fetches pages. A document processor extracts text, normalizes content, and builds an inverted index. The index is sharded across thousands of machines. A query engine parses queries, searches relevant shards, merges results, and ranks them. A PageRank-like algorithm provides authority scores.\n\n### Key Components\n- **Web Crawler**: Distributed crawler with URL frontier, politeness policies, and deduplication\n- **Inverted Index**: Maps terms to sorted lists of (document_id, term_frequency, positions)\n- **Query Parser**: Handles boolean operators, phrases, spelling correction, and query expansion\n- **Ranking Engine**: Combines TF-IDF, PageRank, freshness, and user engagement signals\n- **Index Sharding**: Partition index by document ID (document-partitioned) or by term (term-partitioned)\n\n### Scaling\nDocument-partitioned indexing allows each shard to independently score documents. Fan-out queries to all shards and merge top-K results. Use tiered indexing: a fast tier for popular pages and a full tier for comprehensive results. Cache frequent queries.\n\n### Trade-offs\n- Document-partitioned sharding enables independent scoring but requires querying all shards; term-partitioned reduces fan-out but complicates ranking\n- Fresher index requires more crawling resources; stale index saves resources but returns outdated results",
+    "intuition": "A search engine is a pipeline that transforms the web into an inverted index and uses ranking algorithms to surface the most relevant documents for any query. The inverted index is the fundamental data structure that makes sub-second search over billions of documents possible.",
+    "exercises": [
+      {
+        "title": "Build an Inverted Index",
+        "description": "Create a system that processes a collection of documents, tokenizes them, removes stop words, applies stemming, and builds an inverted index. Support boolean AND/OR queries and phrase matching using positional indexes.",
+        "hint": "Store each index entry as: term -> [(doc_id, [position1, position2, ...]), ...]. For phrase queries, check that positions in consecutive terms differ by exactly 1."
+      },
+      {
+        "title": "Implement a Simple PageRank",
+        "description": "Build a simplified PageRank algorithm over a graph of web pages. Iteratively compute authority scores where each page distributes its rank equally among outgoing links. Include a damping factor of 0.85. Run until convergence.",
+        "hint": "Initialize all pages with rank 1/N. Each iteration: new_rank = (1-d)/N + d * sum(rank[source]/outlinks[source] for source in inlinks). Repeat until the maximum rank change is below a threshold."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Query latency increases as the index grows, with tail latencies exceeding 2 seconds for rare term queries.",
+        "cause": "Rare terms have long posting lists spread across many shards, requiring full fan-out and merging of large result sets.",
+        "solution": "Use tiered indexing with a small fast tier containing popular documents queried first. Only hit the full index if the fast tier has insufficient results. Cache posting lists for frequent terms in memory."
+      },
+      {
+        "problem": "The web crawler gets trapped in infinite loops or spider traps, wasting resources on low-value pages.",
+        "cause": "Dynamic websites generate infinite URL variations (e.g., calendar pages, session IDs in URLs) that appear as unique pages.",
+        "solution": "Implement URL normalization to canonicalize URLs. Set a maximum depth per domain. Use a URL deduplication bloom filter. Detect and blacklist spider traps by monitoring crawl patterns per domain."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "The Anatomy of a Large-Scale Search Engine",
+        "url": "http://infolab.stanford.edu/~backrub/google.html",
+        "type": "paper"
+      },
+      {
+        "title": "How Search Engines Work",
+        "url": "https://blog.bytebytego.com/p/how-does-google-search-work",
+        "type": "article"
+      }
+    ]
+  },
+  "10.2.5": {
+    "body": "## Design a Distributed Cache (Memcached)\n\n### Requirements\n- Provide sub-millisecond GET/SET operations for cached data\n- Distribute cached data across multiple nodes with consistent hashing\n- Handle node failures gracefully without losing all cached data\n- Support TTL-based expiration and LRU eviction policies\n- Scale horizontally by adding more cache nodes\n\n### Architecture\nClients use a consistent hashing library to route requests directly to the appropriate cache node (no central coordinator). Each cache node stores key-value pairs in a hash table with a doubly-linked list for LRU eviction. A slab allocator manages memory to avoid fragmentation. Monitoring tracks hit rates and eviction counts.\n\n### Key Components\n- **Client Library**: Implements consistent hashing, connection pooling, and failover logic\n- **Hash Table**: O(1) lookups using chained hashing within each cache node\n- **LRU Eviction**: Doubly-linked list tracks access order; evicts least recently used items when memory is full\n- **Slab Allocator**: Pre-allocates memory in size classes to reduce fragmentation\n- **TTL Manager**: Lazy expiration on access plus periodic background sweep of expired keys\n\n### Scaling\nAdd nodes to the hash ring to increase capacity. Use virtual nodes for balanced distribution. Implement warm-up strategies when adding nodes to avoid cold-start cache misses. Use mcrouter or similar proxy for advanced routing.\n\n### Trade-offs\n- No replication means node failure loses that shard's cache (fast rebuild from DB vs. replicated cache cost)\n- Larger items reduce effective cache capacity; compress values to fit more but add CPU overhead",
+    "intuition": "A distributed cache is a partitioned in-memory hash table that trades durability for speed, serving as a buffer between application servers and databases. The key design challenge is maintaining high hit rates while handling node failures without cascading load to the database.",
+    "exercises": [
+      {
+        "title": "Implement an LRU Cache with O(1) Operations",
+        "description": "Build an LRU cache using a hash map and a doubly-linked list. GET moves the item to the head. SET adds to the head and evicts the tail if at capacity. Both operations must be O(1) time complexity.",
+        "hint": "The hash map stores key -> node pointer. The doubly-linked list orders items by access recency. On GET, unlink the node and move to head. On SET at capacity, remove the tail node and delete from the hash map."
+      },
+      {
+        "title": "Design a Cache Warming Strategy",
+        "description": "When a new cache node is added to the cluster, design a system that pre-populates it with likely-to-be-requested data to avoid a thundering herd of cache misses hitting the database. Consider using access logs and request sampling.",
+        "hint": "Replay recent access logs filtered to keys that hash to the new node. Alternatively, during a transition period, read from both old and new nodes, populating the new node on cache misses."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "A cache node crashes and the sudden flood of cache misses overwhelms the database, causing a cascading failure.",
+        "cause": "All keys previously served by the crashed node now miss cache and hit the database simultaneously (thundering herd), exceeding its capacity.",
+        "solution": "Use consistent hashing so only keys from the failed node redistribute. Implement request coalescing so multiple requests for the same key share a single DB lookup. Add circuit breakers and request queuing to protect the database."
+      },
+      {
+        "problem": "A popular item expires from cache and thousands of concurrent requests simultaneously try to rebuild it from the database.",
+        "cause": "TTL-based expiration of a hot key causes a stampede where every request cache-misses at the same instant.",
+        "solution": "Implement cache stampede protection using a mutex: the first request acquires a lock and rebuilds the cache while others wait or serve stale data. Alternatively, use probabilistic early expiration where items are refreshed before actual TTL."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Scaling Memcached at Facebook",
+        "url": "https://research.facebook.com/publications/scaling-memcache-at-facebook/",
+        "type": "paper"
+      },
+      {
+        "title": "Caching Strategies and How to Choose the Right One",
+        "url": "https://codeahoy.com/2017/08/11/caching-strategies-and-how-to-choose-the-right-one/",
+        "type": "article"
+      }
+    ]
+  },
+  "10.3.1": {
+    "body": "## Design an E-Commerce Platform (Amazon)\n\n### Requirements\n- Support product catalog with search, browsing, and filtering\n- Handle shopping cart, checkout, and order management\n- Process millions of concurrent users during flash sales\n- Manage inventory in real-time to prevent overselling\n- Support personalized recommendations and reviews\n\n### Architecture\nA microservices architecture with dedicated services for catalog, cart, order, payment, inventory, and recommendation. An API gateway routes requests and handles authentication. An event bus (Kafka) enables async communication between services. Each service owns its data store, following the database-per-service pattern.\n\n### Key Components\n- **Catalog Service**: Product data in Elasticsearch for full-text search, with a relational DB as source of truth\n- **Cart Service**: Redis-backed session store for active carts with persistence to database\n- **Order Service**: Orchestrates the checkout workflow using a saga pattern across inventory, payment, and shipping\n- **Inventory Service**: Manages stock counts with optimistic locking to prevent overselling\n- **Recommendation Engine**: Collaborative filtering using user purchase and browsing history\n\n### Scaling\nUse CQRS to separate read and write models for the catalog. Cache product pages at the CDN level. Use event-driven inventory updates. Pre-compute and cache recommendation results. Auto-scale services independently based on load.\n\n### Trade-offs\n- Microservices enable independent scaling but introduce distributed transaction complexity (saga vs. 2PC)\n- Optimistic locking for inventory is performant but may reject valid orders under extreme contention",
+    "intuition": "An e-commerce platform is a choreography of microservices where the checkout flow is the most critical path, requiring saga-based distributed transactions to coordinate inventory, payment, and order creation. Inventory management under concurrent access is the hardest correctness problem.",
+    "exercises": [
+      {
+        "title": "Implement a Checkout Saga",
+        "description": "Design a saga orchestrator for the checkout process: reserve inventory -> process payment -> create order -> schedule shipping. Implement compensating transactions for each step (e.g., release inventory if payment fails).",
+        "hint": "Use a state machine where each state represents a saga step. On failure at any step, execute compensating actions in reverse order. Persist saga state so recovery can resume after crashes."
+      },
+      {
+        "title": "Design an Inventory System for Flash Sales",
+        "description": "Build an inventory management system that handles 100,000 concurrent purchase attempts for a limited-stock item (e.g., 100 units). Ensure no overselling and fair ordering. Minimize contention on the stock counter.",
+        "hint": "Use Redis DECR atomically to reduce stock. If the result is >= 0, the purchase succeeds. If negative, increment back and reject. This avoids database-level locking entirely for the hot path."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "During a flash sale, the inventory database becomes a bottleneck and orders are rejected or duplicated due to lock contention.",
+        "cause": "Thousands of concurrent transactions compete for row-level locks on the same inventory record, causing timeouts and deadlocks.",
+        "solution": "Move hot inventory counts to Redis with atomic DECR operations. Only write to the database asynchronously after successful Redis decrement. Use a queue to serialize database updates and prevent contention."
+      },
+      {
+        "problem": "A payment service failure leaves orders in an inconsistent state: inventory reserved but payment not processed, causing phantom stock reductions.",
+        "cause": "The distributed transaction lacks proper compensation logic, so a failure mid-checkout leaves partial state across services.",
+        "solution": "Implement a saga with compensating transactions: if payment fails after inventory reservation, automatically release the reserved stock. Use a saga orchestrator that tracks state and retries or compensates on failure."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "How Amazon Handles Flash Sales",
+        "url": "https://blog.bytebytego.com/p/how-to-design-an-e-commerce-system",
+        "type": "article"
+      },
+      {
+        "title": "Microservices Pattern: Saga",
+        "url": "https://microservices.io/patterns/data/saga.html",
+        "type": "article"
+      }
+    ]
+  },
+  "10.3.2": {
+    "body": "## Design a Payment System (Stripe)\n\n### Requirements\n- Process credit card, debit card, and bank transfer payments\n- Ensure exactly-once payment processing with idempotency\n- Support refunds, chargebacks, and multi-currency transactions\n- Comply with PCI-DSS security standards\n- Achieve 99.999% availability for payment processing\n\n### Architecture\nA payment gateway receives payment requests, tokenizes card data, and routes to a payment processor. A ledger service maintains double-entry bookkeeping for all transactions. An idempotency layer prevents duplicate charges. A reconciliation service matches internal records with bank statements. All card data flows through PCI-compliant isolated infrastructure.\n\n### Key Components\n- **Payment Gateway**: Entry point that validates, rate-limits, and routes payment requests\n- **Tokenization Service**: Replaces card numbers with tokens in a PCI-compliant vault\n- **Ledger Service**: Double-entry accounting (every debit has a corresponding credit)\n- **Idempotency Layer**: Stores idempotency keys with request hashes to detect and deduplicate retries\n- **Reconciliation Engine**: Batch process that compares internal ledger with external bank/PSP records\n\n### Scaling\nUse async processing for non-critical paths (notifications, analytics). Synchronous processing only for the critical payment path. Shard the ledger by merchant ID. Use active-active deployment across regions for availability.\n\n### Trade-offs\n- Synchronous payment processing ensures immediate confirmation but adds latency; async is faster but requires webhooks\n- Double-entry ledger provides audit trail but doubles write volume compared to single-entry",
+    "intuition": "A payment system is a ledger-based transaction processor where idempotency and exactly-once semantics are non-negotiable requirements because duplicate charges directly cost money and erode trust. The double-entry bookkeeping model ensures every financial movement is traceable and balanced.",
+    "exercises": [
+      {
+        "title": "Implement Idempotent Payment Processing",
+        "description": "Build a payment endpoint that accepts an idempotency key with each request. If the same key is seen again, return the original response without reprocessing. Handle edge cases: concurrent requests with the same key, and requests that failed midway.",
+        "hint": "Store idempotency_key -> {status, response} in a database. Use a unique constraint on the key. For concurrent requests, the second insert fails and waits for the first to complete before returning its result."
+      },
+      {
+        "title": "Design a Double-Entry Ledger",
+        "description": "Create a ledger system where every payment creates two entries: a debit from the payer's account and a credit to the payee's account. Ensure the sum of all debits always equals the sum of all credits. Support querying account balances.",
+        "hint": "Each transaction creates a pair of entries in a single atomic database transaction. Balance = SUM(credits) - SUM(debits) for an account. Never update balances directly; always derive from the ledger entries."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "A customer is charged twice for the same purchase because the client retried after a network timeout, but the first request had already succeeded.",
+        "cause": "The payment service processed the first request but the response was lost due to a network issue. The client retry created a second charge without idempotency protection.",
+        "solution": "Require an idempotency key with every payment request. Before processing, check if the key exists in the idempotency store. If found, return the stored response. Use a database unique constraint on the key to handle races."
+      },
+      {
+        "problem": "End-of-day reconciliation reveals a mismatch between the internal ledger and the bank's settlement report.",
+        "cause": "Some transactions were recorded internally but failed at the payment processor level, or vice versa, due to network issues or delayed processing.",
+        "solution": "Run automated reconciliation that flags discrepancies. For internal-only records, verify with the payment processor API. For bank-only records, create compensating ledger entries. Implement real-time event streaming from the processor to catch discrepancies early."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "How Stripe Builds Reliable Systems",
+        "url": "https://stripe.com/blog/idempotency",
+        "type": "article"
+      },
+      {
+        "title": "Designing a Payment System",
+        "url": "https://blog.bytebytego.com/p/payment-system",
+        "type": "article"
+      }
+    ]
+  },
+  "10.3.3": {
+    "body": "## Design a Hotel Booking System (Booking.com)\n\n### Requirements\n- Search available rooms by location, dates, guests, and price range\n- Handle concurrent booking attempts without double-booking\n- Support cancellations, modifications, and dynamic pricing\n- Display real-time availability across thousands of hotels\n- Handle peak loads during holiday seasons\n\n### Architecture\nA search service backed by Elasticsearch handles availability queries. A booking service manages reservations with pessimistic locking on room inventory. A pricing service computes dynamic rates based on demand, season, and competition. An event-driven architecture publishes booking events for analytics, notifications, and partner systems.\n\n### Key Components\n- **Search Service**: Elasticsearch with filters for location (geo queries), dates, price, amenities, and ratings\n- **Availability Service**: Manages room inventory using a date-range availability table with row-level locking\n- **Booking Service**: Handles reservation creation, confirmation, modification, and cancellation\n- **Pricing Engine**: Dynamic pricing based on occupancy rate, day of week, season, and competitor rates\n- **Hotel Management Portal**: Interface for hotels to update room details, pricing rules, and blackout dates\n\n### Scaling\nCache search results with short TTLs for popular destinations. Use read replicas for search queries. Shard availability data by hotel ID. Pre-compute availability for popular date ranges. Use a CDN for hotel images and static content.\n\n### Trade-offs\n- Pessimistic locking prevents double-booking but reduces concurrency; optimistic locking improves concurrency but increases retry rates\n- Showing cached availability is fast but may lead to failed bookings; real-time checks are accurate but slow",
+    "intuition": "A hotel booking system is an inventory management problem where the core challenge is preventing double-bookings under concurrent access while maintaining responsive search across millions of room-night combinations. Date-range availability queries are the distinguishing complexity.",
+    "exercises": [
+      {
+        "title": "Implement Room Availability Checking",
+        "description": "Design a database schema and query that efficiently checks if a specific room type is available for a given date range. Handle partial overlaps correctly. The system should support checking availability across hundreds of rooms for a 1-7 night stay.",
+        "hint": "Create an availability table with columns: hotel_id, room_type, date, total_rooms, booked_rooms. A room type is available for a date range if booked_rooms < total_rooms for ALL dates in the range. Use a single query with GROUP BY and HAVING."
+      },
+      {
+        "title": "Design a Concurrent Booking Handler",
+        "description": "Build a booking endpoint that handles multiple users trying to book the last available room simultaneously. Ensure exactly one booking succeeds and others receive a sold-out response. Use database-level locking.",
+        "hint": "Use SELECT ... FOR UPDATE to lock the availability rows for the requested date range. Within the transaction, verify availability, increment booked_rooms, create the reservation, and commit. Failed transactions retry or return sold-out."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Two users simultaneously book the last available room for the same dates, resulting in a double-booking.",
+        "cause": "Both transactions read availability as 1 room remaining, then both decrement it, resulting in -1 available (oversold).",
+        "solution": "Use pessimistic locking (SELECT FOR UPDATE) on the availability rows for the requested date range. The second transaction blocks until the first commits, then sees the updated (zero) availability and rejects the booking."
+      },
+      {
+        "problem": "Search results show rooms as available, but when users try to book, they get 'sold out' errors, creating a frustrating experience.",
+        "cause": "Search results are served from a cache with a stale TTL, and high-demand rooms sell out between the time of search and booking attempt.",
+        "solution": "Use short cache TTLs (30-60 seconds) for high-demand properties. Show approximate availability indicators (e.g., 'Only 2 rooms left'). Implement a soft-hold mechanism that temporarily reserves a room when a user begins checkout."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "How Booking.com Handles Millions of Searches",
+        "url": "https://blog.bytebytego.com/p/hotel-reservation-system",
+        "type": "article"
+      },
+      {
+        "title": "Designing a Hotel Reservation System",
+        "url": "https://www.designgurus.io/course-play/grokking-the-system-design-interview/doc/641b31b1a16a2b1504401e04",
+        "type": "course"
+      }
+    ]
+  },
+  "10.3.4": {
+    "body": "## Design a Ticket Booking System (Ticketmaster)\n\n### Requirements\n- Sell tickets for events with specific seat assignments\n- Handle extreme traffic spikes when popular events go on sale (millions of users in seconds)\n- Prevent overselling and ensure fair access\n- Support seat selection, holds, and time-limited checkout\n- Manage a virtual waiting queue for high-demand events\n\n### Architecture\nA virtual queue (waiting room) absorbs traffic spikes and meters users into the booking flow. A seat map service shows real-time availability. A booking service uses optimistic locking with seat-level granularity. A timer service releases held seats after a checkout timeout. A separate inventory service pre-loads seat data into Redis for fast lookups.\n\n### Key Components\n- **Virtual Queue**: Assigns queue positions and gradually admits users based on available capacity\n- **Seat Map Service**: Real-time seat availability backed by Redis bitmaps per event section\n- **Hold Service**: Temporarily locks selected seats for a user with a 5-10 minute expiration\n- **Booking Service**: Confirms purchase, charges payment, and issues e-tickets\n- **Inventory Service**: Redis-backed seat status (available/held/sold) with atomic transitions\n\n### Scaling\nUse the virtual queue to flatten traffic spikes. Pre-load event inventory into Redis before on-sale. Shard by event ID so different events scale independently. Use WebSockets for real-time seat map updates. Separate read and write paths.\n\n### Trade-offs\n- Seat holds improve UX but reduce effective inventory while users browse; short timeouts frustrate users, long ones block others\n- A strict FIFO queue is fair but slower to fill seats; allowing parallel access fills faster but feels less fair",
+    "intuition": "A ticket booking system is an inventory reservation problem under extreme concurrency where a virtual queue is essential to manage demand that can exceed capacity by 100x in the first seconds of an on-sale event. Seat-level locking with time-bounded holds is the mechanism that prevents both overselling and indefinite resource blocking.",
+    "exercises": [
+      {
+        "title": "Design a Virtual Waiting Queue",
+        "description": "Build a queue system that assigns each user a position when they arrive for a popular event. Admit users in batches (e.g., 1000 at a time) based on system capacity. Show estimated wait times. Handle users who leave the queue.",
+        "hint": "Assign monotonically increasing queue numbers. A background process advances the 'admitted up to' counter based on current system load and completed checkouts. Use WebSocket to notify users when it's their turn."
+      },
+      {
+        "title": "Implement Seat Hold with TTL",
+        "description": "Create a system where selecting a seat places a temporary hold (5 minutes). If the user does not complete checkout, the hold expires and the seat becomes available again. Handle the race condition of hold expiration during payment processing.",
+        "hint": "Store holds in Redis with TTL. Before charging payment, verify the hold still exists and extend it briefly. Use a Lua script for atomic check-and-extend. If the hold expired, abort the payment and inform the user."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Popular event on-sale crashes the system as millions of users flood in simultaneously within the first second.",
+        "cause": "The system tries to serve all users immediately without traffic shaping, overwhelming the booking service, database, and seat map.",
+        "solution": "Implement a virtual waiting room that queues users before the booking flow. Meter admission based on backend capacity. Use pre-warmed Redis instances with event inventory loaded beforehand. Scale the queue infrastructure (static pages) separately from booking."
+      },
+      {
+        "problem": "Users hold seats but abandon checkout, causing popular seats to appear unavailable for extended periods while nobody actually buys them.",
+        "cause": "Hold timeouts are too generous or not enforced, and users open multiple tabs holding different seats without completing any purchase.",
+        "solution": "Set aggressive hold timeouts (5 minutes). Limit holds to one active session per user per event. Run a background reaper that releases expired holds. Show a countdown timer to the user to encourage completion."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "How Ticketmaster Handles Onsale Traffic",
+        "url": "https://tech.ticketmaster.com/2020/07/28/how-we-handle-onsale-traffic/",
+        "type": "article"
+      },
+      {
+        "title": "Designing Ticketmaster",
+        "url": "https://www.designgurus.io/course-play/grokking-the-system-design-interview/doc/641b3457a16a2b1504401e09",
+        "type": "course"
+      }
+    ]
+  },
+  "10.3.5": {
+    "body": "## Design a Food Delivery System (DoorDash)\n\n### Requirements\n- Match customer orders with nearby restaurants and delivery drivers\n- Provide real-time order tracking from placement to delivery\n- Optimize delivery routes and estimated arrival times\n- Handle dynamic pricing (surge) during peak demand\n- Support restaurant menu management and order preparation workflows\n\n### Architecture\nA customer-facing service handles browsing and ordering. An order service manages the order lifecycle as a state machine. A matching service assigns drivers to orders using location and optimization algorithms. A real-time tracking service uses WebSockets to push driver locations. A logistics engine optimizes batching and routing.\n\n### Key Components\n- **Order Service**: State machine managing order states (placed, confirmed, preparing, picked_up, en_route, delivered)\n- **Matching/Dispatch Service**: Assigns drivers based on proximity, current load, and estimated pickup time using geospatial indexing\n- **Location Service**: Ingests driver GPS updates (every 5 seconds) and stores in a geospatial index (Redis GEO or PostGIS)\n- **ETA Service**: Predicts preparation time, pickup time, and delivery time using historical data and real-time traffic\n- **Surge Pricing Engine**: Adjusts delivery fees based on supply (available drivers) and demand (order volume) per zone\n\n### Scaling\nPartition geospatially by delivery zone. Use a geospatial index for efficient nearest-driver queries. Batch nearby orders for the same driver to improve efficiency. Use event sourcing for the order lifecycle to enable replay and analytics.\n\n### Trade-offs\n- Immediate dispatch reduces wait time but may not find the optimal driver; batching orders improves efficiency but adds delay\n- Surge pricing balances supply and demand but frustrates customers; subsidizing drivers during peaks is costly",
+    "intuition": "A food delivery system is a real-time logistics platform that continuously solves a three-sided matching problem between customers, restaurants, and drivers while optimizing for speed, cost, and driver utilization. The geospatial matching and ETA prediction are the core algorithmic challenges.",
+    "exercises": [
+      {
+        "title": "Design a Driver Matching Algorithm",
+        "description": "Build a dispatch system that assigns the best available driver to a new order. Consider: distance to restaurant, driver's current delivery status, estimated restaurant preparation time, and driver acceptance rate. Score and rank candidates.",
+        "hint": "Use Redis GEO to find drivers within a radius of the restaurant. Score each driver: score = w1*(1/distance) + w2*(1/current_orders) + w3*acceptance_rate + w4*match_with_prep_time. Select the highest-scoring available driver."
+      },
+      {
+        "title": "Implement Order State Machine",
+        "description": "Create an order lifecycle state machine with states: placed, restaurant_confirmed, preparing, ready_for_pickup, driver_assigned, picked_up, en_route, delivered, cancelled. Define valid transitions and the events that trigger them. Handle edge cases like cancellation at any stage.",
+        "hint": "Use an enum for states and a transition table mapping (current_state, event) -> next_state. Validate transitions before applying. Emit events on each transition for downstream services. Cancellation has different compensation logic depending on the current state."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "During dinner rush, there are not enough drivers and delivery times spike to over an hour, causing order cancellations.",
+        "cause": "Demand exceeds driver supply in certain zones during peak hours, and the system has no mechanism to balance supply and demand.",
+        "solution": "Implement surge pricing to incentivize more drivers to work during peak hours and to moderate demand. Use predictive models to forecast demand and pre-position drivers. Allow order batching where one driver picks up multiple nearby orders."
+      },
+      {
+        "problem": "ETA estimates are consistently inaccurate, showing 30 minutes when actual delivery takes 50+ minutes, frustrating customers.",
+        "cause": "The ETA model uses static estimates for restaurant preparation time and does not account for real-time factors like restaurant backlog, traffic conditions, or driver delays.",
+        "solution": "Build an ML-based ETA model trained on historical delivery data incorporating: real-time restaurant queue length, live traffic data, time of day, weather, and driver speed patterns. Update ETAs dynamically as the order progresses through each stage."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Building DoorDash's Dispatch System",
+        "url": "https://doordash.engineering/2020/02/18/how-doordash-built-an-awesome-dispatch-system/",
+        "type": "article"
+      },
+      {
+        "title": "System Design: Food Delivery App",
+        "url": "https://www.karanpratapsingh.com/courses/system-design/uber",
+        "type": "article"
+      }
+    ]
+  },
+  "10.4.1": {
+    "body": "## Design Search Autocomplete (Google)\n\n### Requirements\n- Return top-k suggestions as user types each character\n- Suggestions ranked by popularity, freshness, and personalization\n- Latency under 100ms per keystroke; support billions of queries/day\n- Handle multi-language input and trending queries in near real-time\n\n### Architecture\nA Trie (prefix tree) serves as the core data structure, stored in-memory across distributed nodes. An offline pipeline aggregates query logs, computes frequency scores, and rebuilds the trie periodically. A real-time layer captures trending queries via stream processing and merges them into the trie.\n\n### Key Components\n- **Trie Nodes**: Store top-k results at each prefix to avoid traversal at query time\n- **Data Collection Service**: Aggregates raw query logs into frequency tables\n- **Ranking Service**: Blends popularity, recency, and user context into a final score\n- **Zookeeper/Consistent Hashing**: Partition tries by prefix range across nodes\n\n### Scaling\nShard tries alphabetically or by hash prefix. Use read replicas and CDN edge caching for hot prefixes. Replicate across regions for low latency.\n\n### Trade-offs\n- Pre-computed top-k per node trades storage for speed\n- Periodic rebuild vs. real-time update: freshness vs. complexity\n- Personalization increases relevance but adds privacy and storage cost",
+    "intuition": "Search autocomplete is fundamentally a prefix-lookup problem where pre-computing the top results at every trie node turns an expensive traversal into an O(1) read. The real challenge is keeping those pre-computed results fresh as query popularity shifts in real time.",
+    "exercises": [
+      {
+        "title": "Build a Basic Trie with Top-K",
+        "description": "Implement a trie that stores the top-5 suggestions at each node. Insert a corpus of 10,000 queries with frequencies and benchmark prefix lookup latency.",
+        "hint": "At each node keep a min-heap of size k; when inserting, bubble up frequency changes from leaf to root."
+      },
+      {
+        "title": "Simulate Trending Query Injection",
+        "description": "Create a stream simulator that emits 'trending' queries at high frequency. Merge these into your trie in near real-time and verify that suggestions update within 5 seconds.",
+        "hint": "Use a separate in-memory buffer for trending queries and merge it with the main trie on a short timer, replacing entries only when the trending score exceeds existing ones."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Stale suggestions persist for hours after a trending event ends",
+        "cause": "The offline trie rebuild runs on a long schedule and the real-time layer only adds, never demotes entries",
+        "solution": "Implement a TTL or exponential decay on trending scores so entries naturally expire, and run incremental trie updates every few minutes."
+      },
+      {
+        "problem": "Memory usage spikes when the full trie is loaded on every node",
+        "cause": "No sharding; each node holds the entire prefix space",
+        "solution": "Partition the trie by prefix ranges using consistent hashing and route queries to the responsible shard."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Design Autocomplete System - System Design Interview",
+        "url": "https://www.youtube.com/watch?v=us0qySiUsGU",
+        "type": "video"
+      },
+      {
+        "title": "How We Built Prefixy: A Scalable Prefix Search Service",
+        "url": "https://medium.com/@prefixyteam/how-we-built-prefixy-a-scalable-prefix-search-service-for-powering-autocomplete-c20f98e2abb1",
+        "type": "article"
+      }
+    ]
+  },
+  "10.4.2": {
+    "body": "## Design a Distributed Task Scheduler\n\n### Requirements\n- Schedule one-time and recurring tasks (cron-like) across a cluster\n- Guarantee at-least-once execution with distributed locking\n- Support priorities, retries with backoff, and dead-letter handling\n- Scale to millions of scheduled tasks with sub-second trigger accuracy\n\n### Architecture\nTasks are persisted in a durable store (e.g., MySQL or Cassandra) partitioned by scheduled time. A dispatcher layer polls for due tasks, acquires distributed locks, and dispatches work to a pool of executors. A heartbeat mechanism detects executor failures and re-queues tasks.\n\n### Key Components\n- **Task Store**: Time-partitioned table holding task metadata, schedule, retries\n- **Dispatcher**: Leader-elected or sharded process that scans for due tasks\n- **Executor Pool**: Stateless workers that run task payloads; report success/failure\n- **Dead-Letter Queue**: Captures tasks that exceed max retries for investigation\n\n### Scaling\nPartition the timeline into buckets; assign each bucket to a dispatcher shard. Use consistent hashing to rebalance when dispatchers join or leave. Executors auto-scale based on queue depth.\n\n### Trade-offs\n- At-least-once is simpler but requires idempotent task handlers\n- Polling vs. push: polling is simpler but adds latency; push via message queue is more responsive\n- Storing tasks in a relational DB gives strong consistency; NoSQL gives better write throughput",
+    "intuition": "A distributed task scheduler is essentially a time-indexed work queue with distributed coordination to ensure every task fires exactly when it should without duplicates. The hardest part is making the dispatcher layer itself fault-tolerant so that no scheduled task is ever lost or double-fired.",
+    "exercises": [
+      {
+        "title": "Build a Time-Bucketed Dispatcher",
+        "description": "Implement a dispatcher that partitions upcoming tasks into 1-second buckets, scans the current bucket, and dispatches tasks to worker threads. Measure trigger accuracy.",
+        "hint": "Use a sorted data structure (e.g., a priority queue or Redis sorted set with score = timestamp) and poll the current-second bucket every 200ms."
+      },
+      {
+        "title": "Add Retry with Exponential Backoff",
+        "description": "Extend your scheduler so that failed tasks are retried up to 3 times with exponential backoff (1s, 2s, 4s). After max retries, move to a dead-letter store.",
+        "hint": "On failure, compute the next retry time as now + base * 2^attempt, update the task's scheduled time, and re-insert it into the task store."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Tasks are triggered twice when a dispatcher fails over mid-execution",
+        "cause": "The lock was released on failover before the executor finished, so the new dispatcher re-dispatched the task",
+        "solution": "Use fencing tokens: the executor checks that its token is still valid before committing results; stale tokens are rejected."
+      },
+      {
+        "problem": "Hot time buckets cause dispatcher lag during bulk-scheduled events",
+        "cause": "Thousands of tasks share the same scheduled second, overwhelming a single dispatcher shard",
+        "solution": "Sub-partition hot buckets by task ID hash and spread them across multiple dispatcher shards."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Distributed Task Scheduling at Airbnb",
+        "url": "https://medium.com/airbnb-engineering/dynein-building-a-distributed-delayed-job-queueing-system-93ab10f05f99",
+        "type": "article"
+      },
+      {
+        "title": "Designing a Distributed Job Scheduler",
+        "url": "https://www.youtube.com/watch?v=ta5wFuKR0PM",
+        "type": "video"
+      }
+    ]
+  },
+  "10.4.3": {
+    "body": "## Design a Web Crawler (Google)\n\n### Requirements\n- Crawl billions of web pages, respecting robots.txt and politeness policies\n- Detect and handle duplicate content, redirect chains, and spider traps\n- Prioritize pages by importance (PageRank, freshness, domain authority)\n- Store raw HTML and extracted metadata for downstream indexing\n\n### Architecture\nA URL Frontier holds URLs to crawl, ordered by priority and politeness constraints. Fetcher workers pull URLs, download pages, and pass HTML to a processing pipeline that extracts links, deduplicates content, and feeds new URLs back to the frontier. A central DNS resolver cache reduces lookup latency.\n\n### Key Components\n- **URL Frontier**: Priority queue with per-domain rate limiting (back queue per host)\n- **Fetcher Workers**: Async HTTP clients that respect crawl-delay directives\n- **Content Deduplicator**: SimHash or MinHash fingerprint to detect near-duplicates\n- **Blob Store**: S3 or HDFS for raw HTML; metadata goes to a search index pipeline\n\n### Scaling\nPartition the frontier by domain hash. Run fetcher workers across regions close to target servers. Use consistent hashing to ensure one domain is crawled by one worker (politeness).\n\n### Trade-offs\n- Breadth-first discovers more domains; best-first finds important pages faster\n- Aggressive crawling gets fresher data but risks IP bans\n- Storing all raw HTML is expensive but enables re-processing without re-crawling",
+    "intuition": "A web crawler is a massive producer-consumer system where the URL frontier is the central coordination point, balancing discovery speed against politeness constraints. The key insight is that per-host queuing and rate limiting are not optional niceties but fundamental architectural requirements.",
+    "exercises": [
+      {
+        "title": "Implement a Polite URL Frontier",
+        "description": "Build a URL frontier that maintains per-domain back-queues with configurable crawl-delay. Verify that no domain is hit more than once per its specified delay.",
+        "hint": "Use a map of domain -> queue plus a global priority queue of (next_allowed_time, domain) to decide which domain to serve next."
+      },
+      {
+        "title": "Near-Duplicate Detection with SimHash",
+        "description": "Implement SimHash fingerprinting on a set of 1,000 HTML documents. Detect pages with >90% similarity and mark them as duplicates.",
+        "hint": "Convert each document to a set of shingles (3-word n-grams), hash each shingle, then compute a bitwise majority across all hashes to get the fingerprint."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Crawler gets stuck in a spider trap generating infinite URLs",
+        "cause": "Dynamic pages with session IDs or calendar widgets create unbounded URL variations",
+        "solution": "Limit crawl depth per domain, normalize URLs by stripping known tracking parameters, and cap the number of URLs stored per host."
+      },
+      {
+        "problem": "DNS resolution becomes a bottleneck slowing the entire crawl",
+        "cause": "Each fetch does a fresh DNS lookup, and the default resolver cannot handle the query volume",
+        "solution": "Run a local DNS cache (e.g., dnsmasq) and batch DNS pre-resolution for queued URLs ahead of fetch time."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "The Anatomy of a Large-Scale Hypertextual Web Search Engine (Brin & Page)",
+        "url": "https://research.google/pubs/pub334/",
+        "type": "paper"
+      },
+      {
+        "title": "Mercator: A Scalable, Extensible Web Crawler",
+        "url": "https://courses.cs.washington.edu/courses/cse454/15wi/papers/mercator.pdf",
+        "type": "paper"
+      }
+    ]
+  },
+  "10.4.4": {
+    "body": "## Design a Content Delivery Network (CDN)\n\n### Requirements\n- Serve static and dynamic content from edge locations closest to users\n- Support cache invalidation, TTL-based expiry, and origin shielding\n- Handle TLS termination, DDoS mitigation, and HTTP/2+ at the edge\n- Deliver 99.99% availability with sub-50ms latency for cached content\n\n### Architecture\nA global network of PoPs (Points of Presence) each running reverse proxy/cache servers. DNS-based or Anycast routing directs users to the nearest PoP. On cache miss, the edge fetches from a mid-tier shield cache before hitting the origin, reducing origin load. A control plane pushes configuration and invalidation commands.\n\n### Key Components\n- **Edge Cache Servers**: Nginx/Varnish nodes with SSD-backed LRU caches\n- **Shield/Mid-Tier Cache**: Aggregates cache misses from multiple edges to protect origin\n- **DNS/Anycast Router**: Directs users to the optimal PoP based on latency and health\n- **Control Plane**: Distributes config, purge commands, and TLS certificates\n\n### Scaling\nAdd PoPs in underserved regions. Use tiered caching (edge -> shield -> origin) to absorb traffic spikes. Horizontally scale edge nodes within a PoP behind a load balancer.\n\n### Trade-offs\n- Push vs. pull caching: push guarantees freshness but wastes bandwidth on unpopular content\n- Long TTLs improve hit rate but delay content updates\n- Anycast simplifies routing but complicates debugging and failover",
+    "intuition": "A CDN is a hierarchical caching system where the fundamental trade-off is freshness vs. latency: the closer content is cached to the user, the faster it is served, but the harder it is to keep current. The shield tier is the key architectural insight that collapses thousands of edge misses into a single origin request.",
+    "exercises": [
+      {
+        "title": "Simulate Tiered Caching",
+        "description": "Build a simulation with 5 edge caches, 1 shield cache, and 1 origin. Generate a Zipfian request distribution and measure hit rates at each tier as you vary TTL.",
+        "hint": "Model each cache as an LRU map with a max size. On miss, escalate to the next tier. Track hits/misses at each level separately."
+      },
+      {
+        "title": "Implement Cache Invalidation via Purge Propagation",
+        "description": "Design a purge system where the control plane issues an invalidation that reaches all edge nodes within 5 seconds. Test with 10 simulated edge nodes.",
+        "hint": "Use a pub/sub fanout (e.g., Redis Pub/Sub or a message queue topic) where each edge subscribes and immediately evicts the purged key on receipt."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Origin server overwhelmed after a mass cache purge",
+        "cause": "All edges simultaneously refetch the purged content, creating a thundering herd on origin",
+        "solution": "Use request coalescing at the shield tier: only one request goes to origin while others wait, and implement stale-while-revalidate to serve old content briefly."
+      },
+      {
+        "problem": "Users in a specific region get stale content indefinitely",
+        "cause": "The PoP in that region has a misconfigured TTL override ignoring purge commands",
+        "solution": "Add health checks and config version verification in the control plane; flag PoPs running stale configurations and force a config resync."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "How Does a CDN Work? - Cloudflare",
+        "url": "https://www.cloudflare.com/learning/cdn/what-is-a-cdn/",
+        "type": "article"
+      },
+      {
+        "title": "Serving 100 Gbps from an Open Source CDN - Netflix",
+        "url": "https://netflixtechblog.com/serving-100-gbps-from-an-open-connect-appliance-cdb51dda3b99",
+        "type": "article"
+      }
+    ]
+  },
+  "10.4.5": {
+    "body": "## Design a Metrics/Monitoring System (Datadog)\n\n### Requirements\n- Ingest millions of time-series data points per second from agents on every host\n- Support multi-dimensional tagging (host, service, region, custom labels)\n- Provide real-time dashboards, alerting with thresholds/anomaly detection\n- Retain high-resolution data for 15 days, downsampled data for 1+ year\n\n### Architecture\nAgents on each host collect and batch metrics, sending them to a regional intake API. The intake writes to a stream (Kafka) consumed by a storage writer and an alerting evaluator in parallel. Storage uses a purpose-built time-series database with columnar compression. A query engine serves dashboard and alert queries.\n\n### Key Components\n- **Agent**: Collects system and application metrics, pre-aggregates, batches sends\n- **Intake/Router**: Validates, tags, and routes metrics to Kafka topics by type\n- **TSDB Storage**: Write-optimized columnar store (e.g., InfluxDB, custom engine) with rollup compaction\n- **Alert Evaluator**: Continuously evaluates alert rules against the stream; fires notifications\n\n### Scaling\nPartition by metric name + tag combination. Use rollup/downsampling jobs to compress old data. Separate read and write paths so dashboard queries don't impact ingestion.\n\n### Trade-offs\n- Pre-aggregation at the agent reduces volume but loses granularity\n- Pull-based collection (Prometheus) vs. push-based: pull is simpler to debug; push handles ephemeral hosts better\n- Exact alerting on raw data is expensive; evaluating on rolled-up data may miss brief spikes",
+    "intuition": "A monitoring system is a specialized streaming pipeline where every metric is a time-series append, and the core tension is between retaining high-resolution data for accurate alerting and compressing it for cost-effective long-term storage. Tagging is what makes the system powerful, but tag cardinality is what makes it expensive.",
+    "exercises": [
+      {
+        "title": "Build a Simple TSDB with Rollups",
+        "description": "Implement an in-memory time-series store that accepts (metric, tags, timestamp, value) tuples. Add a background job that rolls up data older than 1 hour into 1-minute averages.",
+        "hint": "Store raw points in a sorted list per series. The rollup job groups points by minute, computes avg/min/max, replaces the raw points with the summary."
+      },
+      {
+        "title": "Implement a Threshold Alert Evaluator",
+        "description": "Build an evaluator that checks a metric every 10 seconds and fires an alert if the value exceeds a threshold for 3 consecutive evaluation windows.",
+        "hint": "Maintain a counter per alert rule; increment on breach, reset on normal. Fire when counter reaches 3. This avoids alerting on transient spikes."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "High-cardinality tags (e.g., user_id) cause the TSDB to run out of memory",
+        "cause": "Each unique tag combination creates a new time series, and unbounded tag values explode the series count",
+        "solution": "Enforce a cardinality limit per metric, reject or drop tags exceeding the limit, and educate users to use low-cardinality tags for metrics."
+      },
+      {
+        "problem": "Alert evaluator falls behind during ingestion spikes, causing delayed alerts",
+        "cause": "The evaluator reads from the same Kafka consumer group as storage and cannot keep up",
+        "solution": "Give the alert evaluator its own consumer group with higher priority partitioning, and allow it to evaluate on a sampled or pre-aggregated stream."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Gorilla: A Fast, Scalable, In-Memory Time Series Database (Facebook)",
+        "url": "https://www.vldb.org/pvldb/vol8/p1816-teller.pdf",
+        "type": "paper"
+      },
+      {
+        "title": "Writing a Time Series Database from Scratch - Prometheus",
+        "url": "https://fabxc.org/tsdb/",
+        "type": "article"
+      }
+    ]
+  },
+  "10.5.1": {
+    "body": "## Design a Social Graph (Facebook/LinkedIn)\n\n### Requirements\n- Store billions of nodes (users) and hundreds of billions of edges (connections)\n- Support queries: mutual friends, degrees of separation, friend recommendations\n- Handle asymmetric (follow) and symmetric (friend) relationship types\n- Serve graph traversal queries within 100ms for up to 3 hops\n\n### Architecture\nAn adjacency list representation stored in a distributed key-value or graph database, partitioned by user ID. A graph query engine executes BFS/DFS traversals, with caching for hot nodes (celebrities). An offline pipeline computes friend-of-friend recommendations and preloads them.\n\n### Key Components\n- **Graph Store**: Adjacency lists in TAO-like system (Facebook) or a graph DB (Neo4j/JanusGraph)\n- **Cache Layer**: In-memory cache of adjacency lists for high-degree nodes\n- **Traversal Engine**: Executes bounded BFS for mutual friends, shortest path queries\n- **Recommendation Pipeline**: Offline MapReduce/Spark jobs compute PYMK (People You May Know)\n\n### Scaling\nPartition by user ID with replication. Co-locate friends' adjacency lists when possible to reduce cross-shard hops. Use bidirectional BFS for shortest path to reduce search space exponentially.\n\n### Trade-offs\n- Graph databases are natural but harder to scale; key-value stores scale but require application-level traversal\n- Precomputing recommendations is stale but fast; real-time traversal is fresh but expensive\n- Storing reverse edges doubles storage but is essential for efficient fan-in queries",
+    "intuition": "A social graph system is an adjacency-list store where the fundamental challenge is that graph traversals touch many shards in a distributed setting, making multi-hop queries expensive. The practical solution is to precompute the most common queries offline and cache aggressively for high-degree nodes.",
+    "exercises": [
+      {
+        "title": "Implement Bidirectional BFS for Mutual Friends",
+        "description": "Build a graph with 100,000 nodes and random edges. Implement bidirectional BFS to find mutual friends between two users and compare performance against naive single-source BFS.",
+        "hint": "Run BFS simultaneously from both users, expanding the smaller frontier first. Terminate when the two frontiers intersect."
+      },
+      {
+        "title": "Build a Friend-of-Friend Recommendation Engine",
+        "description": "Given a user, compute the top-10 friend-of-friend suggestions ranked by number of mutual connections. Filter out existing friends.",
+        "hint": "For each friend of the user, iterate their friends. Use a counter map to tally how many times each candidate appears, then sort by count."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Graph traversal queries timeout for celebrity accounts with millions of followers",
+        "cause": "High-degree nodes cause BFS to explode, touching millions of adjacency lists in a single hop",
+        "solution": "Cap the traversal fan-out by sampling edges for high-degree nodes, and serve precomputed results for known celebrity accounts."
+      },
+      {
+        "problem": "Cross-shard graph queries have high latency due to network round trips",
+        "cause": "Friends are randomly distributed across shards, so a 2-hop query may hit dozens of shards",
+        "solution": "Use graph-aware partitioning (e.g., METIS) to co-locate densely connected subgraphs on the same shard, reducing cross-shard hops."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "TAO: Facebook's Distributed Data Store for the Social Graph",
+        "url": "https://www.usenix.org/system/files/conference/atc13/atc13-bronson.pdf",
+        "type": "paper"
+      },
+      {
+        "title": "System Design: Social Graph at LinkedIn Scale",
+        "url": "https://www.youtube.com/watch?v=hIScGQH3mTc",
+        "type": "video"
+      }
+    ]
+  },
+  "10.5.2": {
+    "body": "## Design a Ride-Sharing Service (Uber)\n\n### Requirements\n- Match riders with nearby drivers in real time (under 5 seconds)\n- Track live driver locations with updates every 3-5 seconds\n- Handle surge pricing based on supply/demand ratios per zone\n- Support trip lifecycle: request, match, pickup, in-progress, complete, payment\n\n### Architecture\nDrivers continuously report GPS locations to a Location Service that indexes them in a geospatial data structure. When a rider requests a trip, the Matching Service queries nearby available drivers, ranks them, and dispatches. A Trip Service manages the state machine for each ride. A separate Pricing Service computes dynamic fares.\n\n### Key Components\n- **Location Service**: Geohash or QuadTree index of active driver positions in Redis/memory\n- **Matching Service**: Finds k-nearest available drivers, scores by ETA, rating, direction\n- **Trip Service**: State machine (requested -> matched -> en_route -> in_trip -> completed)\n- **Pricing Service**: Computes base fare + surge multiplier based on zone demand/supply ratio\n\n### Scaling\nPartition geographically by city or geohash prefix. Location updates are write-heavy; use in-memory stores. Matching is compute-heavy; scale independently. Use cell-based architecture for fault isolation per city.\n\n### Trade-offs\n- Geohash is simpler but creates edge-of-cell boundary issues; QuadTree adapts to density but is harder to distribute\n- Greedy matching (nearest driver) is fast but globally suboptimal; batch matching optimizes overall wait time but adds latency\n- Frequent location updates improve accuracy but increase bandwidth and processing cost",
+    "intuition": "A ride-sharing system is a real-time geospatial matching problem where the core challenge is maintaining a constantly-updating spatial index of drivers and querying it fast enough to match riders before drivers move significantly. The cell-based architecture ensures that a failure in one city never cascades to another.",
+    "exercises": [
+      {
+        "title": "Build a Geohash-Based Nearest Driver Finder",
+        "description": "Index 10,000 simulated driver locations using geohashes. Given a rider location, find the 5 nearest available drivers by expanding geohash rings. Measure query latency.",
+        "hint": "Start with the rider's geohash cell, check for drivers. If fewer than 5 found, expand to the 8 neighboring cells. Repeat until enough candidates, then sort by actual distance."
+      },
+      {
+        "title": "Implement a Simple Surge Pricing Model",
+        "description": "Divide a city into a grid of zones. Track rider requests and available drivers per zone. Compute a surge multiplier when demand/supply ratio exceeds 1.5x.",
+        "hint": "Use a sliding window counter for requests and a point-in-time count for available drivers per zone. Multiplier = max(1.0, demand/supply * scaling_factor)."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Riders at geohash cell boundaries get matched with far-away drivers while nearby ones in the adjacent cell are ignored",
+        "cause": "The search only checks the rider's own geohash cell and misses drivers just across the border",
+        "solution": "Always search the target cell plus all adjacent cells (9-cell neighborhood), then filter by actual Haversine distance."
+      },
+      {
+        "problem": "Driver location updates are lost during peak hours causing stale matches",
+        "cause": "The location service write throughput is saturated and starts dropping UDP packets",
+        "solution": "Use a partitioned in-memory store (e.g., Redis Cluster) for location writes, and switch to TCP with backpressure to avoid silent data loss."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Uber's Real-Time Market Platform",
+        "url": "https://eng.uber.com/marketplace-real-time-market-platform/",
+        "type": "article"
+      },
+      {
+        "title": "System Design Interview: Uber/Lyft Ride Sharing",
+        "url": "https://www.youtube.com/watch?v=J3DY3Te3A_A",
+        "type": "video"
+      }
+    ]
+  },
+  "10.5.3": {
+    "body": "## Design an Online Code Editor (Replit)\n\n### Requirements\n- Provide a browser-based IDE with syntax highlighting, autocomplete, and file management\n- Execute user code in isolated sandboxed environments per session\n- Support multiple programming languages with language-specific toolchains\n- Allow users to share and fork projects; persist workspace state\n\n### Architecture\nA web frontend delivers the editor UI (Monaco/CodeMirror). Each user session spins up an isolated container (Docker/microVM) with the appropriate language runtime. A WebSocket connection streams terminal I/O between browser and container. A workspace service persists files to object storage.\n\n### Key Components\n- **Editor Frontend**: Monaco editor in browser with LSP integration for autocomplete\n- **Container Orchestrator**: Provisions, monitors, and recycles per-user sandboxes (Kubernetes/Firecracker)\n- **Execution Engine**: Runs code inside the container, captures stdout/stderr, enforces resource limits\n- **Workspace Storage**: Git-backed or object-store-backed file persistence per project\n\n### Scaling\nPre-warm container pools per language to reduce cold start. Use Firecracker microVMs for fast boot (<150ms) and strong isolation. Auto-scale container hosts based on active session count.\n\n### Trade-offs\n- Containers are flexible but heavier; microVMs are lighter and more secure but less compatible\n- Full LSP per session provides rich IDE features but is resource-intensive\n- Persistent storage per project increases cost; ephemeral workspaces are cheaper but frustrate users",
+    "intuition": "An online code editor is fundamentally a thin browser client connected to a per-user sandboxed compute environment, where the main challenge is provisioning and isolating thousands of concurrent sandboxes with low startup latency. Pre-warming container pools is the critical optimization that makes the experience feel instant.",
+    "exercises": [
+      {
+        "title": "Build a WebSocket-Based Terminal Relay",
+        "description": "Create a server that spawns a subprocess (e.g., Python REPL) per WebSocket connection, relays stdin/stdout between the browser and the process, and cleans up on disconnect.",
+        "hint": "Use pty.openpty() to create a pseudo-terminal, spawn the process attached to it, and use select/poll to shuttle bytes between the pty and the WebSocket."
+      },
+      {
+        "title": "Implement Resource-Limited Code Execution",
+        "description": "Build an execution engine that runs user-submitted code with a 5-second timeout, 256MB memory limit, and no network access. Test with CPU bombs and fork bombs.",
+        "hint": "Use cgroups (Linux) or ulimit to enforce memory and CPU limits. Use seccomp or a network namespace with no interfaces to block network access."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Cold start takes 10+ seconds when a user selects an uncommon language",
+        "cause": "No pre-warmed containers exist for that language, so the system must pull the image and start fresh",
+        "solution": "Maintain a small pre-warmed pool for all supported languages, and use layered container images with a shared base to speed up image pulls."
+      },
+      {
+        "problem": "A malicious user escapes the container and accesses host resources",
+        "cause": "The container runs with excessive privileges or shares the host network namespace",
+        "solution": "Use rootless containers or Firecracker microVMs, apply seccomp profiles, drop all capabilities, and run with a read-only root filesystem."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "How Replit Went From a REPL to a Full IDE",
+        "url": "https://blog.replit.com/ide",
+        "type": "article"
+      },
+      {
+        "title": "Firecracker: Lightweight Virtualization for Serverless Applications",
+        "url": "https://www.usenix.org/system/files/nsdi20-agache.pdf",
+        "type": "paper"
+      }
+    ]
+  },
+  "10.5.4": {
+    "body": "## Design a Real-Time Collaborative Editor (Google Docs)\n\n### Requirements\n- Multiple users edit the same document simultaneously with <100ms perceived latency\n- All users converge to the same document state regardless of edit order\n- Support rich text formatting, comments, cursor presence, and revision history\n- Handle offline edits that sync when connectivity is restored\n\n### Architecture\nClients apply edits locally for instant feedback, then send operations to a collaboration server. The server uses Operational Transformation (OT) or a CRDT to merge concurrent edits deterministically. Transformed operations are broadcast to all other clients. A persistence layer stores the document and its full operation history.\n\n### Key Components\n- **Client Editor**: Applies local edits optimistically; queues operations for server sync\n- **OT/CRDT Engine**: Transforms concurrent operations to preserve intent (OT) or uses conflict-free merge (CRDT)\n- **Collaboration Server**: Serializes operations, assigns global order, broadcasts to clients\n- **Document Store**: Persists document snapshots and operation logs for history/undo\n\n### Scaling\nPartition by document: each document is handled by one server (sticky sessions). Use sharding across millions of documents. Take periodic snapshots to truncate the operation log.\n\n### Trade-offs\n- OT is well-proven (Google Docs) but requires a central server for ordering; CRDTs enable P2P but are more complex and memory-heavy\n- Storing every operation enables full revision history but grows storage linearly\n- Optimistic local apply provides instant UX but requires complex conflict resolution",
+    "intuition": "Real-time collaboration is a distributed consensus problem disguised as a text editing feature: every client has a local copy and the system must ensure all copies converge to the same state despite concurrent edits arriving in different orders. OT achieves this by transforming operations against each other; CRDTs achieve it by making operations inherently commutative.",
+    "exercises": [
+      {
+        "title": "Implement Basic Operational Transformation",
+        "description": "Build an OT engine for a plain-text document supporting insert(pos, char) and delete(pos) operations. Write a transform function that correctly handles two concurrent inserts at different positions.",
+        "hint": "For two inserts: if op1.pos <= op2.pos, shift op2.pos right by 1 (and vice versa). For insert vs delete: if insert.pos <= delete.pos, shift delete.pos right by 1."
+      },
+      {
+        "title": "Build a Collaborative Editing Server",
+        "description": "Create a WebSocket server that accepts operations from multiple clients, applies OT to resolve conflicts, and broadcasts the transformed operations to all connected clients.",
+        "hint": "Maintain a server-side operation log. When a client sends an op based on revision N, transform it against all operations after N in the log before applying and broadcasting."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Documents diverge after a rapid sequence of concurrent edits from 3+ users",
+        "cause": "The OT transform function does not handle the composition of three-way concurrent transforms correctly",
+        "solution": "Ensure the server imposes a total order on operations: each client must acknowledge the server's version before sending the next op, and transform against the full server history."
+      },
+      {
+        "problem": "Operation log grows unboundedly for long-lived documents, slowing down new client joins",
+        "cause": "New clients must replay the entire operation history to reconstruct the document",
+        "solution": "Periodically snapshot the document state and truncate the log. New clients load the latest snapshot and only replay operations after it."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Operational Transformation in Real-Time Group Editors",
+        "url": "https://svn.apache.org/repos/asf/incubator/wave/whitepapers/operational-transform/operational-transform.html",
+        "type": "article"
+      },
+      {
+        "title": "CRDTs: The Hard Parts - Martin Kleppmann",
+        "url": "https://www.youtube.com/watch?v=x7drE24geUw",
+        "type": "video"
+      }
+    ]
+  },
+  "10.6.1": {
+    "body": "## Design a Distributed Message Queue (Kafka)\n\n### Requirements\n- Publish and consume millions of messages per second with low latency\n- Guarantee ordering within a partition and at-least-once delivery\n- Support consumer groups, offset management, and message replay\n- Retain messages for configurable durations (hours to weeks)\n\n### Architecture\nProducers send messages to a cluster of brokers. Each topic is split into partitions, distributed across brokers. Messages within a partition are appended to an immutable, sequential log. Consumers in a group are each assigned a subset of partitions and track their offset. Replication across brokers provides fault tolerance.\n\n### Key Components\n- **Broker**: Stores partition log segments on disk, serves produce/consume requests\n- **Partition Log**: Append-only file with sequential offsets; zero-copy reads via sendfile()\n- **Consumer Group Coordinator**: Assigns partitions to consumers, manages rebalancing\n- **Replication Manager**: Maintains in-sync replicas (ISR) with leader-follower protocol\n\n### Scaling\nAdd partitions to increase parallelism; add brokers and rebalance partitions. Producers partition by key hash for ordering guarantees. Use tiered storage to offload old segments to S3.\n\n### Trade-offs\n- More partitions increase parallelism but add rebalancing overhead and metadata cost\n- At-least-once is default; exactly-once requires idempotent producers and transactional consumers\n- Long retention enables replay but increases storage cost; tiered storage mitigates this",
+    "intuition": "A distributed message queue is an append-only distributed log where the key insight is that sequential disk I/O (appending) is fast enough to rival network throughput, eliminating the need for complex in-memory caching. Partitions are the unit of parallelism, ordering, and fault tolerance all at once.",
+    "exercises": [
+      {
+        "title": "Implement a Partition Log with Segment Rotation",
+        "description": "Build an append-only log that writes to segment files. When a segment exceeds 1MB, rotate to a new segment. Support reading from any offset across segments.",
+        "hint": "Maintain an index mapping offset ranges to segment files. On read, binary search the index to find the right segment, then seek to the offset within it."
+      },
+      {
+        "title": "Build a Consumer Group Rebalancer",
+        "description": "Implement partition assignment for a consumer group: when consumers join or leave, reassign partitions evenly. Test with 12 partitions and dynamically adding/removing consumers.",
+        "hint": "Use the round-robin or range assignor strategy. On rebalance, sort partitions and consumers, then assign partitions[i] to consumer[i % num_consumers]."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Consumer rebalances cause processing pauses of 30+ seconds during deployments",
+        "cause": "The stop-the-world rebalance protocol revokes all partitions before reassigning, causing a full pause",
+        "solution": "Use incremental cooperative rebalancing: only revoke partitions that are moving, allowing consumers to continue processing their retained partitions."
+      },
+      {
+        "problem": "A slow consumer causes the entire consumer group to lag behind",
+        "cause": "One consumer cannot keep up with its assigned partitions, and the group cannot make progress past those offsets",
+        "solution": "Monitor per-consumer lag and reassign partitions from slow consumers. Consider splitting the slow consumer's partitions to other group members or scaling out."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "The Log: What Every Software Engineer Should Know About Real-Time Data",
+        "url": "https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying",
+        "type": "article"
+      },
+      {
+        "title": "Kafka: A Distributed Messaging System for Log Processing",
+        "url": "https://www.microsoft.com/en-us/research/wp-content/uploads/2017/09/Kafka.pdf",
+        "type": "paper"
+      }
+    ]
+  },
+  "10.6.2": {
+    "body": "## Design an Email Service (Gmail)\n\n### Requirements\n- Send and receive emails supporting SMTP, IMAP, and POP3 protocols\n- Store billions of emails with full-text search across subject, body, and attachments\n- Provide spam filtering, labels/folders, threaded conversations, and attachment handling\n- Support push notifications for new mail with sub-second delivery\n\n### Architecture\nIncoming mail arrives via SMTP servers, passes through a spam/virus filter pipeline, and is stored in a distributed mail store indexed per user. A search service indexes email content using an inverted index. Outgoing mail goes through a sending pipeline with DKIM/SPF signing. A notification service pushes new-mail events to connected clients.\n\n### Key Components\n- **SMTP Gateway**: Receives inbound email, performs MX lookup for outbound routing\n- **Spam Filter Pipeline**: Multi-stage filter (SPF/DKIM check, ML classifier, rule engine)\n- **Mail Store**: Bigtable-like storage with per-user partitioning and message deduplication\n- **Search Index**: Per-user inverted index updated asynchronously on mail receipt\n\n### Scaling\nPartition by user ID; each user's mailbox lives on one shard with replication. Blob storage for large attachments (referenced by pointer in the mail store). Separate the search index into its own cluster.\n\n### Trade-offs\n- Per-user partitioning simplifies access patterns but creates hot shards for heavy users\n- Synchronous spam filtering adds latency to delivery; async risks delivering spam first\n- Full-text search of attachments requires OCR/parsing pipelines, adding complexity",
+    "intuition": "An email service is a per-user document store with a complex ingestion pipeline, where the fundamental design insight is that emails are written once and read many times, so optimizing the read path (search, threading, labeling) matters more than write throughput. Spam filtering is where most of the engineering complexity actually lives.",
+    "exercises": [
+      {
+        "title": "Build a Threaded Conversation Grouper",
+        "description": "Given a set of emails with In-Reply-To and References headers, group them into conversation threads. Handle cases where intermediate emails are missing.",
+        "hint": "Build a forest of message IDs using In-Reply-To as parent pointers. For missing intermediates, create placeholder nodes. Merge trees that share References."
+      },
+      {
+        "title": "Implement a Simple Spam Classifier",
+        "description": "Build a Naive Bayes spam classifier trained on a labeled email dataset. Compute precision and recall on a test set. Integrate it as a filter step in a mock email pipeline.",
+        "hint": "Tokenize email body, compute P(word|spam) and P(word|ham) from training data. For a new email, multiply probabilities across all words and compare spam vs ham likelihoods."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Search results are missing recently received emails",
+        "cause": "The search index update is asynchronous and lags behind mail delivery during peak hours",
+        "solution": "Implement a real-time indexing path for recent emails (last N minutes) that queries the mail store directly, merged with the async index results."
+      },
+      {
+        "problem": "Sending reputation degrades, causing outbound emails to land in recipients' spam folders",
+        "cause": "Compromised accounts are sending bulk spam through the outbound pipeline, tainting the IP reputation",
+        "solution": "Implement outbound rate limits per user, detect anomalous sending patterns, and use dedicated IP pools that isolate transactional mail from user-generated mail."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Gmail Backend Architecture - System Design",
+        "url": "https://www.youtube.com/watch?v=KhdrOGOCftk",
+        "type": "video"
+      },
+      {
+        "title": "Bigtable: A Distributed Storage System for Structured Data",
+        "url": "https://static.googleusercontent.com/media/research.google.com/en//archive/bigtable-osdi06.pdf",
+        "type": "paper"
+      }
+    ]
+  },
+  "10.6.3": {
+    "body": "## Design a Logging/Analytics Pipeline\n\n### Requirements\n- Ingest terabytes of log data daily from thousands of services and hosts\n- Support structured and unstructured log formats with schema evolution\n- Provide near real-time search (under 30 seconds from emission to searchable)\n- Retain logs for 30-90 days with archival to cold storage for compliance\n\n### Architecture\nLog agents on each host tail log files and ship events to a collection tier (Kafka/Fluentd). A stream processing layer enriches, parses, and routes logs by type. Hot logs go to an indexing cluster (Elasticsearch/OpenSearch) for search. Cold logs are archived to S3/GCS in columnar format (Parquet) for batch analytics.\n\n### Key Components\n- **Log Agent**: Filebeat/Fluentd on each host; handles backpressure and local buffering\n- **Collection Tier**: Kafka topics partitioned by service; decouples producers from consumers\n- **Stream Processor**: Flink/Logstash that parses, enriches (adds host/region tags), and routes\n- **Index Cluster**: Elasticsearch with time-based indices and ILM (Index Lifecycle Management) for rollover and deletion\n\n### Scaling\nTime-based index partitioning (one index per day) for easy retention management. Scale Kafka partitions and ES data nodes independently. Use sampling for very high-volume debug logs.\n\n### Trade-offs\n- Indexing everything enables ad-hoc search but is expensive; selective indexing saves cost but requires knowing what to keep upfront\n- Shorter index retention reduces cost but limits incident investigation windows\n- Structured logging is easier to query but requires upfront schema discipline from developers",
+    "intuition": "A logging pipeline is a high-throughput ETL system where the key insight is that logs have a natural time dimension that dictates everything: partitioning, retention, and query patterns. The collection tier (Kafka) is the shock absorber that prevents bursty log producers from overwhelming the indexing layer.",
+    "exercises": [
+      {
+        "title": "Build a Log Pipeline with Backpressure",
+        "description": "Create a pipeline: log generator -> in-memory buffer -> batch writer to disk. Implement backpressure so the generator slows down when the buffer is 80% full.",
+        "hint": "Use a bounded blocking queue as the buffer. When the queue reaches 80% capacity, have the producer sleep or drop low-priority logs. The consumer batches and writes every N messages or T seconds."
+      },
+      {
+        "title": "Implement Time-Based Index Rotation",
+        "description": "Simulate an indexing system that creates a new index daily, automatically deletes indices older than 7 days, and redirects all writes to the current day's index.",
+        "hint": "Use an alias pointing to the current index. A scheduled job creates tomorrow's index, switches the alias, and deletes the index from 8 days ago."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Elasticsearch cluster goes red during log bursts from a single service",
+        "cause": "One service emits 100x normal log volume during an incident, saturating the index write queue",
+        "solution": "Implement per-service rate limiting in the stream processor, and use separate Kafka topics or ES indices for high-volume services to isolate impact."
+      },
+      {
+        "problem": "Log searches return incomplete results for recent events",
+        "cause": "The Elasticsearch refresh interval is set to 30 seconds, so recently indexed logs are not yet searchable",
+        "solution": "Reduce the refresh interval to 5 seconds for hot indices (accepting higher resource usage), or provide a separate real-time tail view that reads directly from Kafka."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Building LinkedIn's Real-Time Activity Data Pipeline",
+        "url": "https://engineering.linkedin.com/data-streams/apache-samza-linkedins-real-time-stream-processing-framework",
+        "type": "article"
+      },
+      {
+        "title": "Scaling Elasticsearch for Logs at Uber",
+        "url": "https://www.uber.com/blog/logging/",
+        "type": "article"
+      }
+    ]
+  },
+  "10.6.4": {
+    "body": "## Design a Recommendation Engine\n\n### Requirements\n- Generate personalized recommendations for millions of users across items (products, content, people)\n- Combine collaborative filtering, content-based, and popularity signals\n- Serve recommendations with <100ms latency; refresh daily with near real-time boosts\n- Handle cold-start for new users and new items\n\n### Architecture\nAn offline pipeline trains models on user-item interaction data (views, clicks, purchases) using collaborative filtering (matrix factorization, ALS) and content features. Pre-computed recommendations per user are stored in a serving layer. An online layer re-ranks results using real-time signals (session context, recency) before serving.\n\n### Key Components\n- **Feature Store**: Stores user profiles, item features, interaction history for training and serving\n- **Training Pipeline**: Spark/TensorFlow jobs that train CF and content-based models on interaction matrices\n- **Candidate Generation**: Retrieves top-N candidates per user from pre-computed lists or ANN (approximate nearest neighbor) index\n- **Ranking Service**: Re-ranks candidates with a lightweight model using real-time features\n\n### Scaling\nPre-compute and cache recommendations per user. Use ANN indexes (FAISS, ScaNN) for real-time candidate retrieval from embedding space. Separate candidate generation (recall) from ranking (precision) to manage compute.\n\n### Trade-offs\n- Collaborative filtering is powerful but suffers cold-start; content-based handles new items but lacks serendipity\n- Pre-computed recs are fast but stale; real-time models are fresh but expensive\n- Optimizing for engagement may create filter bubbles; diversity injection hurts click-through but improves satisfaction",
+    "intuition": "A recommendation engine is a two-stage system: a broad candidate generation phase that retrieves hundreds of plausible items, followed by a precise ranking phase that scores and orders them using richer features. The cold-start problem is solved not by one technique but by gracefully falling back through a hierarchy of signals: collaborative, content-based, then popularity.",
+    "exercises": [
+      {
+        "title": "Implement Matrix Factorization with ALS",
+        "description": "Build a basic Alternating Least Squares recommender on the MovieLens 100K dataset. Split into train/test, compute RMSE, and generate top-10 recommendations for a user.",
+        "hint": "Initialize user and item factor matrices randomly. Alternate: fix items, solve for users (least squares); fix users, solve for items. Repeat for 10-20 iterations."
+      },
+      {
+        "title": "Build a Two-Stage Recommend-and-Rank Pipeline",
+        "description": "Implement candidate generation using item-item similarity (cosine on feature vectors) and a ranking stage that re-orders candidates by a weighted score combining similarity, recency, and popularity.",
+        "hint": "For candidate generation, pre-compute item-item similarity matrix and retrieve top-50 similar items to user's recent interactions. For ranking, combine scores as: alpha*similarity + beta*recency + gamma*popularity."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Recommendations become stale and repetitive for active users",
+        "cause": "The offline model only retrains daily, so today's interactions are not reflected in recommendations",
+        "solution": "Add a real-time boosting layer that promotes items similar to the user's current session activity, and penalize already-seen items."
+      },
+      {
+        "problem": "New items never get recommended because they lack interaction data",
+        "cause": "Collaborative filtering cannot score items with no user interactions (cold-start problem)",
+        "solution": "Use content-based features (title, category, description embeddings) to place new items in the embedding space, and inject them into candidate generation with an exploration budget."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Deep Neural Networks for YouTube Recommendations",
+        "url": "https://static.googleusercontent.com/media/research.google.com/en//pubs/archive/45530.pdf",
+        "type": "paper"
+      },
+      {
+        "title": "System Design: Recommendation System",
+        "url": "https://www.youtube.com/watch?v=us0qySiUsGU",
+        "type": "video"
+      }
+    ]
+  },
+  "10.6.5": {
+    "body": "## Design a CI/CD Pipeline (GitHub Actions)\n\n### Requirements\n- Trigger builds on push, pull request, schedule, or manual dispatch\n- Execute multi-step workflows with parallel and sequential jobs on isolated runners\n- Support artifact caching, secret management, and environment-specific deployments\n- Scale to thousands of concurrent builds with job queuing and prioritization\n\n### Architecture\nA webhook listener receives events from the source control system and enqueues workflow runs. A scheduler matches jobs to available runners from a pool of ephemeral VMs/containers. Each runner executes steps in an isolated environment, streaming logs back to the control plane. An artifact store holds build outputs and caches.\n\n### Key Components\n- **Webhook/Event Listener**: Receives SCM events, evaluates trigger conditions, creates workflow runs\n- **Scheduler**: Matches pending jobs to runners by label (OS, architecture), manages queue priority\n- **Runner Pool**: Ephemeral VMs or containers provisioned on demand; cleaned up after each job\n- **Artifact & Cache Store**: S3-backed storage for build artifacts, dependency caches, and logs\n\n### Scaling\nAuto-scale runner pools based on queue depth. Use spot/preemptible instances for cost savings with checkpointing for interrupted jobs. Cache dependency downloads aggressively to reduce build times.\n\n### Trade-offs\n- Ephemeral runners are clean and secure but have cold-start overhead; persistent runners are faster but risk contamination\n- Shared caches speed up builds but introduce cache invalidation complexity\n- Self-hosted runners give control but require maintenance; managed runners are convenient but limit customization",
+    "intuition": "A CI/CD pipeline is a distributed job execution engine triggered by source control events, where the central challenge is balancing the throughput of thousands of concurrent builds against the isolation guarantees each build needs. Ephemeral runners provide the cleanest isolation but make caching the critical optimization to avoid rebuilding the world every time.",
+    "exercises": [
+      {
+        "title": "Build a DAG-Based Workflow Executor",
+        "description": "Implement a workflow engine that parses a YAML-defined job DAG (with 'needs' dependencies), runs independent jobs in parallel, and respects sequential dependencies. Track pass/fail status.",
+        "hint": "Topologically sort the job DAG. Use a thread pool: enqueue all jobs with zero unmet dependencies. When a job completes, decrement dependency counts of its children and enqueue newly-unblocked jobs."
+      },
+      {
+        "title": "Implement Dependency Caching for Builds",
+        "description": "Create a cache layer keyed by a hash of lock files (e.g., package-lock.json). On cache hit, restore the dependency directory; on miss, run install and upload the result.",
+        "hint": "Compute SHA-256 of the lock file as cache key. Check the artifact store for that key. On hit, download and extract. On miss, run install, tar the result, and upload with the key."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "Builds queue for 10+ minutes during peak hours despite available cloud capacity",
+        "cause": "The runner auto-scaler reacts too slowly, waiting for sustained queue depth before provisioning new VMs",
+        "solution": "Implement predictive scaling based on historical patterns (e.g., post-standup push spikes), and reduce the scale-up cooldown period. Pre-warm a baseline pool for expected peak."
+      },
+      {
+        "problem": "A secret is exposed in build logs, creating a security incident",
+        "cause": "A build step accidentally prints an environment variable containing a secret to stdout",
+        "solution": "Implement automatic secret masking in the log streaming layer: scan output for known secret values and replace them with '***'. Also audit and rotate the exposed secret."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "How GitHub Actions Works Behind the Scenes",
+        "url": "https://docs.github.com/en/actions/about-github-actions/understanding-github-actions",
+        "type": "documentation"
+      },
+      {
+        "title": "Scaling CI/CD at Shopify",
+        "url": "https://shopify.engineering/scaling-mobile-ci-cd-shopify",
+        "type": "article"
+      }
+    ]
+  },
+  "10.6.6": {
+    "body": "## Design a Multi-Tenant SaaS Platform\n\n### Requirements\n- Serve thousands of tenants (organizations) from a shared infrastructure\n- Isolate tenant data, enforce per-tenant resource quotas, and prevent noisy-neighbor effects\n- Support tenant-specific customization (branding, feature flags, integrations)\n- Provide tenant onboarding, billing metering, and admin dashboards\n\n### Architecture\nA shared application tier routes requests by tenant ID (extracted from subdomain or JWT). A data tier supports multiple isolation models: shared database with tenant_id column, schema-per-tenant, or database-per-tenant for premium tiers. A control plane manages tenant configuration, feature flags, and quota enforcement.\n\n### Key Components\n- **Tenant Router**: Extracts tenant context from request, applies rate limits, routes to appropriate resources\n- **Data Isolation Layer**: Row-level security (RLS) in shared DB or separate schemas/databases per tenant\n- **Quota/Rate Limiter**: Per-tenant rate limiting and resource quotas (API calls, storage, compute)\n- **Billing Meter**: Tracks usage events per tenant for usage-based billing; emits to billing system\n\n### Scaling\nUse shared infrastructure for small tenants (cost-efficient) and dedicated resources for large/enterprise tenants (performance isolation). Shard the shared database by tenant_id. Cache tenant configs aggressively.\n\n### Trade-offs\n- Shared DB is cost-efficient but risks data leaks via bugs; separate DBs are safer but expensive\n- Uniform infrastructure simplifies ops but cannot meet diverse tenant SLAs; tiered offerings add complexity\n- Tenant customization increases flexibility but multiplies testing surface area",
+    "intuition": "Multi-tenancy is the art of sharing infrastructure across customers while making each customer feel like they have their own dedicated system. The core architectural decision is the data isolation model, which exists on a spectrum from fully shared (cheap, risky) to fully isolated (expensive, safe), and most real systems offer tiered options.",
+    "exercises": [
+      {
+        "title": "Implement Row-Level Tenant Isolation",
+        "description": "Create a shared PostgreSQL database with a tenant_id column on all tables. Implement row-level security policies so that queries from tenant A can never see tenant B's data, even with SQL injection.",
+        "hint": "Use PostgreSQL RLS: CREATE POLICY tenant_isolation ON table USING (tenant_id = current_setting('app.current_tenant')). Set the session variable on each request before executing queries."
+      },
+      {
+        "title": "Build a Per-Tenant Rate Limiter",
+        "description": "Implement a token bucket rate limiter that enforces different rate limits per tenant (e.g., free: 100 req/min, pro: 1000 req/min). Test with concurrent requests from multiple tenants.",
+        "hint": "Store a token bucket per tenant (tokens, last_refill_time) in Redis. On each request, refill based on elapsed time, then decrement. Reject if tokens <= 0. Load the rate limit from tenant config."
+      }
+    ],
+    "problems": [
+      {
+        "problem": "A large tenant's heavy queries slow down the shared database for all other tenants",
+        "cause": "All tenants share the same database connection pool and the large tenant's queries consume most connections and I/O",
+        "solution": "Implement per-tenant connection pool limits, add query timeouts, and migrate large tenants to dedicated database instances with a seamless routing change."
+      },
+      {
+        "problem": "A developer accidentally deploys a migration that exposes tenant A's data to tenant B",
+        "cause": "A new query was added without a WHERE tenant_id clause, bypassing the application-level isolation",
+        "solution": "Enforce row-level security at the database level (not just application level) as a safety net, and add automated tests that verify cross-tenant data isolation on every migration."
+      }
+    ],
+    "further_reading": [
+      {
+        "title": "Multi-Tenant Architecture for SaaS - AWS Well-Architected",
+        "url": "https://docs.aws.amazon.com/wellarchitected/latest/saas-lens/multi-tenant-architecture.html",
+        "type": "documentation"
+      },
+      {
+        "title": "Building Multi-Tenant SaaS with PostgreSQL Row-Level Security",
+        "url": "https://www.thenile.dev/blog/multi-tenant-rls",
+        "type": "article"
+      }
+    ]
+  }
+}

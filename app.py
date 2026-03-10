@@ -392,6 +392,14 @@ def glossary_term(slug):
     return render_template("glossary_term.html", entry=entry)
 
 
+@app.route("/glossary/<slug>/delete", methods=["POST"])
+def glossary_delete(slug):
+    db = get_db()
+    db.execute("DELETE FROM glossary WHERE slug = ?", (slug,))
+    db.commit()
+    return redirect("/glossary")
+
+
 if __name__ == "__main__":
     init_db()
     app.run(debug=True, port=5055)

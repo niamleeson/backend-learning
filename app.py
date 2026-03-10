@@ -1,10 +1,14 @@
 import json
+import os
+import re
 import sqlite3
+import subprocess
+import time
 from pathlib import Path
 
 import markdown
 from markupsafe import Markup
-from flask import Flask, g, redirect, render_template, request, url_for
+from flask import Flask, g, jsonify, redirect, render_template, request, url_for
 
 from generate_notebook import generate_notebook
 
@@ -56,8 +60,25 @@ def init_db():
         )
         """
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS glossary (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            term TEXT NOT NULL,
+            slug TEXT NOT NULL UNIQUE,
+            question TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     db.commit()
     db.close()
+
+
+def slugify(text):
+    slug = text.lower().strip().replace(' ', '-')
+    return re.sub(r'[^a-z0-9-]', '', slug)
 
 
 def load_curriculum():
@@ -296,6 +317,78 @@ def reset_progress():
     db.execute("DELETE FROM progress")
     db.commit()
     return redirect("/")
+
+
+@app.route("/api/glossary")
+def api_glossary():
+    db = get_db()
+    rows = db.execute("SELECT term, slug FROM glossary").fetchall()
+    return jsonify({r["term"]: r["slug"] for r in rows})
+
+
+@app.route("/api/ask", methods=["POST"])
+def api_ask():
+    data = request.get_json()
+    highlighted = data.get("highlighted", "")
+    question = data.get("question", "")
+    prompt = (
+        f"The user is studying backend development and highlighted: {highlighted}. "
+        f"Question: {question}. Give a concise explanation under 200 words."
+    )
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    answer = None
+    for attempt in range(2):
+        try:
+            result = subprocess.run(
+                ["claude", "-p", prompt, "--model", "opus"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                input="",
+                env=env,
+            )
+            if result.returncode == 0:
+                answer = result.stdout.strip()
+                break
+        except subprocess.TimeoutExpired:
+            pass
+        if attempt < 1:
+            time.sleep(2)
+    if not answer:
+        return jsonify({"error": "Failed to get response from Claude"}), 500
+    term = highlighted.strip()
+    slug = slugify(term)
+    db = get_db()
+    db.execute(
+        """
+        INSERT INTO glossary (term, slug, question, answer)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(slug) DO UPDATE SET
+            term = excluded.term,
+            question = excluded.question,
+            answer = excluded.answer,
+            created_at = CURRENT_TIMESTAMP
+        """,
+        (term, slug, question, answer),
+    )
+    db.commit()
+    return jsonify({"answer": answer})
+
+
+@app.route("/glossary")
+def glossary_index():
+    db = get_db()
+    rows = db.execute("SELECT * FROM glossary ORDER BY term ASC").fetchall()
+    return render_template("glossary_index.html", entries=rows)
+
+
+@app.route("/glossary/<slug>")
+def glossary_term(slug):
+    db = get_db()
+    entry = db.execute("SELECT * FROM glossary WHERE slug = ?", (slug,)).fetchone()
+    if not entry:
+        return "Term not found", 404
+    return render_template("glossary_term.html", entry=entry)
 
 
 if __name__ == "__main__":

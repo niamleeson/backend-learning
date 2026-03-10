@@ -177,5 +177,155 @@
             <a href="/phase/{{ phase.id }}">&larr; Back to {{ phase.title }}</a>
         </div>
     </div>
+<script>
+(function() {
+    // A) Auto-link glossary terms
+    const SKIP_TAGS = new Set(['CODE', 'PRE', 'A', 'H1', 'H2', 'H3', 'H4', 'SCRIPT', 'STYLE']);
+
+    fetch('/api/glossary')
+        .then(r => r.json())
+        .then(glossary => {
+            const terms = Object.keys(glossary).sort((a, b) => b.length - a.length);
+            if (!terms.length) return;
+            const containers = document.querySelectorAll('.lesson-article, .intuition-body');
+            containers.forEach(container => {
+                const linked = new Set();
+                const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+                    acceptNode: function(node) {
+                        let parent = node.parentElement;
+                        while (parent && parent !== container) {
+                            if (SKIP_TAGS.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
+                            parent = parent.parentElement;
+                        }
+                        return NodeFilter.FILTER_ACCEPT;
+                    }
+                });
+                const textNodes = [];
+                while (walker.nextNode()) textNodes.push(walker.currentNode);
+                for (const textNode of textNodes) {
+                    for (const term of terms) {
+                        if (linked.has(term)) continue;
+                        const idx = textNode.textContent.toLowerCase().indexOf(term.toLowerCase());
+                        if (idx === -1) continue;
+                        const before = textNode.textContent.substring(0, idx);
+                        const match = textNode.textContent.substring(idx, idx + term.length);
+                        const after = textNode.textContent.substring(idx + term.length);
+                        const link = document.createElement('a');
+                        link.href = '/glossary/' + glossary[term];
+                        link.className = 'glossary-link';
+                        link.textContent = match;
+                        const parent = textNode.parentNode;
+                        if (before) parent.insertBefore(document.createTextNode(before), textNode);
+                        parent.insertBefore(link, textNode);
+                        if (after) parent.insertBefore(document.createTextNode(after), textNode);
+                        parent.removeChild(textNode);
+                        linked.add(term);
+                        break;
+                    }
+                }
+            });
+        })
+        .catch(() => {});
+
+    // B) Ask Claude popup on text selection
+    let popup = null;
+    let isLoading = false;
+
+    function removePopup() {
+        if (popup && !isLoading) {
+            popup.remove();
+            popup = null;
+        }
+    }
+
+    function renderBasicMarkdown(text) {
+        return text
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+            .replace(/`(.*?)`/g, '<code style="background:#2a2a3e;padding:0.1rem 0.3rem;border-radius:3px;font-size:0.85em;">$1</code>')
+            .replace(/\n/g, '<br>');
+    }
+
+    document.addEventListener('mouseup', function(e) {
+        const sel = window.getSelection();
+        const text = sel.toString().trim();
+        if (text.length < 2) return;
+        if (popup) removePopup();
+
+        const range = sel.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+
+        popup = document.createElement('div');
+        popup.style.cssText = 'position:fixed;z-index:9999;background:#1a1a2e;border:1px solid #333;border-radius:10px;padding:1rem;max-width:450px;width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.5);color:#e0e0e0;font-size:0.9rem;';
+        popup.style.left = Math.min(rect.left, window.innerWidth - 470) + 'px';
+        popup.style.top = Math.min(rect.bottom + 8, window.innerHeight - 300) + 'px';
+
+        popup.innerHTML = `
+            <div style="margin-bottom:0.6rem;font-size:0.8rem;color:#888;">Selected: <span style="color:#93c5fd;">${text.length > 80 ? text.substring(0, 80) + '...' : text}</span></div>
+            <textarea id="ask-claude-q" placeholder="Ask a question about this..." style="width:100%;padding:0.5rem;background:#12122a;border:1px solid #333;border-radius:6px;color:#e0e0e0;font-size:0.85rem;font-family:inherit;resize:vertical;min-height:2.5rem;" rows="2"></textarea>
+            <button id="ask-claude-btn" style="margin-top:0.5rem;padding:0.4rem 1rem;background:#3b82f6;color:white;border:none;border-radius:6px;cursor:pointer;font-size:0.85rem;">Ask Claude</button>
+            <div id="ask-claude-response" style="margin-top:0.75rem;display:none;"></div>
+        `;
+        document.body.appendChild(popup);
+
+        const textarea = popup.querySelector('#ask-claude-q');
+        const btn = popup.querySelector('#ask-claude-btn');
+        const responseDiv = popup.querySelector('#ask-claude-response');
+
+        textarea.focus();
+
+        function submitQuestion() {
+            const question = textarea.value.trim();
+            if (!question) return;
+            isLoading = true;
+            btn.disabled = true;
+            btn.textContent = 'Asking Claude...';
+            responseDiv.style.display = 'block';
+            responseDiv.innerHTML = '<div style="color:#888;">Loading...</div>';
+
+            fetch('/api/ask', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ highlighted: text, question: question })
+            })
+            .then(r => r.json())
+            .then(data => {
+                isLoading = false;
+                if (data.error) {
+                    responseDiv.innerHTML = '<div style="color:#ef4444;">Error: ' + data.error + '</div>';
+                } else {
+                    responseDiv.innerHTML = '<div style="line-height:1.6;">' + renderBasicMarkdown(data.answer) + '</div>' +
+                        '<div style="margin-top:0.5rem;font-size:0.75rem;color:#22c55e;">Saved to glossary</div>';
+                }
+                btn.textContent = 'Ask Claude';
+                btn.disabled = false;
+            })
+            .catch(err => {
+                isLoading = false;
+                responseDiv.innerHTML = '<div style="color:#ef4444;">Request failed</div>';
+                btn.textContent = 'Ask Claude';
+                btn.disabled = false;
+            });
+        }
+
+        btn.addEventListener('click', submitQuestion);
+        textarea.addEventListener('keydown', function(e) {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                e.preventDefault();
+                submitQuestion();
+            }
+        });
+
+        popup.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    });
+
+    document.addEventListener('mousedown', function(e) {
+        if (popup && !popup.contains(e.target)) removePopup();
+    });
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') removePopup();
+    });
+})();
+</script>
 </body>
 </html>

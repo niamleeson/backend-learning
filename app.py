@@ -372,7 +372,8 @@ def api_ask():
         (term, slug, question, answer),
     )
     db.commit()
-    return jsonify({"answer": answer})
+    answer_html = markdown.markdown(answer, extensions=["fenced_code", "codehilite", "tables"])
+    return jsonify({"answer": answer_html})
 
 
 @app.route("/glossary")

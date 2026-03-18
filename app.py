@@ -8,7 +8,7 @@ from pathlib import Path
 
 import markdown
 from markupsafe import Markup
-from flask import Flask, g, jsonify, redirect, render_template, request, url_for
+from flask import Flask, g, jsonify, make_response, redirect, render_template, request, url_for
 
 from generate_notebook import generate_notebook
 
@@ -81,8 +81,15 @@ def slugify(text):
     return re.sub(r'[^a-z0-9-]', '', slug)
 
 
-def load_curriculum():
-    with open("data/curriculum.json") as f:
+def get_lang():
+    return request.cookies.get("lang", "python")
+
+
+def load_curriculum(lang=None):
+    if lang is None:
+        lang = get_lang()
+    filename = "data/curriculum-js.json" if lang == "javascript" else "data/curriculum.json"
+    with open(filename) as f:
         return json.load(f)
 
 
@@ -146,21 +153,34 @@ def compute_stats(curriculum, progress_map):
     }
 
 
+@app.route("/api/set-lang", methods=["POST"])
+def set_lang():
+    data = request.get_json()
+    lang = data.get("lang", "python")
+    if lang not in ("python", "javascript"):
+        lang = "python"
+    resp = make_response(jsonify({"lang": lang}))
+    resp.set_cookie("lang", lang, max_age=365 * 24 * 60 * 60, samesite="Lax")
+    return resp
+
+
 @app.route("/")
 def index():
     db = get_db()
-    curriculum = load_curriculum()
+    lang = get_lang()
+    curriculum = load_curriculum(lang)
     progress_map = get_progress_map(db)
     stats = compute_stats(curriculum, progress_map)
     return render_template(
-        "index.html", curriculum=curriculum, stats=stats, progress=progress_map
+        "index.html", curriculum=curriculum, stats=stats, progress=progress_map, lang=lang
     )
 
 
 @app.route("/phase/<phase_id>")
 def phase_detail(phase_id):
     db = get_db()
-    curriculum = load_curriculum()
+    lang = get_lang()
+    curriculum = load_curriculum(lang)
     progress_map = get_progress_map(db)
 
     phase = next((p for p in curriculum["phases"] if p["id"] == phase_id), None)
@@ -181,13 +201,15 @@ def phase_detail(phase_id):
 
     stats = compute_stats(curriculum, progress_map)
     return render_template(
-        "phase.html", phase=phase, stats=stats, progress=progress_map
+        "phase.html", phase=phase, stats=stats, progress=progress_map, lang=lang
     )
 
 
-def load_content():
+def load_content(lang=None):
+    if lang is None:
+        lang = get_lang()
     content = {}
-    content_dir = Path("data/content")
+    content_dir = Path("data/content-js") if lang == "javascript" else Path("data/content")
     if content_dir.exists():
         for f in content_dir.glob("*.json"):
             with open(f) as fh:
@@ -209,9 +231,10 @@ def find_lesson(curriculum, lesson_id):
 @app.route("/lesson/<lesson_id>")
 def lesson_detail(lesson_id):
     db = get_db()
-    curriculum = load_curriculum()
+    lang = get_lang()
+    curriculum = load_curriculum(lang)
     progress_map = get_progress_map(db)
-    content_map = load_content()
+    content_map = load_content(lang)
 
     phase, module, lesson, prev_l, next_l = find_lesson(curriculum, lesson_id)
     if not lesson:
@@ -231,6 +254,7 @@ def lesson_detail(lesson_id):
         notes=notes,
         prev_lesson=prev_l,
         next_lesson=next_l,
+        lang=lang,
     )
 
 
@@ -283,8 +307,9 @@ NOTEBOOK_DIR = Path("notebooks")
 
 @app.route("/notebook/<lesson_id>")
 def open_notebook(lesson_id):
-    curriculum = load_curriculum()
-    content_map = load_content()
+    lang = get_lang()
+    curriculum = load_curriculum(lang)
+    content_map = load_content(lang)
 
     phase, module, lesson, _, _ = find_lesson(curriculum, lesson_id)
     if not lesson:

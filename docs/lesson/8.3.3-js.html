@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dead Letter Queues, Retry Strategies, and Idempotency - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-js.html">System Design & Scalability</a> &rsaquo;
+            Message Queues & Async Processing
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.3.3</span>
+                <span>~3h</span>
+            </div>
+            <h1>Dead Letter Queues, Retry Strategies, and Idempotency</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a mail delivery system: retries are the mail carrier trying again tomorrow when no one is home. The dead letter office (DLQ) is where undeliverable mail goes after all attempts. Idempotency is like having a signature log — delivering the same package twice does not result in two deliveries because the recipient already signed for it.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Dead Letter Queues, Retry Strategies, and Idempotency</h1>
+<h2>Introduction</h2>
+<p>In distributed systems, failures are not exceptional — they are expected. Messages will fail to process due to temporary errors (network timeouts, service outages) and permanent errors (invalid data, business logic violations). Dead letter queues, retry strategies, and idempotent processing form the triad of reliable message handling.</p>
+<h2>Dead Letter Queues (DLQ)</h2>
+<p>A dead letter queue captures messages that cannot be processed successfully, preventing them from being lost or retried infinitely.</p>
+<div class="highlight"><pre><span></span><code>Normal Flow:
+Queue ──&gt; Consumer ──&gt; Process ──&gt; ACK (removed from queue)
+
+Failure Flow:
+Queue ──&gt; Consumer ──&gt; Process ──&gt; FAIL
+                                     │
+                                     ├── Retry (requeue)
+                                     │     └── Eventually succeeds or...
+                                     │
+                                     └── Dead Letter Queue (after max retries)
+                                           └── Manual investigation
+                                           └── Automated alerting
+</code></pre></div>
+
+<h3>DLQ with BullMQ</h3>
+<p>BullMQ doesn't have a separate DLQ — failed jobs stay in the failed state. But you can implement DLQ-like behavior:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Queue</span><span class="p">,</span><span class="w"> </span><span class="nx">Worker</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bullmq&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">mainQueue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;orders&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="p">});</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">dlq</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;orders-dlq&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="p">});</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">worker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;orders&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">processOrder</span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Check if this is the final attempt</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">attemptsMade</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">opts</span><span class="p">.</span><span class="nx">attempts</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Move to DLQ with error context</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">dlq</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;failed-order&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">originalJob</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">name</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">attemptsMade</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">attemptsMade</span><span class="p">,</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">stack</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">stack</span><span class="p">,</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nx">failedAt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">(),</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span><span class="w"> </span><span class="c1">// Re-throw so BullMQ handles retry</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">connection</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">attempts</span><span class="o">:</span><span class="w"> </span><span class="mf">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">backoff</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;exponential&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+
+<span class="c1">// DLQ processor - alert or attempt remediation</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">dlqWorker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;orders-dlq&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">originalJob</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`DLQ: Order </span><span class="si">${</span><span class="nx">originalJob</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">orderId</span><span class="si">}</span><span class="sb"> failed: </span><span class="si">${</span><span class="nx">error</span><span class="p">.</span><span class="nx">message</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Send alert</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">alertOps</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;dead_letter&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">queue</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;orders&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">jobId</span><span class="o">:</span><span class="w"> </span><span class="nx">originalJob</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">error</span><span class="p">.</span><span class="nx">message</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Optionally: attempt automated remediation</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">.</span><span class="nx">message</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;inventory&#39;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">mainQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;orders&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">originalJob</span><span class="p">.</span><span class="nx">data</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">300000</span><span class="p">,</span><span class="w"> </span><span class="c1">// Retry in 5 minutes</span>
+<span class="w">      </span><span class="nx">attempts</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+
+<h2>Retry Strategies</h2>
+<h3>1. Fixed Delay</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// Retry every 5 seconds</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">queue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;job&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">attempts</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">backoff</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;fixed&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">5000</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+<span class="c1">// Retries at: 5s, 5s, 5s, 5s</span>
+</code></pre></div>
+
+<h3>2. Exponential Backoff</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// Exponentially increasing delays</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">queue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;job&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">attempts</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">backoff</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;exponential&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+<span class="c1">// Retries at: 1s, 2s, 4s, 8s</span>
+</code></pre></div>
+
+<h3>3. Custom Backoff with Jitter</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// Custom backoff strategy</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">queue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;api-call&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">attempts</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">backoff</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;custom&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+
+<span class="c1">// In worker</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">worker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;api-call&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">processor</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">connection</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">settings</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">backoffStrategy</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">attemptsMade</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Exponential backoff with full jitter</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">baseDelay</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1000</span><span class="p">;</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">maxDelay</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">30000</span><span class="p">;</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">exponential</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nx">baseDelay</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">pow</span><span class="p">(</span><span class="mf">2</span><span class="p">,</span><span class="w"> </span><span class="nx">attemptsMade</span><span class="p">),</span><span class="w"> </span><span class="nx">maxDelay</span><span class="p">);</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">jitter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">random</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">exponential</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">jitter</span><span class="p">);</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>4. Circuit Breaker Pattern with Retry</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">CircuitBreaker</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">({</span><span class="w"> </span><span class="nx">failureThreshold</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span><span class="w"> </span><span class="nx">resetTimeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">30000</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">failureCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">failureThreshold</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">failureThreshold</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">resetTimeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">resetTimeout</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;CLOSED&#39;</span><span class="p">;</span><span class="w"> </span><span class="c1">// CLOSED, OPEN, HALF_OPEN</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">nextAttempt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">execute</span><span class="p">(</span><span class="nx">fn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;OPEN&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">nextAttempt</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Circuit breaker is OPEN&#39;</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;HALF_OPEN&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fn</span><span class="p">();</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">onSuccess</span><span class="p">();</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">onFailure</span><span class="p">();</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">onSuccess</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">failureCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;CLOSED&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">onFailure</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">failureCount</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">failureCount</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">failureThreshold</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;OPEN&#39;</span><span class="p">;</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">nextAttempt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">resetTimeout</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Use in worker</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">paymentBreaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">CircuitBreaker</span><span class="p">({</span><span class="w"> </span><span class="nx">failureThreshold</span><span class="o">:</span><span class="w"> </span><span class="mf">3</span><span class="w"> </span><span class="p">});</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">worker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;payments&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">paymentBreaker</span><span class="p">.</span><span class="nx">execute</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">paymentGateway</span><span class="p">.</span><span class="nx">charge</span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="p">,</span><span class="w"> </span><span class="nx">attempts</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span><span class="w"> </span><span class="nx">backoff</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;exponential&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">2000</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+
+<h2>Classifying Errors: Retryable vs Permanent</h2>
+<p>Not all errors should be retried:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">RetryableError</span><span class="w"> </span><span class="k">extends</span><span class="w"> </span><span class="ne">Error</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">message</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">super</span><span class="p">(</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">retryable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">PermanentError</span><span class="w"> </span><span class="k">extends</span><span class="w"> </span><span class="ne">Error</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">message</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">super</span><span class="p">(</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">retryable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">worker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;orders&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">processOrder</span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Classify the error</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">code</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;ECONNRESET&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">code</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;ETIMEDOUT&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">RetryableError</span><span class="p">(</span><span class="sb">`Network error: </span><span class="si">${</span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">400</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">422</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Bad data - retrying won&#39;t help</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PermanentError</span><span class="p">(</span><span class="sb">`Invalid data: </span><span class="si">${</span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">429</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">RetryableError</span><span class="p">(</span><span class="s1">&#39;Rate limited&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mf">500</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">RetryableError</span><span class="p">(</span><span class="sb">`Server error: </span><span class="si">${</span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">connection</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">attempts</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">backoff</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;exponential&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+
+<span class="c1">// Skip retries for permanent errors</span>
+<span class="nx">worker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;failed&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">err</span><span class="p">.</span><span class="nx">retryable</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">attemptsMade</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">opts</span><span class="p">.</span><span class="nx">attempts</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Move directly to DLQ instead of retrying</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">moveToFailed</span><span class="p">(</span><span class="nx">err</span><span class="p">,</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">token</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">);</span><span class="w"> </span><span class="c1">// true = don&#39;t retry</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Idempotency</h2>
+<p>An operation is <strong>idempotent</strong> if performing it multiple times has the same effect as performing it once. This is critical because retries WILL cause duplicate processing.</p>
+<div class="highlight"><pre><span></span><code>Without Idempotency:
+  Process payment: charge $100
+  Retry (duplicate): charge $100 again
+  Result: customer charged $200 ← BUG!
+
+With Idempotency:
+  Process payment: charge $100 (idempotency key: &quot;pay-ORD123&quot;)
+  Retry (duplicate): check key &quot;pay-ORD123&quot; already processed
+  Result: customer charged $100 ← CORRECT
+</code></pre></div>
+
+<h3>Idempotency Key Pattern</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">IdempotentProcessor</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">redis</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">processOnce</span><span class="p">(</span><span class="nx">idempotencyKey</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="p">,</span><span class="w"> </span><span class="nx">processFn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Try to acquire the idempotency lock</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">acquired</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span>
+<span class="w">      </span><span class="sb">`idempotent:</span><span class="si">${</span><span class="nx">idempotencyKey</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;processing&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;NX&#39;</span><span class="p">,</span><span class="w">    </span><span class="c1">// Only set if not exists</span>
+<span class="w">      </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w">    </span><span class="c1">// Expire</span>
+<span class="w">      </span><span class="nx">ttl</span><span class="w">      </span><span class="c1">// TTL in seconds</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">acquired</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Already processed or processing</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`idempotent:</span><span class="si">${</span><span class="nx">idempotencyKey</span><span class="si">}</span><span class="sb">:result`</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">result</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Duplicate processing detected&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">processFn</span><span class="p">();</span>
+
+<span class="w">      </span><span class="c1">// Store the result for duplicate requests</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">setex</span><span class="p">(</span>
+<span class="w">        </span><span class="sb">`idempotent:</span><span class="si">${</span><span class="nx">idempotencyKey</span><span class="si">}</span><span class="sb">:result`</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">ttl</span><span class="p">,</span>
+<span class="w">        </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">result</span><span class="p">)</span>
+<span class="w">      </span><span class="p">);</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="sb">`idempotent:</span><span class="si">${</span><span class="nx">idempotencyKey</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;completed&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Remove lock so it can be retried</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">del</span><span class="p">(</span><span class="sb">`idempotent:</span><span class="si">${</span><span class="nx">idempotencyKey</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage in worker</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">idempotent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">IdempotentProcessor</span><span class="p">(</span><span class="nx">redis</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">worker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;payments&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">idempotencyKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`payment:</span><span class="si">${</span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">idempotent</span><span class="p">.</span><span class="nx">processOnce</span><span class="p">(</span><span class="nx">idempotencyKey</span><span class="p">,</span><span class="w"> </span><span class="mf">86400</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">charge</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">stripe</span><span class="p">.</span><span class="nx">charges</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">amount</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">currency</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;usd&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">customer</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">customerId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">idempotency_key</span><span class="o">:</span><span class="w"> </span><span class="nx">idempotencyKey</span><span class="p">,</span><span class="w"> </span><span class="c1">// Stripe also supports idempotency</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">chargeId</span><span class="o">:</span><span class="w"> </span><span class="nx">charge</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="nx">charge</span><span class="p">.</span><span class="nx">amount</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="p">,</span><span class="w"> </span><span class="nx">attempts</span><span class="o">:</span><span class="w"> </span><span class="mf">3</span><span class="p">,</span><span class="w"> </span><span class="nx">backoff</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;exponential&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">2000</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+
+<h3>Database-Level Idempotency</h3>
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">processOrderIdempotent</span><span class="p">(</span><span class="nx">orderId</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Use a processed_events table</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$transaction</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">tx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Check if already processed</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">processedEvent</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">eventKey</span><span class="o">:</span><span class="w"> </span><span class="sb">`order:</span><span class="si">${</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">action</span><span class="si">}</span><span class="sb">`</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Already processed: order:</span><span class="si">${</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">action</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">existing</span><span class="p">.</span><span class="nx">result</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Process the action</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">performAction</span><span class="p">(</span><span class="nx">tx</span><span class="p">,</span><span class="w"> </span><span class="nx">orderId</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Record that we processed it</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">processedEvent</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">eventKey</span><span class="o">:</span><span class="w"> </span><span class="sb">`order:</span><span class="si">${</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">action</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">result</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">result</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">processedAt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(),</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Combining All Three Patterns</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// Complete reliable message processing setup</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">mainQueue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;order-processing&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="p">});</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">dlq</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;order-processing-dlq&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="p">});</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">idempotent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">IdempotentProcessor</span><span class="p">(</span><span class="nx">redis</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">worker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;order-processing&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">orderId</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">idempotencyKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">action</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">timestamp</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 1. Idempotency check</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">idempotent</span><span class="p">.</span><span class="nx">processOnce</span><span class="p">(</span><span class="nx">idempotencyKey</span><span class="p">,</span><span class="w"> </span><span class="mf">86400</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 2. Classify and process</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">action</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;charge&#39;</span><span class="o">:</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">chargeOrder</span><span class="p">(</span><span class="nx">orderId</span><span class="p">);</span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;ship&#39;</span><span class="o">:</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">shipOrder</span><span class="p">(</span><span class="nx">orderId</span><span class="p">);</span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;notify&#39;</span><span class="o">:</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">notifyCustomer</span><span class="p">(</span><span class="nx">orderId</span><span class="p">);</span>
+<span class="w">        </span><span class="k">default</span><span class="o">:</span>
+<span class="w">          </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PermanentError</span><span class="p">(</span><span class="sb">`Unknown action: </span><span class="si">${</span><span class="nx">action</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 3. Error classification</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="w"> </span><span class="ow">instanceof</span><span class="w"> </span><span class="nx">PermanentError</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Move to DLQ immediately</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">dlq</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;permanent-failure&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">originalJob</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">failedAt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">(),</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;permanent_failure&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="p">};</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span><span class="w"> </span><span class="c1">// Retryable errors bubble up for retry</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">connection</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">concurrency</span><span class="o">:</span><span class="w"> </span><span class="mf">10</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">attempts</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">backoff</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;exponential&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">2000</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Retrying permanent errors</strong>: Classifying all errors as retryable wastes resources and delays DLQ processing. Always distinguish retryable from permanent errors.</li>
+<li><strong>No idempotency on payment processing</strong>: Double-charging customers is a severe bug. Every payment operation must be idempotent.</li>
+<li><strong>Infinite retry loops</strong>: Without max attempts, a poisoned message retries forever. Always set a maximum.</li>
+<li><strong>DLQ without monitoring</strong>: Messages sitting in the DLQ unnoticed means lost business. Alert on DLQ depth.</li>
+</ol>
+<h2>Summary</h2>
+<p>Dead letter queues capture permanently failed messages for investigation. Retry strategies with exponential backoff and jitter handle transient failures gracefully. Idempotency ensures that retried messages produce the same result as the first processing. Together, these three patterns make your message processing reliable in the face of inevitable distributed system failures.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Idempotent Payment Processor</div>
+                    <div class="exercise-desc"><p>Build a BullMQ worker that processes payments idempotently. Use Redis to track processed payments and ensure that retries never double-charge customers.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Generate an idempotency key from orderId + amount. Use Redis SET NX to check/set processed state atomically.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Error Classification System</div>
+                    <div class="exercise-desc"><p>Create a worker that classifies errors into retryable (network, timeout, 5xx) and permanent (validation, 4xx). Retryable errors use exponential backoff; permanent errors go directly to DLQ.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Create custom error classes. In the worker's failed event handler, check error type and move permanent errors to DLQ.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">DLQ Dashboard and Replay</div>
+                    <div class="exercise-desc"><p>Build an admin API that lists DLQ messages, shows failure reasons, and allows replaying (re-enqueuing) selected messages back to the main queue.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Store DLQ messages in a BullMQ queue. Admin endpoint reads jobs and can add them back to the main queue with fresh attempts.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Customers being charged multiple times</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Payment processing job retried after timeout, but the original payment actually succeeded. The retry creates a second charge.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement idempotency using a unique key per payment (orderId). Check if the payment was already processed before charging. Use Stripe's built-in idempotency_key parameter.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>const charge = await stripe.charges.create({\n  amount: 1000,\n  currency: 'usd',\n  idempotency_key: `order-\${orderId}`,\n});</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">DLQ growing indefinitely with no alerts</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Dead letter queue is configured but no one monitors it. Failed messages accumulate silently.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Set up monitoring on DLQ depth. Alert when count exceeds threshold. Create a scheduled job that checks DLQ size and sends alerts.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>// Check DLQ depth every minute\nsetInterval(async () =&gt; {\n  const waiting = await dlq.getWaitingCount();\n  if (waiting &gt; 100) {\n    await alertOps({ type: 'dlq_overflow', count: waiting });\n  }\n}, 60000);</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Exponential Backoff and Jitter</div>
+                    
+                    <div class="resource-note">AWS blog on optimal retry strategies</div>
+                    
+                </a>
+                
+                <a href="https://stripe.com/docs/api/idempotent_requests" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Idempotency Patterns</div>
+                    
+                    <div class="resource-note">Stripe's approach to idempotent API requests</div>
+                    
+                </a>
+                
+                <a href="https://docs.bullmq.io/guide/retrying-failing-jobs" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">BullMQ Retry Strategies</div>
+                    
+                </a>
+                
+                <a href="https://sre.google/sre-book/handling-overload/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Designing Reliable Systems</div>
+                    
+                    <div class="resource-note">Google SRE book chapter on handling overload</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/8.3.2-js.html" class="btn">&larr; RabbitMQ: Exchanges, Queues, and Routing</a>
+            
+            
+            <a href="/backend-learning/lesson/8.3.4-js.html" class="btn">Task Scheduling and Periodic Tasks with BullMQ &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-js.html">&larr; Back to System Design & Scalability</a>
+        </div>
+    </div>
+</body>
+</html>

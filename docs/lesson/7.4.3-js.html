@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Upload Security and Content Validation - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-7-js.html">Security & Reliability</a> &rsaquo;
+            Input Validation
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">7.4.3</span>
+                <span>~2h</span>
+            </div>
+            <h1>File Upload Security and Content Validation</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of file upload validation like airport security. The client-provided filename and Content-Type are like the label on your suitcase -- anyone can write anything on it. The real security comes from opening the suitcase (reading magic bytes), running it through the X-ray machine (content validation with sharp/file-type), and checking for prohibited items (malware, scripts). Just like airports do not let you carry your bag directly to the plane, you should never let uploaded files land directly in a publicly accessible directory.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>File Upload Security and Content Validation</h1>
+<h2>Why File Uploads Are Dangerous</h2>
+<p>File uploads are one of the most exploited attack surfaces in web applications. A poorly secured upload endpoint can lead to remote code execution, denial of service, server compromise, and data exfiltration. Unlike text input validation where you check strings and numbers, file uploads require you to validate binary content, enforce size limits, verify MIME types, scan for malware signatures, and store files safely.</p>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────┐
+│              File Upload Attack Surface               │
+├──────────────────────────────────────────────────────┤
+│                                                      │
+│  Client ───upload──► Server                          │
+│                                                      │
+│  Attack Vectors:                                     │
+│  1. Executable disguised as image (.php.jpg)         │
+│  2. Oversized file causing disk exhaustion           │
+│  3. Path traversal in filename (../../etc/passwd)    │
+│  4. Polyglot files (valid image + embedded script)   │
+│  5. Zip bombs (tiny file, expands to gigabytes)      │
+│  6. XML bombs in SVG/DOCX (billion laughs attack)    │
+│  7. EXIF data containing scripts or PII             │
+│  8. Content-type spoofing                            │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>Setting Up Multer for File Uploads</h2>
+<p>Multer is the standard multipart/form-data middleware for Express:</p>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>install<span class="w"> </span>multer
+npm<span class="w"> </span>install<span class="w"> </span>--save-dev<span class="w"> </span>@types/multer<span class="w">  </span><span class="c1"># TypeScript types</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">multer</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;multer&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">path</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:path&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="c1">// INSECURE: never use the original filename directly</span>
+<span class="c1">// const upload = multer({ dest: &#39;uploads/&#39; });</span>
+
+<span class="c1">// SECURE: custom storage with sanitized filenames</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">storage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">multer</span><span class="p">.</span><span class="nx">diskStorage</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">destination</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="nx">cb</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">cb</span><span class="p">(</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;/var/uploads/tmp&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">filename</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="nx">cb</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Generate a random filename, preserve extension</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">ext</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">path</span><span class="p">.</span><span class="nx">extname</span><span class="p">(</span><span class="nx">file</span><span class="p">.</span><span class="nx">originalname</span><span class="p">).</span><span class="nx">toLowerCase</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">randomName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mf">16</span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">cb</span><span class="p">(</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">randomName</span><span class="si">}${</span><span class="nx">ext</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">});</span>
+
+<span class="c1">// Configure limits</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">upload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">multer</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">storage</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">limits</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">fileSize</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="p">,</span><span class="w">     </span><span class="c1">// 5MB max</span>
+<span class="w">    </span><span class="nx">files</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span><span class="w">                        </span><span class="c1">// max 5 files per request</span>
+<span class="w">    </span><span class="nx">fields</span><span class="o">:</span><span class="w"> </span><span class="mf">10</span><span class="p">,</span><span class="w">                      </span><span class="c1">// max 10 non-file fields</span>
+<span class="w">    </span><span class="nx">fieldNameSize</span><span class="o">:</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span><span class="w">              </span><span class="c1">// max field name length</span>
+<span class="w">    </span><span class="nx">fieldSize</span><span class="o">:</span><span class="w"> </span><span class="mf">1024</span><span class="p">,</span><span class="w">                 </span><span class="c1">// max field value size</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">fileFilter</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="nx">cb</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Whitelist allowed MIME types</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">allowedMimes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="s1">&#39;image/jpeg&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;image/png&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;image/gif&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;image/webp&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;application/pdf&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">];</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">allowedMimes</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="nx">file</span><span class="p">.</span><span class="nx">mimetype</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">cb</span><span class="p">(</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">cb</span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`File type </span><span class="si">${</span><span class="nx">file</span><span class="p">.</span><span class="nx">mimetype</span><span class="si">}</span><span class="sb"> is not allowed`</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Why MIME Type Checking Is Not Enough</h2>
+<p>The <code>file.mimetype</code> from Multer comes from the <code>Content-Type</code> header set by the client. An attacker can trivially set this to <code>image/jpeg</code> while uploading a PHP script. You must validate the actual file content.</p>
+<div class="highlight"><pre><span></span><code>┌────────────────┐     ┌─────────────────┐     ┌──────────────────┐
+│  Client sends  │     │  Multer checks  │     │  You must check  │
+│  Content-Type  │────►│  file.mimetype  │────►│  actual bytes    │
+│  (untrusted!)  │     │  (untrusted!)   │     │  (magic numbers) │
+└────────────────┘     └─────────────────┘     └──────────────────┘
+</code></pre></div>
+
+<h2>Magic Number Validation</h2>
+<p>Every file format has a signature (magic bytes) at the beginning of the file. Use the <code>file-type</code> library to detect the real type:</p>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>install<span class="w"> </span>file-type
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">fileTypeFromBuffer</span><span class="p">,</span><span class="w"> </span><span class="nx">fileTypeFromFile</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;file-type&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">fs</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:fs/promises&#39;</span><span class="p">;</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">validateFileContent</span><span class="p">(</span><span class="nx">filePath</span><span class="p">,</span><span class="w"> </span><span class="nx">allowedTypes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">fileType</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fileTypeFromFile</span><span class="p">(</span><span class="nx">filePath</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">fileType</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Unable to determine file type&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">allowedTypes</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="nx">fileType</span><span class="p">.</span><span class="nx">mime</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span>
+<span class="w">      </span><span class="sb">`File content is </span><span class="si">${</span><span class="nx">fileType</span><span class="p">.</span><span class="nx">mime</span><span class="si">}</span><span class="sb">, expected one of: </span><span class="si">${</span><span class="nx">allowedTypes</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="s1">&#39;, &#39;</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">fileType</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">allowedImageTypes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;image/jpeg&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;image/png&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;image/gif&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;image/webp&#39;</span><span class="p">];</span>
+
+<span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">validateFileContent</span><span class="p">(</span><span class="s1">&#39;/var/uploads/tmp/abc123.jpg&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">allowedImageTypes</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Validated: </span><span class="si">${</span><span class="nx">type</span><span class="p">.</span><span class="nx">mime</span><span class="si">}</span><span class="sb"> (.</span><span class="si">${</span><span class="nx">type</span><span class="p">.</span><span class="nx">ext</span><span class="si">}</span><span class="sb">)`</span><span class="p">);</span>
+<span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Delete the suspicious file</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">unlink</span><span class="p">(</span><span class="s1">&#39;/var/uploads/tmp/abc123.jpg&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`Rejected: </span><span class="si">${</span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Filename Sanitization</h2>
+<p>Filenames from clients can contain path traversal attacks, null bytes, and special characters:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">path</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:path&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">sanitizeFilename</span><span class="p">(</span><span class="nx">originalName</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Remove path components (prevent ../../etc/passwd)</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">basename</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">path</span><span class="p">.</span><span class="nx">basename</span><span class="p">(</span><span class="nx">originalName</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Remove null bytes</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">cleaned</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">basename</span><span class="p">.</span><span class="nx">replace</span><span class="p">(</span><span class="sr">/\0/g</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Extract and validate extension</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">ext</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">path</span><span class="p">.</span><span class="nx">extname</span><span class="p">(</span><span class="nx">cleaned</span><span class="p">).</span><span class="nx">toLowerCase</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">allowedExtensions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;.jpg&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;.jpeg&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;.png&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;.gif&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;.webp&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;.pdf&#39;</span><span class="p">];</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">allowedExtensions</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="nx">ext</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Extension </span><span class="si">${</span><span class="nx">ext</span><span class="si">}</span><span class="sb"> is not allowed`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Generate a safe filename</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">safeName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mf">16</span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">safeName</span><span class="si">}${</span><span class="nx">ext</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Dangerous inputs and their sanitized outputs:</span>
+<span class="c1">// &#39;../../etc/passwd&#39;           -&gt; Error (no allowed extension)</span>
+<span class="c1">// &#39;shell.php.jpg&#39;              -&gt; &#39;a1b2c3d4e5f6...jpg&#39;</span>
+<span class="c1">// &#39;photo.jpg\0.php&#39;            -&gt; &#39;a1b2c3d4e5f6...php&#39; -&gt; Error</span>
+<span class="c1">// &#39;../../../tmp/evil.jpg&#39;      -&gt; &#39;a1b2c3d4e5f6...jpg&#39;</span>
+</code></pre></div>
+
+<h2>Image-Specific Validation with Sharp</h2>
+<p>For image uploads, use <code>sharp</code> to validate and re-process images, which strips any embedded malicious content:</p>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>install<span class="w"> </span>sharp
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">sharp</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;sharp&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">fs</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:fs/promises&#39;</span><span class="p">;</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">processAndValidateImage</span><span class="p">(</span><span class="nx">inputPath</span><span class="p">,</span><span class="w"> </span><span class="nx">outputPath</span><span class="p">,</span><span class="w"> </span><span class="nx">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">maxWidth</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">2048</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">maxHeight</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">2048</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">maxSizeBytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">quality</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">85</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">options</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Check file size first</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">stats</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">stat</span><span class="p">(</span><span class="nx">inputPath</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">stats</span><span class="p">.</span><span class="nx">size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">maxSizeBytes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`File size </span><span class="si">${</span><span class="nx">stats</span><span class="p">.</span><span class="nx">size</span><span class="si">}</span><span class="sb"> exceeds maximum </span><span class="si">${</span><span class="nx">maxSizeBytes</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">metadata</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">sharp</span><span class="p">(</span><span class="nx">inputPath</span><span class="p">).</span><span class="nx">metadata</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// Validate dimensions</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">metadata</span><span class="p">.</span><span class="nx">width</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">maxWidth</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">4</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">metadata</span><span class="p">.</span><span class="nx">height</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">maxHeight</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">4</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Image dimensions are unreasonably large&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Re-encode the image (strips EXIF, embedded scripts, etc.)</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">sharp</span><span class="p">(</span><span class="nx">inputPath</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">resize</span><span class="p">(</span><span class="nx">maxWidth</span><span class="p">,</span><span class="w"> </span><span class="nx">maxHeight</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">fit</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;inside&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">withoutEnlargement</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="p">})</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">jpeg</span><span class="p">({</span><span class="w"> </span><span class="nx">quality</span><span class="p">,</span><span class="w"> </span><span class="nx">mozjpeg</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">})</span><span class="w">  </span><span class="c1">// or .png(), .webp()</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">toFile</span><span class="p">(</span><span class="nx">outputPath</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Delete the original unprocessed file</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">unlink</span><span class="p">(</span><span class="nx">inputPath</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">width</span><span class="o">:</span><span class="w"> </span><span class="nx">metadata</span><span class="p">.</span><span class="nx">width</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">height</span><span class="o">:</span><span class="w"> </span><span class="nx">metadata</span><span class="p">.</span><span class="nx">height</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">format</span><span class="o">:</span><span class="w"> </span><span class="nx">metadata</span><span class="p">.</span><span class="nx">format</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">processedPath</span><span class="o">:</span><span class="w"> </span><span class="nx">outputPath</span><span class="p">,</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// If sharp cannot process it, it is not a valid image</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">unlink</span><span class="p">(</span><span class="nx">inputPath</span><span class="p">).</span><span class="k">catch</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{});</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Invalid image file: </span><span class="si">${</span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Re-encoding through sharp is one of the best defenses: if a file is not truly a valid image, sharp will fail to process it. And even if the image contains embedded malicious payloads in metadata or trailing bytes, re-encoding strips them.</p>
+<h2>Complete Secure Upload Endpoint</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">multer</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;multer&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">sharp</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;sharp&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">fileTypeFromFile</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;file-type&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">path</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:path&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">fs</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:fs/promises&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">UPLOAD_DIR</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;/var/uploads&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">TEMP_DIR</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">path</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="nx">UPLOAD_DIR</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;tmp&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">FINAL_DIR</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">path</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="nx">UPLOAD_DIR</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;images&#39;</span><span class="p">);</span>
+
+<span class="c1">// Ensure directories exist</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">mkdir</span><span class="p">(</span><span class="nx">TEMP_DIR</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">recursive</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">mkdir</span><span class="p">(</span><span class="nx">FINAL_DIR</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">recursive</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">upload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">multer</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">storage</span><span class="o">:</span><span class="w"> </span><span class="nx">multer</span><span class="p">.</span><span class="nx">diskStorage</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">destination</span><span class="o">:</span><span class="w"> </span><span class="nx">TEMP_DIR</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">filename</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="nx">cb</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mf">16</span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">ext</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">path</span><span class="p">.</span><span class="nx">extname</span><span class="p">(</span><span class="nx">file</span><span class="p">.</span><span class="nx">originalname</span><span class="p">).</span><span class="nx">toLowerCase</span><span class="p">();</span>
+<span class="w">      </span><span class="nx">cb</span><span class="p">(</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">name</span><span class="si">}${</span><span class="nx">ext</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">}),</span>
+<span class="w">  </span><span class="nx">limits</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">fileSize</span><span class="o">:</span><span class="w"> </span><span class="mf">10</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="p">,</span><span class="w">  </span><span class="c1">// 10MB raw upload limit</span>
+<span class="w">    </span><span class="nx">files</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">fileFilter</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="nx">cb</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">allowed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;image/jpeg&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;image/png&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;image/webp&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;image/gif&#39;</span><span class="p">];</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">allowed</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="nx">file</span><span class="p">.</span><span class="nx">mimetype</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">cb</span><span class="p">(</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">cb</span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="nx">multer</span><span class="p">.</span><span class="nx">MulterError</span><span class="p">(</span><span class="s1">&#39;LIMIT_UNEXPECTED_FILE&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">file</span><span class="p">.</span><span class="nx">fieldname</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">});</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/upload/avatar&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">upload</span><span class="p">.</span><span class="nx">single</span><span class="p">(</span><span class="s1">&#39;avatar&#39;</span><span class="p">),</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">req</span><span class="p">.</span><span class="nx">file</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;No file uploaded&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">tempPath</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">file</span><span class="p">.</span><span class="nx">path</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Step 1: Validate magic bytes</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">detectedType</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fileTypeFromFile</span><span class="p">(</span><span class="nx">tempPath</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">allowedMimes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;image/jpeg&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;image/png&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;image/webp&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;image/gif&#39;</span><span class="p">];</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">detectedType</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="nx">allowedMimes</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="nx">detectedType</span><span class="p">.</span><span class="nx">mime</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">unlink</span><span class="p">(</span><span class="nx">tempPath</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid file type&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">detail</span><span class="o">:</span><span class="w"> </span><span class="sb">`Detected: </span><span class="si">${</span><span class="nx">detectedType</span><span class="o">?</span><span class="p">.</span><span class="nx">mime</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;unknown&#39;</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Step 2: Process with sharp (validates, resizes, strips metadata)</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">outputName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mf">16</span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">)</span><span class="si">}</span><span class="sb">.jpg`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">outputPath</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">path</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="nx">FINAL_DIR</span><span class="p">,</span><span class="w"> </span><span class="nx">outputName</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">metadata</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">sharp</span><span class="p">(</span><span class="nx">tempPath</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">resize</span><span class="p">(</span><span class="mf">800</span><span class="p">,</span><span class="w"> </span><span class="mf">800</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">fit</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;cover&#39;</span><span class="w"> </span><span class="p">})</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">jpeg</span><span class="p">({</span><span class="w"> </span><span class="nx">quality</span><span class="o">:</span><span class="w"> </span><span class="mf">85</span><span class="w"> </span><span class="p">})</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">toFile</span><span class="p">(</span><span class="nx">outputPath</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Step 3: Clean up temp file</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">unlink</span><span class="p">(</span><span class="nx">tempPath</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Step 4: Return the URL</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">url</span><span class="o">:</span><span class="w"> </span><span class="sb">`/uploads/images/</span><span class="si">${</span><span class="nx">outputName</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">width</span><span class="o">:</span><span class="w"> </span><span class="nx">metadata</span><span class="p">.</span><span class="nx">width</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">height</span><span class="o">:</span><span class="w"> </span><span class="nx">metadata</span><span class="p">.</span><span class="nx">height</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">size</span><span class="o">:</span><span class="w"> </span><span class="nx">metadata</span><span class="p">.</span><span class="nx">size</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Clean up on any error</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">unlink</span><span class="p">(</span><span class="nx">tempPath</span><span class="p">).</span><span class="k">catch</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{});</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Upload processing failed&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="c1">// Handle Multer errors</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">((</span><span class="nx">err</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="w"> </span><span class="ow">instanceof</span><span class="w"> </span><span class="nx">multer</span><span class="p">.</span><span class="nx">MulterError</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">messages</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">LIMIT_FILE_SIZE</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;File is too large (max 10MB)&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">LIMIT_FILE_COUNT</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Too many files&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">LIMIT_UNEXPECTED_FILE</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Unexpected file type&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">messages</span><span class="p">[</span><span class="nx">err</span><span class="p">.</span><span class="nx">code</span><span class="p">]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="nx">next</span><span class="p">(</span><span class="nx">err</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Preventing Zip Bombs and Decompression Attacks</h2>
+<p>If you accept ZIP, GZIP, or other compressed files, validate the decompressed size before extracting:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">createReadStream</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:fs&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">createGunzip</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:zlib&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:stream/promises&#39;</span><span class="p">;</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">safeDecompress</span><span class="p">(</span><span class="nx">inputPath</span><span class="p">,</span><span class="w"> </span><span class="nx">maxDecompressedSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">100</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">totalSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">sizeChecker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="k">import</span><span class="p">(</span><span class="s1">&#39;node:stream&#39;</span><span class="p">)).</span><span class="nx">Transform</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">transform</span><span class="p">(</span><span class="nx">chunk</span><span class="p">,</span><span class="w"> </span><span class="nx">encoding</span><span class="p">,</span><span class="w"> </span><span class="nx">callback</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">totalSize</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">chunk</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">totalSize</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">maxDecompressedSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">callback</span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span>
+<span class="w">          </span><span class="sb">`Decompressed size exceeds limit of </span><span class="si">${</span><span class="nx">maxDecompressedSize</span><span class="si">}</span><span class="sb"> bytes (zip bomb?)`</span>
+<span class="w">        </span><span class="p">));</span>
+<span class="w">        </span><span class="k">return</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="nx">callback</span><span class="p">(</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nx">chunk</span><span class="p">);</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">(</span>
+<span class="w">      </span><span class="nx">createReadStream</span><span class="p">(</span><span class="nx">inputPath</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">createGunzip</span><span class="p">(),</span>
+<span class="w">      </span><span class="nx">sizeChecker</span><span class="p">,</span>
+<span class="w">      </span><span class="c1">// ... write stream or further processing</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Decompression failed: </span><span class="si">${</span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>SVG Sanitization</h2>
+<p>SVG files are XML and can contain embedded JavaScript, external references, and other attack vectors:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">JSDOM</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;jsdom&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">createDOMPurify</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;dompurify&#39;</span><span class="p">;</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">sanitizeSVG</span><span class="p">(</span><span class="nx">svgContent</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nb">window</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">JSDOM</span><span class="p">(</span><span class="s1">&#39;&#39;</span><span class="p">).</span><span class="nb">window</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">DOMPurify</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">createDOMPurify</span><span class="p">(</span><span class="nb">window</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">clean</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">DOMPurify</span><span class="p">.</span><span class="nx">sanitize</span><span class="p">(</span><span class="nx">svgContent</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">USE_PROFILES</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">svg</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">svgFilters</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">FORBID_TAGS</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;script&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;foreignObject&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;use&#39;</span><span class="p">],</span>
+<span class="w">    </span><span class="nx">FORBID_ATTR</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;onload&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;onerror&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;onclick&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;onmouseover&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;xlink:href&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">clean</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Storing Files Securely</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────┐
+│              Secure File Storage Strategy             │
+├──────────────────────────────────────────────────────┤
+│                                                      │
+│  DO:                                                 │
+│  - Store outside the web root                        │
+│  - Use random filenames (no user input)              │
+│  - Serve through a controller (access control)       │
+│  - Use a CDN or object storage (S3) for production   │
+│  - Set Content-Disposition: attachment for downloads  │
+│  - Set X-Content-Type-Options: nosniff               │
+│                                                      │
+│  DON&#39;T:                                              │
+│  - Store in public/ or static/ directory             │
+│  - Use original filenames from users                 │
+│  - Serve uploaded files without Content-Type check   │
+│  - Allow directory listing on upload directories     │
+│  - Trust the Content-Type header from the client     │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// Serve files through a controlled endpoint</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/files/:id&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">.</span><span class="nx">file</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span><span class="w"> </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">file</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;File not found&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Check access permissions</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">file</span><span class="p">.</span><span class="nx">userId</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">role</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;admin&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Access denied&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Set security headers</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">set</span><span class="p">({</span>
+<span class="w">    </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">file</span><span class="p">.</span><span class="nx">mimeType</span><span class="p">,</span>
+<span class="w">    </span><span class="s1">&#39;Content-Disposition&#39;</span><span class="o">:</span><span class="w"> </span><span class="sb">`attachment; filename=&quot;</span><span class="si">${</span><span class="nx">file</span><span class="p">.</span><span class="nx">originalName</span><span class="si">}</span><span class="sb">&quot;`</span><span class="p">,</span>
+<span class="w">    </span><span class="s1">&#39;X-Content-Type-Options&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;nosniff&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="s1">&#39;Cache-Control&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;private, max-age=3600&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">stream</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">createReadStream</span><span class="p">(</span><span class="nx">file</span><span class="p">.</span><span class="nx">storagePath</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">stream</span><span class="p">.</span><span class="nx">pipe</span><span class="p">(</span><span class="nx">res</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Upload to S3 with Validation</h2>
+<p>In production, use object storage instead of local disk:</p>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>install<span class="w"> </span>@aws-sdk/client-s3
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">S3Client</span><span class="p">,</span><span class="w"> </span><span class="nx">PutObjectCommand</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@aws-sdk/client-s3&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">s3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">S3Client</span><span class="p">({</span><span class="w"> </span><span class="nx">region</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">AWS_REGION</span><span class="w"> </span><span class="p">});</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">uploadToS3</span><span class="p">(</span><span class="nx">fileBuffer</span><span class="p">,</span><span class="w"> </span><span class="nx">originalName</span><span class="p">,</span><span class="w"> </span><span class="nx">mimeType</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`uploads/</span><span class="si">${</span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mf">16</span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">)</span><span class="si">}${</span><span class="nx">path</span><span class="p">.</span><span class="nx">extname</span><span class="p">(</span><span class="nx">originalName</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">s3</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="nx">PutObjectCommand</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">Bucket</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">S3_BUCKET</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">Key</span><span class="o">:</span><span class="w"> </span><span class="nx">key</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">Body</span><span class="o">:</span><span class="w"> </span><span class="nx">fileBuffer</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">ContentType</span><span class="o">:</span><span class="w"> </span><span class="nx">mimeType</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">ContentDisposition</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;attachment&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">ServerSideEncryption</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;AES256&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">Metadata</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="s1">&#39;original-name&#39;</span><span class="o">:</span><span class="w"> </span><span class="nb">encodeURIComponent</span><span class="p">(</span><span class="nx">originalName</span><span class="p">),</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">}));</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">key</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">url</span><span class="o">:</span><span class="w"> </span><span class="sb">`https://</span><span class="si">${</span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">S3_BUCKET</span><span class="si">}</span><span class="sb">.s3.</span><span class="si">${</span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">AWS_REGION</span><span class="si">}</span><span class="sb">.amazonaws.com/</span><span class="si">${</span><span class="nx">key</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Summary</h2>
+<p>File upload security requires defense in depth: limit file sizes at the web server and application level, validate MIME types by reading magic bytes (not trusting headers), sanitize filenames, re-encode images through sharp to strip embedded payloads, protect against zip bombs, store files outside the web root with random names, serve them through controlled endpoints with proper headers, and in production use object storage like S3. Never trust any aspect of a file upload from the client.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Secure Avatar Upload Endpoint</div>
+                    <div class="exercise-desc"><p>Build a complete avatar upload endpoint with Express and Multer. It should: accept only JPEG/PNG/WebP, limit to 5MB, validate magic bytes with file-type, re-encode through sharp to 400x400 pixels, generate a random filename, store in a non-public directory, and return the access URL. Include error handling for every failure mode.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use multer's memoryStorage to get a buffer, validate with fileTypeFromBuffer(), process with sharp().resize().toFile(), and serve through a separate GET endpoint with proper headers.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Multi-File Upload with Validation</div>
+                    <div class="exercise-desc"><p>Create an endpoint that accepts up to 10 files of mixed types (images and PDFs). Validate each file independently (images: magic bytes + sharp processing; PDFs: magic bytes + size check). Return a response showing which files succeeded and which were rejected, with reasons for each rejection.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use upload.array('files', 10) and process each file in a Promise.allSettled() call to handle partial failures gracefully.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Malicious Upload Test Suite</div>
+                    <div class="exercise-desc"><p>Write tests that attempt to bypass your upload validation: rename a PHP file to .jpg, create a file with JPEG magic bytes followed by PHP code, upload a file with path traversal in the name (../../etc/passwd.jpg), upload a 0-byte file, and upload a file exceeding the size limit. Verify each attack is properly blocked.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Node.js Buffer to craft files with specific magic bytes. Use supertest to send multipart requests. Verify files are rejected and temp files are cleaned up.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Uploaded images are served with wrong Content-Type, causing the browser to download instead of display</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The serving endpoint is not setting the Content-Type header based on the actual file type, or it is always setting Content-Disposition: attachment.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> When serving images for display (like avatars), use Content-Disposition: inline and set the correct Content-Type based on the stored MIME type. For downloads, use Content-Disposition: attachment. Always set X-Content-Type-Options: nosniff to prevent MIME sniffing.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Temp files accumulate and fill up disk space</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> When upload processing fails (validation error, sharp crash, S3 timeout), the temporary file is not cleaned up.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Always wrap upload processing in try/catch/finally and delete the temp file in the finally block. Additionally, set up a cron job or periodic cleanup that removes files older than 1 hour from the temp directory: `find /var/uploads/tmp -mmin +60 -delete`.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">CORS errors when uploading from the frontend</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The browser sends a preflight OPTIONS request for multipart uploads, and the server does not handle it.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Configure CORS middleware before your upload routes: `app.use(cors({ origin: 'https://yourfrontend.com', methods: ['POST'], allowedHeaders: ['Content-Type', 'Authorization'] }))`. Make sure the CORS middleware handles OPTIONS requests.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">OWASP File Upload Cheat Sheet</div>
+                    
+                    <div class="resource-note">Comprehensive security guide covering all file upload attack vectors and mitigations</div>
+                    
+                </a>
+                
+                <a href="https://github.com/expressjs/multer" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag github">github</div>
+                    <div class="resource-title">Multer Documentation</div>
+                    
+                    <div class="resource-note">Official docs for the standard Node.js multipart middleware</div>
+                    
+                </a>
+                
+                <a href="https://sharp.pixelplumbing.com/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Sharp Image Processing Documentation</div>
+                    
+                    <div class="resource-note">High-performance image processing library for Node.js with comprehensive API</div>
+                    
+                </a>
+                
+                <a href="https://github.com/sindresorhus/file-type" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag github">github</div>
+                    <div class="resource-title">file-type - Detect file type from content</div>
+                    
+                    <div class="resource-note">Detects file type by checking magic bytes, not trusting file extensions</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/7.4.2-js.html" class="btn">&larr; Joi: Validation Schemas and Integration Patterns</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-7-js.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

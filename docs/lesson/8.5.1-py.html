@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Structured Logging with structlog and JSON - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-py.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-py.html">Security & Reliability</a> &rsaquo;
+            Logging & Monitoring
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.5.1</span>
+                <span>~2h</span>
+            </div>
+            <h1>Structured Logging with structlog and JSON</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of structured logging like the difference between a handwritten diary and a spreadsheet. A diary entry says 'Sold 3 red widgets to John for $45 on Tuesday' — it is readable but hard to analyze at scale. A spreadsheet row with columns for quantity, color, product, customer, amount, and date lets you instantly sort, filter, and aggregate thousands of entries. structlog turns your application's diary entries into spreadsheet rows that your observability tools can query in milliseconds.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Structured Logging with structlog and JSON</h1>
+<p>Logging is one of those aspects of software engineering that separates production-ready systems from toy projects. When your application handles thousands of requests per second across dozens of microservices, the difference between structured and unstructured logging becomes the difference between diagnosing an incident in minutes versus hours.</p>
+<h2>Why Structured Logging Matters</h2>
+<p>Traditional logging looks like this:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;User 12345 placed order 67890 for $99.99&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>This produces a human-readable string:</p>
+<div class="highlight"><pre><span></span><code>2026-03-17 10:23:45,123 INFO User 12345 placed order 67890 for $99.99
+</code></pre></div>
+
+<p>Now imagine you need to answer: "How many orders did user 12345 place in the last hour?" or "What is the average order value across all users?" You would need to parse that string with regex or string splitting — fragile, slow, and error-prone.</p>
+<p>Structured logging emits log entries as key-value pairs, typically serialized as JSON:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;event&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;order_placed&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;user_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">12345</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;order_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">67890</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;amount&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">99.99</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;currency&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;USD&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-17T10:23:45.123Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;level&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;info&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>With structured logs, tools like Elasticsearch, Datadog, Splunk, and Loki can index individual fields. You can filter by <code>user_id</code>, aggregate by <code>amount</code>, and alert on specific <code>event</code> types — all without writing a single regex.</p>
+<h3>The Core Advantages</h3>
+<ol>
+<li><strong>Machine-parseable</strong>: Log aggregation systems can index and query fields directly.</li>
+<li><strong>Consistent schema</strong>: Every log entry follows a predictable structure.</li>
+<li><strong>Rich context</strong>: You can attach arbitrary metadata (request IDs, trace IDs, user context) without string formatting gymnastics.</li>
+<li><strong>Better correlation</strong>: Tracking a request across services becomes trivial with bound context.</li>
+<li><strong>Easier alerting</strong>: Set up alerts on specific fields and values rather than pattern matching.</li>
+</ol>
+<h2>Limitations of Python's stdlib <code>logging</code></h2>
+<p>Python's built-in <code>logging</code> module is powerful but was designed in an era of unstructured, text-based logs. While you can make it produce JSON output (with custom formatters), the ergonomics are clunky:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">JSONFormatter</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">Formatter</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">format</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">record</span><span class="p">):</span>
+        <span class="n">log_entry</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;timestamp&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">formatTime</span><span class="p">(</span><span class="n">record</span><span class="p">),</span>
+            <span class="s2">&quot;level&quot;</span><span class="p">:</span> <span class="n">record</span><span class="o">.</span><span class="n">levelname</span><span class="p">,</span>
+            <span class="s2">&quot;message&quot;</span><span class="p">:</span> <span class="n">record</span><span class="o">.</span><span class="n">getMessage</span><span class="p">(),</span>
+            <span class="s2">&quot;logger&quot;</span><span class="p">:</span> <span class="n">record</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+            <span class="s2">&quot;module&quot;</span><span class="p">:</span> <span class="n">record</span><span class="o">.</span><span class="n">module</span><span class="p">,</span>
+        <span class="p">}</span>
+        <span class="c1"># Adding extra fields requires convention and discipline</span>
+        <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="s2">&quot;user_id&quot;</span><span class="p">):</span>
+            <span class="n">log_entry</span><span class="p">[</span><span class="s2">&quot;user_id&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">record</span><span class="o">.</span><span class="n">user_id</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">log_entry</span><span class="p">)</span>
+
+<span class="n">handler</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">StreamHandler</span><span class="p">()</span>
+<span class="n">handler</span><span class="o">.</span><span class="n">setFormatter</span><span class="p">(</span><span class="n">JSONFormatter</span><span class="p">())</span>
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;myapp&quot;</span><span class="p">)</span>
+<span class="n">logger</span><span class="o">.</span><span class="n">addHandler</span><span class="p">(</span><span class="n">handler</span><span class="p">)</span>
+<span class="n">logger</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">INFO</span><span class="p">)</span>
+
+<span class="c1"># Passing extra context is awkward</span>
+<span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;Order placed&quot;</span><span class="p">,</span> <span class="n">extra</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;user_id&quot;</span><span class="p">:</span> <span class="mi">12345</span><span class="p">})</span>
+</code></pre></div>
+
+<p>The problems compound quickly: there is no built-in way to bind context that persists across log calls, the <code>extra</code> dict is easy to forget, and building a processor pipeline requires significant custom code. This is where <code>structlog</code> shines.</p>
+<h2>Introduction to structlog</h2>
+<p><code>structlog</code> is a Python library that makes structured logging natural and powerful. It wraps loggers (its own or stdlib's) with a processor pipeline architecture that transforms log events through a chain of functions.</p>
+<p>Install it:</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>structlog
+</code></pre></div>
+
+<h3>Basic Usage</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">structlog</span>
+
+<span class="n">log</span> <span class="o">=</span> <span class="n">structlog</span><span class="o">.</span><span class="n">get_logger</span><span class="p">()</span>
+
+<span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;order_placed&quot;</span><span class="p">,</span> <span class="n">user_id</span><span class="o">=</span><span class="mi">12345</span><span class="p">,</span> <span class="n">order_id</span><span class="o">=</span><span class="mi">67890</span><span class="p">,</span> <span class="n">amount</span><span class="o">=</span><span class="mf">99.99</span><span class="p">)</span>
+</code></pre></div>
+
+<p>With default configuration, this outputs a colorized, human-readable format in development. But the real power comes from configuring it for production.</p>
+<h2>Configuring structlog for Production</h2>
+<p>A production-ready structlog configuration typically looks like this:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">structlog</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">configure_logging</span><span class="p">(</span><span class="n">json_output</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span> <span class="n">log_level</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;INFO&quot;</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Configure structlog for production use.&quot;&quot;&quot;</span>
+
+    <span class="n">shared_processors</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">contextvars</span><span class="o">.</span><span class="n">merge_contextvars</span><span class="p">,</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">add_log_level</span><span class="p">,</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">add_logger_name</span><span class="p">,</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">TimeStamper</span><span class="p">(</span><span class="n">fmt</span><span class="o">=</span><span class="s2">&quot;iso&quot;</span><span class="p">),</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">StackInfoRenderer</span><span class="p">(),</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">UnicodeDecoder</span><span class="p">(),</span>
+    <span class="p">]</span>
+
+    <span class="k">if</span> <span class="n">json_output</span><span class="p">:</span>
+        <span class="c1"># Production: JSON output</span>
+        <span class="n">renderer</span> <span class="o">=</span> <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">JSONRenderer</span><span class="p">()</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="c1"># Development: colorized console output</span>
+        <span class="n">renderer</span> <span class="o">=</span> <span class="n">structlog</span><span class="o">.</span><span class="n">dev</span><span class="o">.</span><span class="n">ConsoleRenderer</span><span class="p">(</span><span class="n">colors</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+    <span class="n">structlog</span><span class="o">.</span><span class="n">configure</span><span class="p">(</span>
+        <span class="n">processors</span><span class="o">=</span><span class="p">[</span>
+            <span class="o">*</span><span class="n">shared_processors</span><span class="p">,</span>
+            <span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">ProcessorFormatter</span><span class="o">.</span><span class="n">wrap_for_formatter</span><span class="p">,</span>
+        <span class="p">],</span>
+        <span class="n">logger_factory</span><span class="o">=</span><span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">LoggerFactory</span><span class="p">(),</span>
+        <span class="n">wrapper_class</span><span class="o">=</span><span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">BoundLogger</span><span class="p">,</span>
+        <span class="n">cache_logger_on_first_use</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="n">formatter</span> <span class="o">=</span> <span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">ProcessorFormatter</span><span class="p">(</span>
+        <span class="n">processors</span><span class="o">=</span><span class="p">[</span>
+            <span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">ProcessorFormatter</span><span class="o">.</span><span class="n">remove_processors_meta</span><span class="p">,</span>
+            <span class="n">renderer</span><span class="p">,</span>
+        <span class="p">],</span>
+        <span class="n">foreign_pre_chain</span><span class="o">=</span><span class="n">shared_processors</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="n">handler</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">StreamHandler</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="p">)</span>
+    <span class="n">handler</span><span class="o">.</span><span class="n">setFormatter</span><span class="p">(</span><span class="n">formatter</span><span class="p">)</span>
+
+    <span class="n">root_logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">()</span>
+    <span class="n">root_logger</span><span class="o">.</span><span class="n">handlers</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+    <span class="n">root_logger</span><span class="o">.</span><span class="n">addHandler</span><span class="p">(</span><span class="n">handler</span><span class="p">)</span>
+    <span class="n">root_logger</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="n">logging</span><span class="p">,</span> <span class="n">log_level</span><span class="o">.</span><span class="n">upper</span><span class="p">()))</span>
+</code></pre></div>
+
+<p>This configuration achieves several things: it integrates with Python's stdlib logging so third-party libraries' log output also gets structured, it uses ISO timestamps for consistent time formatting, and it switches between human-readable and JSON output based on the environment.</p>
+<h2>Understanding the Processor Pipeline</h2>
+<p>The processor pipeline is structlog's most powerful concept. Each processor is a callable that receives the logger, the method name, and an event dict, and returns a (potentially modified) event dict:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">add_environment</span><span class="p">(</span><span class="n">logger</span><span class="p">,</span> <span class="n">method_name</span><span class="p">,</span> <span class="n">event_dict</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Add deployment environment to every log entry.&quot;&quot;&quot;</span>
+    <span class="n">event_dict</span><span class="p">[</span><span class="s2">&quot;environment&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;APP_ENV&quot;</span><span class="p">,</span> <span class="s2">&quot;development&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">event_dict</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">add_hostname</span><span class="p">(</span><span class="n">logger</span><span class="p">,</span> <span class="n">method_name</span><span class="p">,</span> <span class="n">event_dict</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Add hostname for identifying which instance emitted the log.&quot;&quot;&quot;</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">socket</span>
+    <span class="n">event_dict</span><span class="p">[</span><span class="s2">&quot;hostname&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">gethostname</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">event_dict</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">censor_sensitive_data</span><span class="p">(</span><span class="n">logger</span><span class="p">,</span> <span class="n">method_name</span><span class="p">,</span> <span class="n">event_dict</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Remove or mask sensitive fields before they reach output.&quot;&quot;&quot;</span>
+    <span class="n">sensitive_keys</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;password&quot;</span><span class="p">,</span> <span class="s2">&quot;token&quot;</span><span class="p">,</span> <span class="s2">&quot;secret&quot;</span><span class="p">,</span> <span class="s2">&quot;api_key&quot;</span><span class="p">,</span> <span class="s2">&quot;ssn&quot;</span><span class="p">,</span> <span class="s2">&quot;credit_card&quot;</span><span class="p">}</span>
+    <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="nb">list</span><span class="p">(</span><span class="n">event_dict</span><span class="o">.</span><span class="n">keys</span><span class="p">()):</span>
+        <span class="k">if</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">sensitive_keys</span><span class="p">:</span>
+            <span class="n">event_dict</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;***REDACTED***&quot;</span>
+        <span class="k">elif</span> <span class="n">key</span> <span class="o">==</span> <span class="s2">&quot;email&quot;</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">event_dict</span><span class="p">[</span><span class="n">key</span><span class="p">],</span> <span class="nb">str</span><span class="p">):</span>
+            <span class="n">parts</span> <span class="o">=</span> <span class="n">event_dict</span><span class="p">[</span><span class="n">key</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;@&quot;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">parts</span><span class="p">)</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
+                <span class="n">event_dict</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">parts</span><span class="p">[</span><span class="mi">0</span><span class="p">][:</span><span class="mi">2</span><span class="p">]</span><span class="si">}</span><span class="s2">***@</span><span class="si">{</span><span class="n">parts</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="k">return</span> <span class="n">event_dict</span>
+</code></pre></div>
+
+<p>You add these to your processor chain:</p>
+<div class="highlight"><pre><span></span><code><span class="n">structlog</span><span class="o">.</span><span class="n">configure</span><span class="p">(</span>
+    <span class="n">processors</span><span class="o">=</span><span class="p">[</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">contextvars</span><span class="o">.</span><span class="n">merge_contextvars</span><span class="p">,</span>
+        <span class="n">add_environment</span><span class="p">,</span>
+        <span class="n">add_hostname</span><span class="p">,</span>
+        <span class="n">censor_sensitive_data</span><span class="p">,</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">add_log_level</span><span class="p">,</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">TimeStamper</span><span class="p">(</span><span class="n">fmt</span><span class="o">=</span><span class="s2">&quot;iso&quot;</span><span class="p">),</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">JSONRenderer</span><span class="p">(),</span>
+    <span class="p">],</span>
+    <span class="c1"># ... rest of config</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>Processors execute in order, so place sensitive data filtering before the renderer but after context merging.</p>
+<h2>Binding Context</h2>
+<p>One of structlog's killer features is context binding. You can create loggers with persistent context that flows through all subsequent log calls.</p>
+<h3>Instance-Level Binding</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">structlog</span>
+
+<span class="n">log</span> <span class="o">=</span> <span class="n">structlog</span><span class="o">.</span><span class="n">get_logger</span><span class="p">()</span>
+
+<span class="c1"># Bind context for this logger instance</span>
+<span class="n">request_log</span> <span class="o">=</span> <span class="n">log</span><span class="o">.</span><span class="n">bind</span><span class="p">(</span><span class="n">request_id</span><span class="o">=</span><span class="s2">&quot;abc-123&quot;</span><span class="p">,</span> <span class="n">user_id</span><span class="o">=</span><span class="mi">42</span><span class="p">)</span>
+
+<span class="n">request_log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;processing_request&quot;</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="s2">&quot;/api/orders&quot;</span><span class="p">)</span>
+<span class="c1"># Output includes request_id and user_id automatically</span>
+
+<span class="n">request_log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;database_query&quot;</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="s2">&quot;orders&quot;</span><span class="p">,</span> <span class="n">duration_ms</span><span class="o">=</span><span class="mi">45</span><span class="p">)</span>
+<span class="c1"># Same context, different event</span>
+</code></pre></div>
+
+<h3>Context Variables (Thread/Async Safe)</h3>
+<p>For web applications, you typically want context bound per-request. structlog's <code>contextvars</code> integration handles this correctly for both threaded and async code:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">structlog</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">structlog.contextvars</span><span class="w"> </span><span class="kn">import</span> <span class="n">bind_contextvars</span><span class="p">,</span> <span class="n">clear_contextvars</span><span class="p">,</span> <span class="n">unbind_contextvars</span>
+
+<span class="c1"># In your middleware or request handler setup:</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">logging_middleware</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="n">call_next</span><span class="p">):</span>
+    <span class="n">clear_contextvars</span><span class="p">()</span>  <span class="c1"># Clean slate for each request</span>
+
+    <span class="n">bind_contextvars</span><span class="p">(</span>
+        <span class="n">request_id</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;X-Request-ID&quot;</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">uuid</span><span class="o">.</span><span class="n">uuid4</span><span class="p">())),</span>
+        <span class="n">user_id</span><span class="o">=</span><span class="nb">getattr</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">state</span><span class="p">,</span> <span class="s2">&quot;user_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">),</span>
+        <span class="n">method</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">method</span><span class="p">,</span>
+        <span class="n">path</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">url</span><span class="o">.</span><span class="n">path</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="n">response</span> <span class="o">=</span> <span class="n">call_next</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">response</span>
+</code></pre></div>
+
+<p>Now every log call anywhere in the request handling chain automatically includes the request ID, user ID, method, and path — without passing a logger instance around.</p>
+<p>Here is a complete FastAPI example:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">uuid</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">structlog</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">structlog.contextvars</span><span class="w"> </span><span class="kn">import</span> <span class="n">bind_contextvars</span><span class="p">,</span> <span class="n">clear_contextvars</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">fastapi</span><span class="w"> </span><span class="kn">import</span> <span class="n">FastAPI</span><span class="p">,</span> <span class="n">Request</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">starlette.middleware.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseHTTPMiddleware</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">FastAPI</span><span class="p">()</span>
+<span class="n">log</span> <span class="o">=</span> <span class="n">structlog</span><span class="o">.</span><span class="n">get_logger</span><span class="p">()</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">LoggingMiddleware</span><span class="p">(</span><span class="n">BaseHTTPMiddleware</span><span class="p">):</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">dispatch</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">:</span> <span class="n">Request</span><span class="p">,</span> <span class="n">call_next</span><span class="p">):</span>
+        <span class="n">clear_contextvars</span><span class="p">()</span>
+
+        <span class="n">request_id</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;X-Request-ID&quot;</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">uuid</span><span class="o">.</span><span class="n">uuid4</span><span class="p">()))</span>
+        <span class="n">start_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+
+        <span class="n">bind_contextvars</span><span class="p">(</span>
+            <span class="n">request_id</span><span class="o">=</span><span class="n">request_id</span><span class="p">,</span>
+            <span class="n">method</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">method</span><span class="p">,</span>
+            <span class="n">path</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">url</span><span class="o">.</span><span class="n">path</span><span class="p">,</span>
+            <span class="n">client_ip</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">host</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;request_started&quot;</span><span class="p">)</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">response</span> <span class="o">=</span> <span class="k">await</span> <span class="n">call_next</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+            <span class="n">duration_ms</span> <span class="o">=</span> <span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span> <span class="o">-</span> <span class="n">start_time</span><span class="p">)</span> <span class="o">*</span> <span class="mi">1000</span>
+            <span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+                <span class="s2">&quot;request_completed&quot;</span><span class="p">,</span>
+                <span class="n">status_code</span><span class="o">=</span><span class="n">response</span><span class="o">.</span><span class="n">status_code</span><span class="p">,</span>
+                <span class="n">duration_ms</span><span class="o">=</span><span class="nb">round</span><span class="p">(</span><span class="n">duration_ms</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span>
+            <span class="p">)</span>
+            <span class="n">response</span><span class="o">.</span><span class="n">headers</span><span class="p">[</span><span class="s2">&quot;X-Request-ID&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">request_id</span>
+            <span class="k">return</span> <span class="n">response</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="n">duration_ms</span> <span class="o">=</span> <span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span> <span class="o">-</span> <span class="n">start_time</span><span class="p">)</span> <span class="o">*</span> <span class="mi">1000</span>
+            <span class="n">log</span><span class="o">.</span><span class="n">error</span><span class="p">(</span>
+                <span class="s2">&quot;request_failed&quot;</span><span class="p">,</span>
+                <span class="n">error</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="n">exc</span><span class="p">),</span>
+                <span class="n">error_type</span><span class="o">=</span><span class="nb">type</span><span class="p">(</span><span class="n">exc</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="p">,</span>
+                <span class="n">duration_ms</span><span class="o">=</span><span class="nb">round</span><span class="p">(</span><span class="n">duration_ms</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span>
+            <span class="p">)</span>
+            <span class="k">raise</span>
+
+<span class="n">app</span><span class="o">.</span><span class="n">add_middleware</span><span class="p">(</span><span class="n">LoggingMiddleware</span><span class="p">)</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/api/orders/</span><span class="si">{order_id}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_order</span><span class="p">(</span><span class="n">order_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">):</span>
+    <span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;fetching_order&quot;</span><span class="p">,</span> <span class="n">order_id</span><span class="o">=</span><span class="n">order_id</span><span class="p">)</span>
+    <span class="c1"># Every log call here automatically has request_id, method, path</span>
+    <span class="n">order</span> <span class="o">=</span> <span class="k">await</span> <span class="n">fetch_order_from_db</span><span class="p">(</span><span class="n">order_id</span><span class="p">)</span>
+    <span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;order_fetched&quot;</span><span class="p">,</span> <span class="n">order_id</span><span class="o">=</span><span class="n">order_id</span><span class="p">,</span> <span class="n">status</span><span class="o">=</span><span class="n">order</span><span class="o">.</span><span class="n">status</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">order</span>
+</code></pre></div>
+
+<h2>Correlation IDs Across Services</h2>
+<p>In a microservice architecture, a single user action might trigger calls across multiple services. Correlation IDs (also called trace IDs) let you follow a request's journey.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">httpx</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">structlog</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">structlog.contextvars</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_contextvars</span>
+
+<span class="n">log</span> <span class="o">=</span> <span class="n">structlog</span><span class="o">.</span><span class="n">get_logger</span><span class="p">()</span>
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">call_payment_service</span><span class="p">(</span><span class="n">order_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">amount</span><span class="p">:</span> <span class="nb">float</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Call the payment service, propagating the correlation ID.&quot;&quot;&quot;</span>
+    <span class="n">ctx</span> <span class="o">=</span> <span class="n">get_contextvars</span><span class="p">()</span>  <span class="c1"># Get current bound context</span>
+    <span class="n">request_id</span> <span class="o">=</span> <span class="n">ctx</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;request_id&quot;</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">uuid</span><span class="o">.</span><span class="n">uuid4</span><span class="p">()))</span>
+
+    <span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;calling_payment_service&quot;</span><span class="p">,</span> <span class="n">order_id</span><span class="o">=</span><span class="n">order_id</span><span class="p">,</span> <span class="n">amount</span><span class="o">=</span><span class="n">amount</span><span class="p">)</span>
+
+    <span class="k">async</span> <span class="k">with</span> <span class="n">httpx</span><span class="o">.</span><span class="n">AsyncClient</span><span class="p">()</span> <span class="k">as</span> <span class="n">client</span><span class="p">:</span>
+        <span class="n">response</span> <span class="o">=</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+            <span class="s2">&quot;http://payment-service/api/charge&quot;</span><span class="p">,</span>
+            <span class="n">json</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;order_id&quot;</span><span class="p">:</span> <span class="n">order_id</span><span class="p">,</span> <span class="s2">&quot;amount&quot;</span><span class="p">:</span> <span class="n">amount</span><span class="p">},</span>
+            <span class="n">headers</span><span class="o">=</span><span class="p">{</span>
+                <span class="s2">&quot;X-Request-ID&quot;</span><span class="p">:</span> <span class="n">request_id</span><span class="p">,</span>
+                <span class="s2">&quot;X-Correlation-ID&quot;</span><span class="p">:</span> <span class="n">request_id</span><span class="p">,</span>
+            <span class="p">},</span>
+        <span class="p">)</span>
+
+    <span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+        <span class="s2">&quot;payment_service_response&quot;</span><span class="p">,</span>
+        <span class="n">status_code</span><span class="o">=</span><span class="n">response</span><span class="o">.</span><span class="n">status_code</span><span class="p">,</span>
+        <span class="n">order_id</span><span class="o">=</span><span class="n">order_id</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+</code></pre></div>
+
+<p>The receiving service extracts <code>X-Correlation-ID</code> from the incoming request and binds it to its own logging context. Now you can search your log aggregation tool for a single correlation ID and see the entire trace across all services.</p>
+<h2>JSON Output and Log Aggregation</h2>
+<p>JSON logs are the lingua franca of modern observability stacks. When structlog is configured with <code>JSONRenderer</code>, each log line is a single JSON object on one line (JSONL format), which is what tools like Filebeat, Fluentd, and the Datadog agent expect.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">structlog</span>
+
+<span class="n">structlog</span><span class="o">.</span><span class="n">configure</span><span class="p">(</span>
+    <span class="n">processors</span><span class="o">=</span><span class="p">[</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">contextvars</span><span class="o">.</span><span class="n">merge_contextvars</span><span class="p">,</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">add_log_level</span><span class="p">,</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">TimeStamper</span><span class="p">(</span><span class="n">fmt</span><span class="o">=</span><span class="s2">&quot;iso&quot;</span><span class="p">),</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">JSONRenderer</span><span class="p">(</span><span class="n">sort_keys</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+    <span class="p">],</span>
+    <span class="n">wrapper_class</span><span class="o">=</span><span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">BoundLogger</span><span class="p">,</span>
+    <span class="n">logger_factory</span><span class="o">=</span><span class="n">structlog</span><span class="o">.</span><span class="n">PrintLoggerFactory</span><span class="p">(),</span>
+<span class="p">)</span>
+
+<span class="n">log</span> <span class="o">=</span> <span class="n">structlog</span><span class="o">.</span><span class="n">get_logger</span><span class="p">()</span>
+<span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;server_started&quot;</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">8080</span><span class="p">,</span> <span class="n">workers</span><span class="o">=</span><span class="mi">4</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Output:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;event&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;server_started&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;level&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;info&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;port&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">8080</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-17T10:30:00.000000Z&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;workers&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">}</span>
+</code></pre></div>
+
+<h3>Custom JSON Serialization</h3>
+<p>Sometimes you need to handle types that are not JSON-serializable by default:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">datetime</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">decimal</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">uuid</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">custom_json_serializer</span><span class="p">(</span><span class="n">obj</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Handle non-standard types in log entries.&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">default</span><span class="p">(</span><span class="n">o</span><span class="p">):</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">o</span><span class="p">,</span> <span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">o</span><span class="o">.</span><span class="n">isoformat</span><span class="p">()</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">o</span><span class="p">,</span> <span class="n">datetime</span><span class="o">.</span><span class="n">date</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">o</span><span class="o">.</span><span class="n">isoformat</span><span class="p">()</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">o</span><span class="p">,</span> <span class="n">decimal</span><span class="o">.</span><span class="n">Decimal</span><span class="p">):</span>
+            <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="n">o</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">o</span><span class="p">,</span> <span class="n">uuid</span><span class="o">.</span><span class="n">UUID</span><span class="p">):</span>
+            <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="n">o</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">o</span><span class="p">,</span> <span class="nb">set</span><span class="p">):</span>
+            <span class="k">return</span> <span class="nb">list</span><span class="p">(</span><span class="n">o</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">o</span><span class="p">,</span> <span class="nb">bytes</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">o</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s2">&quot;utf-8&quot;</span><span class="p">,</span> <span class="n">errors</span><span class="o">=</span><span class="s2">&quot;replace&quot;</span><span class="p">)</span>
+        <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Object of type </span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">o</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s2"> is not JSON serializable&quot;</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">obj</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="n">default</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+<span class="n">structlog</span><span class="o">.</span><span class="n">configure</span><span class="p">(</span>
+    <span class="n">processors</span><span class="o">=</span><span class="p">[</span>
+        <span class="c1"># ... other processors</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">JSONRenderer</span><span class="p">(</span><span class="n">serializer</span><span class="o">=</span><span class="n">custom_json_serializer</span><span class="p">),</span>
+    <span class="p">],</span>
+    <span class="c1"># ...</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h2>Integrating with stdlib Logging</h2>
+<p>Many third-party libraries (SQLAlchemy, urllib3, celery) use Python's stdlib <code>logging</code>. The <code>ProcessorFormatter</code> ensures those logs also go through your structlog pipeline:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">structlog</span>
+
+<span class="c1"># This was shown in the configuration section above.</span>
+<span class="c1"># The key line is `foreign_pre_chain`, which processes</span>
+<span class="c1"># log records from non-structlog loggers.</span>
+
+<span class="c1"># After configuration, stdlib loggers are captured:</span>
+<span class="n">sqlalchemy_logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;sqlalchemy.engine&quot;</span><span class="p">)</span>
+<span class="n">sqlalchemy_logger</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">INFO</span><span class="p">)</span>
+<span class="c1"># SQLAlchemy&#39;s logs now appear as structured JSON</span>
+</code></pre></div>
+
+<p>This is critical because in production, you want ALL logs — from your code and from libraries — in the same structured format.</p>
+<h2>Sensitive Data Filtering</h2>
+<p>Logging sensitive data (PII, authentication tokens, credit card numbers) is a compliance and security risk. Build filtering into your processor pipeline so it is impossible to accidentally log secrets:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+
+<span class="n">SENSITIVE_PATTERNS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;credit_card&quot;</span><span class="p">:</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;\b\d</span><span class="si">{4}</span><span class="s2">[- ]?\d</span><span class="si">{4}</span><span class="s2">[- ]?\d</span><span class="si">{4}</span><span class="s2">[- ]?\d</span><span class="si">{4}</span><span class="s2">\b&quot;</span><span class="p">),</span>
+    <span class="s2">&quot;ssn&quot;</span><span class="p">:</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;\b\d</span><span class="si">{3}</span><span class="s2">-\d</span><span class="si">{2}</span><span class="s2">-\d</span><span class="si">{4}</span><span class="s2">\b&quot;</span><span class="p">),</span>
+    <span class="s2">&quot;bearer_token&quot;</span><span class="p">:</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;Bearer\s+[A-Za-z0-9\-._~+/]+=*&quot;</span><span class="p">),</span>
+<span class="p">}</span>
+
+<span class="n">SENSITIVE_KEYS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;password&quot;</span><span class="p">,</span> <span class="s2">&quot;passwd&quot;</span><span class="p">,</span> <span class="s2">&quot;secret&quot;</span><span class="p">,</span> <span class="s2">&quot;token&quot;</span><span class="p">,</span> <span class="s2">&quot;api_key&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;apikey&quot;</span><span class="p">,</span> <span class="s2">&quot;authorization&quot;</span><span class="p">,</span> <span class="s2">&quot;credit_card&quot;</span><span class="p">,</span> <span class="s2">&quot;ssn&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;social_security&quot;</span><span class="p">,</span> <span class="s2">&quot;private_key&quot;</span><span class="p">,</span>
+<span class="p">}</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">filter_sensitive_data</span><span class="p">(</span><span class="n">logger</span><span class="p">,</span> <span class="n">method_name</span><span class="p">,</span> <span class="n">event_dict</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Recursively scrub sensitive data from log events.&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">scrub</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">and</span> <span class="n">key</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span> <span class="ow">in</span> <span class="n">SENSITIVE_KEYS</span><span class="p">:</span>
+            <span class="k">return</span> <span class="s2">&quot;[REDACTED]&quot;</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">pattern_name</span><span class="p">,</span> <span class="n">pattern</span> <span class="ow">in</span> <span class="n">SENSITIVE_PATTERNS</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+                <span class="k">if</span> <span class="n">pattern</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">value</span><span class="p">):</span>
+                    <span class="n">value</span> <span class="o">=</span> <span class="n">pattern</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[REDACTED_</span><span class="si">{</span><span class="n">pattern_name</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span><span class="si">}</span><span class="s2">]&quot;</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+            <span class="k">return</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="n">scrub</span><span class="p">(</span><span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">value</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="p">(</span><span class="nb">list</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">)):</span>
+            <span class="k">return</span> <span class="p">[</span><span class="n">scrub</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">item</span><span class="p">)</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">value</span><span class="p">]</span>
+        <span class="k">return</span> <span class="n">value</span>
+
+    <span class="k">return</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="n">scrub</span><span class="p">(</span><span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">event_dict</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+</code></pre></div>
+
+<h2>Performance Considerations</h2>
+<p>Logging happens on every request, often multiple times. Poor logging performance can significantly impact your application.</p>
+<h3>1. Cache Loggers</h3>
+<p>Always set <code>cache_logger_on_first_use=True</code> in your structlog configuration. This avoids re-resolving the processor chain on every log call.</p>
+<h3>2. Avoid Expensive Computation in Log Calls</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Bad: str() is called even if log level is above DEBUG</span>
+<span class="n">log</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="s2">&quot;user_data&quot;</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="n">large_object</span><span class="p">))</span>
+
+<span class="c1"># Good: use lazy evaluation or check the level</span>
+<span class="k">if</span> <span class="n">log</span><span class="o">.</span><span class="n">isEnabledFor</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">):</span>
+    <span class="n">log</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="s2">&quot;user_data&quot;</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="n">large_object</span><span class="p">))</span>
+</code></pre></div>
+
+<h3>3. Use orjson for Faster Serialization</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">orjson</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">orjson_serializer</span><span class="p">(</span><span class="n">obj</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">orjson</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">obj</span><span class="p">,</span> <span class="n">option</span><span class="o">=</span><span class="n">orjson</span><span class="o">.</span><span class="n">OPT_NON_STR_KEYS</span><span class="p">)</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span>
+
+<span class="n">structlog</span><span class="o">.</span><span class="n">configure</span><span class="p">(</span>
+    <span class="n">processors</span><span class="o">=</span><span class="p">[</span>
+        <span class="c1"># ...</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">JSONRenderer</span><span class="p">(</span><span class="n">serializer</span><span class="o">=</span><span class="n">orjson_serializer</span><span class="p">),</span>
+    <span class="p">],</span>
+    <span class="c1"># ...</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p><code>orjson</code> is typically 3-10x faster than the standard library's <code>json</code> module.</p>
+<h3>4. Async Log Shipping</h3>
+<p>Do not send logs over the network synchronously in the request path. Write to stdout/stderr and let a sidecar (Filebeat, Fluentd) ship them, or use a background queue.</p>
+<h3>5. Log Sampling for High-Volume Events</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">random</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">sample_debug_logs</span><span class="p">(</span><span class="n">logger</span><span class="p">,</span> <span class="n">method_name</span><span class="p">,</span> <span class="n">event_dict</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Only emit 10% of debug logs to reduce volume.&quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">method_name</span> <span class="o">==</span> <span class="s2">&quot;debug&quot;</span> <span class="ow">and</span> <span class="n">random</span><span class="o">.</span><span class="n">random</span><span class="p">()</span> <span class="o">&gt;</span> <span class="mf">0.1</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">structlog</span><span class="o">.</span><span class="n">DropEvent</span>
+    <span class="k">return</span> <span class="n">event_dict</span>
+</code></pre></div>
+
+<h2>Exception Logging</h2>
+<p>structlog integrates cleanly with exception handling:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">structlog</span>
+
+<span class="n">log</span> <span class="o">=</span> <span class="n">structlog</span><span class="o">.</span><span class="n">get_logger</span><span class="p">()</span>
+
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">process_payment</span><span class="p">(</span><span class="n">order_id</span><span class="o">=</span><span class="mi">123</span><span class="p">,</span> <span class="n">amount</span><span class="o">=</span><span class="mf">49.99</span><span class="p">)</span>
+<span class="k">except</span> <span class="n">PaymentGatewayError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+    <span class="n">log</span><span class="o">.</span><span class="n">error</span><span class="p">(</span>
+        <span class="s2">&quot;payment_failed&quot;</span><span class="p">,</span>
+        <span class="n">order_id</span><span class="o">=</span><span class="mi">123</span><span class="p">,</span>
+        <span class="n">error</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="n">exc</span><span class="p">),</span>
+        <span class="n">error_type</span><span class="o">=</span><span class="nb">type</span><span class="p">(</span><span class="n">exc</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="p">,</span>
+        <span class="n">exc_info</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>  <span class="c1"># Includes full traceback in the log</span>
+    <span class="p">)</span>
+    <span class="k">raise</span>
+</code></pre></div>
+
+<p>You can also add a processor that formats exceptions as structured data:</p>
+<div class="highlight"><pre><span></span><code><span class="n">structlog</span><span class="o">.</span><span class="n">configure</span><span class="p">(</span>
+    <span class="n">processors</span><span class="o">=</span><span class="p">[</span>
+        <span class="c1"># ... other processors</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">format_exc_info</span><span class="p">,</span>  <span class="c1"># Converts exc_info to a string field</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">JSONRenderer</span><span class="p">(),</span>
+    <span class="p">],</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h2>Logging Best Practices for Production</h2>
+<h3>Use Event Names, Not Sentences</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Bad</span>
+<span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;The user has successfully logged in&quot;</span><span class="p">)</span>
+
+<span class="c1"># Good</span>
+<span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;user_login_success&quot;</span><span class="p">,</span> <span class="n">user_id</span><span class="o">=</span><span class="n">user</span><span class="o">.</span><span class="n">id</span><span class="p">,</span> <span class="n">login_method</span><span class="o">=</span><span class="s2">&quot;oauth&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Event names should be snake_case identifiers that are easy to search and aggregate.</p>
+<h3>Log at the Right Level</h3>
+<ul>
+<li><strong>DEBUG</strong>: Detailed diagnostic information useful during development.</li>
+<li><strong>INFO</strong>: Confirmation that things are working as expected (request started/completed, job processed).</li>
+<li><strong>WARNING</strong>: Something unexpected happened but the application can continue (deprecated API used, retry triggered).</li>
+<li><strong>ERROR</strong>: An operation failed and needs attention (payment failed, database connection lost).</li>
+<li><strong>CRITICAL</strong>: The application cannot continue (configuration missing, cannot bind to port).</li>
+</ul>
+<h3>Include Timing Information</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+
+<span class="n">start</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+<span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">slow_database_query</span><span class="p">()</span>
+<span class="n">duration_ms</span> <span class="o">=</span> <span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span> <span class="o">-</span> <span class="n">start</span><span class="p">)</span> <span class="o">*</span> <span class="mi">1000</span>
+
+<span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;db_query_completed&quot;</span><span class="p">,</span> <span class="n">query</span><span class="o">=</span><span class="s2">&quot;get_user_orders&quot;</span><span class="p">,</span> <span class="n">duration_ms</span><span class="o">=</span><span class="nb">round</span><span class="p">(</span><span class="n">duration_ms</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>
+</code></pre></div>
+
+<h3>Do Not Log and Raise (Usually)</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Bad: logs the error AND re-raises, causing duplicate log entries</span>
+<span class="c1"># when a higher-level handler also logs it</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">do_something</span><span class="p">()</span>
+<span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+    <span class="n">log</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s2">&quot;something_failed&quot;</span><span class="p">,</span> <span class="n">error</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="n">e</span><span class="p">))</span>
+    <span class="k">raise</span>  <span class="c1"># The caller might log this again</span>
+
+<span class="c1"># Better: either log OR raise, unless you are adding unique context</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">do_something</span><span class="p">()</span>
+<span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+    <span class="c1"># Add context and re-raise — let the boundary handler log it</span>
+    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Failed processing order </span><span class="si">{</span><span class="n">order_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">e</span>
+</code></pre></div>
+
+<h3>Structured Logging in Tests</h3>
+<p>Capture logs in tests to verify correct logging behavior:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">structlog</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">structlog.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">capture_logs</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_order_processing_logs_completion</span><span class="p">():</span>
+    <span class="k">with</span> <span class="n">capture_logs</span><span class="p">()</span> <span class="k">as</span> <span class="n">cap_logs</span><span class="p">:</span>
+        <span class="n">process_order</span><span class="p">(</span><span class="n">order_id</span><span class="o">=</span><span class="mi">123</span><span class="p">,</span> <span class="n">user_id</span><span class="o">=</span><span class="mi">42</span><span class="p">)</span>
+
+    <span class="k">assert</span> <span class="nb">any</span><span class="p">(</span>
+        <span class="n">log</span><span class="p">[</span><span class="s2">&quot;event&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="s2">&quot;order_processed&quot;</span> <span class="ow">and</span> <span class="n">log</span><span class="p">[</span><span class="s2">&quot;order_id&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="mi">123</span>
+        <span class="k">for</span> <span class="n">log</span> <span class="ow">in</span> <span class="n">cap_logs</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<h2>Putting It All Together</h2>
+<p>Here is a complete, production-ready logging setup:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># app/logging_config.py</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">structlog</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">setup_logging</span><span class="p">():</span>
+    <span class="n">is_production</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;APP_ENV&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="s2">&quot;production&quot;</span>
+    <span class="n">log_level</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;LOG_LEVEL&quot;</span><span class="p">,</span> <span class="s2">&quot;INFO&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+
+    <span class="n">shared_processors</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">contextvars</span><span class="o">.</span><span class="n">merge_contextvars</span><span class="p">,</span>
+        <span class="n">filter_sensitive_data</span><span class="p">,</span>
+        <span class="n">add_environment</span><span class="p">,</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">add_log_level</span><span class="p">,</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">add_logger_name</span><span class="p">,</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">TimeStamper</span><span class="p">(</span><span class="n">fmt</span><span class="o">=</span><span class="s2">&quot;iso&quot;</span><span class="p">),</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">StackInfoRenderer</span><span class="p">(),</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">format_exc_info</span><span class="p">,</span>
+        <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">UnicodeDecoder</span><span class="p">(),</span>
+    <span class="p">]</span>
+
+    <span class="k">if</span> <span class="n">is_production</span><span class="p">:</span>
+        <span class="n">renderer</span> <span class="o">=</span> <span class="n">structlog</span><span class="o">.</span><span class="n">processors</span><span class="o">.</span><span class="n">JSONRenderer</span><span class="p">()</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">renderer</span> <span class="o">=</span> <span class="n">structlog</span><span class="o">.</span><span class="n">dev</span><span class="o">.</span><span class="n">ConsoleRenderer</span><span class="p">(</span><span class="n">colors</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+    <span class="n">structlog</span><span class="o">.</span><span class="n">configure</span><span class="p">(</span>
+        <span class="n">processors</span><span class="o">=</span><span class="p">[</span>
+            <span class="o">*</span><span class="n">shared_processors</span><span class="p">,</span>
+            <span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">ProcessorFormatter</span><span class="o">.</span><span class="n">wrap_for_formatter</span><span class="p">,</span>
+        <span class="p">],</span>
+        <span class="n">logger_factory</span><span class="o">=</span><span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">LoggerFactory</span><span class="p">(),</span>
+        <span class="n">wrapper_class</span><span class="o">=</span><span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">BoundLogger</span><span class="p">,</span>
+        <span class="n">cache_logger_on_first_use</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="n">formatter</span> <span class="o">=</span> <span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">ProcessorFormatter</span><span class="p">(</span>
+        <span class="n">processors</span><span class="o">=</span><span class="p">[</span>
+            <span class="n">structlog</span><span class="o">.</span><span class="n">stdlib</span><span class="o">.</span><span class="n">ProcessorFormatter</span><span class="o">.</span><span class="n">remove_processors_meta</span><span class="p">,</span>
+            <span class="n">renderer</span><span class="p">,</span>
+        <span class="p">],</span>
+        <span class="n">foreign_pre_chain</span><span class="o">=</span><span class="n">shared_processors</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="n">handler</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">StreamHandler</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="p">)</span>
+    <span class="n">handler</span><span class="o">.</span><span class="n">setFormatter</span><span class="p">(</span><span class="n">formatter</span><span class="p">)</span>
+
+    <span class="n">root</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">()</span>
+    <span class="n">root</span><span class="o">.</span><span class="n">handlers</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+    <span class="n">root</span><span class="o">.</span><span class="n">addHandler</span><span class="p">(</span><span class="n">handler</span><span class="p">)</span>
+    <span class="n">root</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="n">logging</span><span class="p">,</span> <span class="n">log_level</span><span class="p">))</span>
+
+    <span class="c1"># Quiet down noisy libraries</span>
+    <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;urllib3&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">WARNING</span><span class="p">)</span>
+    <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;httpx&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">WARNING</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Call <code>setup_logging()</code> at application startup — before any other module imports create loggers — and every log statement in your entire application, including third-party libraries, flows through your structured pipeline.</p>
+<h2>Summary</h2>
+<p>Structured logging with structlog transforms logging from a debugging afterthought into a first-class observability tool. By emitting JSON-formatted, context-rich log events, you enable powerful querying, alerting, and correlation across distributed systems. The processor pipeline architecture makes it easy to add cross-cutting concerns like sensitive data filtering, environment tagging, and performance sampling without modifying individual log call sites. Combined with correlation IDs and proper integration with stdlib logging, structlog provides a production-grade logging foundation for Python backend services.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Configure structlog with Environment-Aware Output</div>
+                    <div class="exercise-desc"><p>Create a <code>configure_logging()</code> function that sets up structlog integrated with stdlib logging. It should output colorized console logs when the <code>APP_ENV</code> environment variable is 'development' and JSON logs when it is 'production'. Include processors for adding log level, ISO timestamps, and unicode decoding. Configure the root logger to use this formatter and set the log level from a <code>LOG_LEVEL</code> environment variable (defaulting to 'INFO'). Write a small script that calls configure_logging(), then emits a few log lines using <code>structlog.get_logger()</code> to verify both modes work.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>structlog.dev.ConsoleRenderer()</code> for development and <code>structlog.processors.JSONRenderer()</code> for production. Remember to use <code>ProcessorFormatter</code> with <code>foreign_pre_chain</code> so stdlib logs also get formatted. Test by setting <code>APP_ENV</code> via <code>os.environ</code> before calling your setup function.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build a PII-Filtering Processor</div>
+                    <div class="exercise-desc"><p>Write a structlog processor function called <code>redact_pii</code> that inspects every key-value pair in the event dict. It should: (1) fully redact values for keys matching a set of sensitive field names like 'password', 'token', 'ssn', 'api_key', and 'secret'; (2) partially mask 'email' fields by keeping only the first two characters before the @ sign; (3) use regex to detect and redact credit card number patterns (4 groups of 4 digits) found in any string value. Write tests using <code>structlog.testing.capture_logs</code> that verify each redaction rule works correctly.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>The processor signature is <code>def redact_pii(logger, method_name, event_dict)</code>. Iterate over <code>list(event_dict.keys())</code> to safely modify the dict during iteration. For credit card detection, use a pattern like <code>r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'</code>. For tests, temporarily configure structlog with your processor and use <code>capture_logs()</code> context manager.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Request Correlation Middleware</div>
+                    <div class="exercise-desc"><p>Build a middleware for FastAPI (or a decorator for Flask) that: (1) extracts an <code>X-Request-ID</code> header or generates a UUID if not present; (2) binds request_id, HTTP method, path, and client IP to structlog's contextvars; (3) logs 'request_started' at the beginning; (4) logs 'request_completed' with status code and duration in milliseconds at the end; (5) logs 'request_failed' with error details if an exception occurs; (6) sets the X-Request-ID header on the response. Verify that log calls inside route handlers automatically include the request context.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>structlog.contextvars.clear_contextvars()</code> at the start of each request to avoid context leaking between requests. Use <code>structlog.contextvars.bind_contextvars()</code> to set the per-request fields. Measure duration with <code>time.perf_counter()</code>. For FastAPI, subclass <code>BaseHTTPMiddleware</code>. For testing, use FastAPI's <code>TestClient</code> and check response headers for X-Request-ID.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Structured Logging with Exception Context</div>
+                    <div class="exercise-desc"><p>Create a service class <code>OrderService</code> with a method <code>process_order(order_id, user_id, items)</code> that simulates order processing with multiple steps: validation, inventory check, payment, and confirmation. Each step should log a structured event. If the payment step fails (simulate with a random failure), log a structured error with exc_info and order context, then raise a custom <code>OrderProcessingError</code>. Write a test that uses <code>capture_logs</code> to verify that: (a) all expected events are logged in order, (b) the error event contains the correct fields, and (c) bound context (order_id, user_id) appears in every log entry.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>structlog.get_logger().bind(order_id=order_id, user_id=user_id)</code> to create a bound logger at the start of the method. Pass this bound logger to helper methods or use contextvars. For the payment simulation, raise an exception in a try/except block and log with <code>exc_info=True</code>. In tests, inspect the list of captured log dicts for expected 'event' values and field presence.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Log context from one request leaks into another request's logs</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Log entries for one user show another user's ID, or a request's logs contain a request_id from a completely different request.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Context variables are not cleared at the start of each request. When using structlog's contextvars, bound values persist for the lifetime of the context (which may be reused across requests in async frameworks or thread pools).
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Always call `structlog.contextvars.clear_contextvars()` at the very start of each request handling cycle, before binding any new values. This ensures a clean slate.
+
+```python
+async def dispatch(self, request, call_next):
+    clear_contextvars()  # Critical: reset context first
+    bind_contextvars(
+        request_id=str(uuid.uuid4()),
+        user_id=get_user_id(request),
+    )
+    response = await call_next(request)
+    return response
+```
+                        </div>
+                        
+                        <div class="problem-code">
+                            <h1>Broken middleware - missing clear_contextvars</h1>
+<p>async def dispatch(self, request, call_next):
+    bind_contextvars(request_id=str(uuid.uuid4()))
+    # Previous request's user_id is still bound!
+    response = await call_next(request)
+    return response</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Third-party library logs appear as unstructured text while application logs are structured JSON</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Mixed log output: some lines are JSON objects and others are plain text with the default stdlib format. Log aggregation tools fail to parse certain lines.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> structlog is configured but the stdlib logging root logger is not set up to use structlog's ProcessorFormatter. Libraries like SQLAlchemy, celery, and urllib3 use stdlib logging directly and bypass structlog entirely.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Configure a `structlog.stdlib.ProcessorFormatter` with `foreign_pre_chain` and attach it to the root stdlib logger's handler. The `foreign_pre_chain` processes log records from non-structlog loggers through your processor pipeline.
+
+```python
+formatter = structlog.stdlib.ProcessorFormatter(
+    processors=[
+        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+        structlog.processors.JSONRenderer(),
+    ],
+    foreign_pre_chain=[
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_log_level,
+        structlog.processors.TimeStamper(fmt='iso'),
+    ],
+)
+
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(formatter)
+
+root_logger = logging.getLogger()
+root_logger.handlers.clear()
+root_logger.addHandler(handler)
+```
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">JSONRenderer raises TypeError for non-serializable objects</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> TypeError: Object of type datetime is not JSON serializable — the log call crashes instead of emitting a log entry, potentially causing request failures if the exception is not caught.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Log entries contain Python objects that the default json.dumps cannot serialize, such as datetime objects, Decimal values, UUID instances, SQLAlchemy models, or custom classes.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Provide a custom serializer to JSONRenderer that handles your application's types. For maximum performance, use `orjson` which handles many types natively.
+
+```python
+import json
+import datetime
+import decimal
+import uuid
+
+def safe_serializer(obj, **kwargs):
+    def default(o):
+        if isinstance(o, (datetime.datetime, datetime.date)):
+            return o.isoformat()
+        if isinstance(o, decimal.Decimal):
+            return float(o)
+        if isinstance(o, uuid.UUID):
+            return str(o)
+        if hasattr(o, '__dict__'):
+            return str(o)  # Fallback for unknown objects
+        raise TypeError(f'Not serializable: {type(o)}')
+    return json.dumps(obj, default=default, **kwargs)
+
+structlog.configure(
+    processors=[
+        # ...
+        structlog.processors.JSONRenderer(serializer=safe_serializer),
+    ],
+)
+```
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>log.info("order_created", created_at=datetime.now(), total=Decimal("49.99"))</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://www.structlog.org/en/stable/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">structlog Official Documentation</div>
+                    
+                    <div class="resource-note">The definitive reference. Pay special attention to the 'Configuration' and 'Standard Library' sections for production setups.</div>
+                    
+                </a>
+                
+                <a href="https://github.com/hynek/structlog" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">structlog: Structured Logging for Python (GitHub)</div>
+                    
+                    <div class="resource-note">Source code and examples. The test suite is a great resource for understanding processor behavior.</div>
+                    
+                </a>
+                
+                <a href="https://betterstack.com/community/guides/logging/structlog/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag tutorial">tutorial</div>
+                    <div class="resource-title">The Complete Guide to Structured Logging in Python</div>
+                    
+                    <div class="resource-note">A practical walkthrough covering setup, configuration, and integration with various frameworks.</div>
+                    
+                </a>
+                
+                <a href="https://realpython.com/python-logging-source-code/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Python Logging: A Stroll Through the Source Code (Real Python)</div>
+                    
+                    <div class="resource-note">Deep dive into stdlib logging internals. Understanding this makes structlog's stdlib integration much clearer.</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/8.5.2-py.html" class="btn">ELK Stack: Elasticsearch, Logstash, Kibana &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-py.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

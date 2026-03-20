@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Hotel Booking System (Booking.com) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            E-Commerce & Marketplace
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.3.3</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design a Hotel Booking System (Booking.com)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a hotel booking system like a physical reservation book at a front desk. The book has one page per room type per night. When someone books, the receptionist crosses off one room on each relevant page. If the last room is crossed off, that room type is full for that night. Two receptionists cannot cross off the same room simultaneously -- one must wait for the other to finish writing. The search page in a travel website is like a lobby display board that updates every minute -- it might briefly show a room as available after the last one was just booked, but the actual reservation book (database) is always correct.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Hotel Booking System (Booking.com)</h1>
+<h2>Introduction</h2>
+<p>A hotel booking system like Booking.com must handle property listings, room availability, reservation management, pricing, and guest reviews across millions of properties worldwide. The core technical challenge is managing room inventory -- ensuring that the same room is not double-booked while maintaining high read throughput for search queries. Unlike e-commerce where you can ship another unit, a hotel room on a specific night is a unique, perishable resource.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li><strong>Search</strong>: Search hotels by location, dates, guests, filters (price, stars, amenities)</li>
+<li><strong>Availability</strong>: Show real-time room availability for date ranges</li>
+<li><strong>Booking</strong>: Reserve rooms with date range, guest count, and payment</li>
+<li><strong>Pricing</strong>: Dynamic pricing based on demand, season, day of week</li>
+<li><strong>Property Management</strong>: Hotel owners manage rooms, rates, availability, photos</li>
+<li><strong>Reviews</strong>: Guests can review hotels after stay</li>
+<li><strong>Cancellation</strong>: Support cancellation policies (free, partial refund, non-refundable)</li>
+<li><strong>Notifications</strong>: Booking confirmations, reminders, cancellation notices</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li><strong>Availability</strong>: 99.99% uptime</li>
+<li><strong>Latency</strong>: Search results &lt; 500ms, booking confirmation &lt; 2s</li>
+<li><strong>Consistency</strong>: Strong consistency for bookings (no double booking), eventual for search</li>
+<li><strong>Scale</strong>: 1M+ properties, 50M+ listings, 5M bookings/day at peak</li>
+</ul>
+<h2>Step 2: Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Assumptions:
+- 1M properties, average 50 rooms each = 50M rooms
+- 30M DAU searching, 5% conversion = 1.5M bookings/day
+- Average search: 3 queries per session (refine dates, filters)
+- Average booking: 2.5 nights stay
+
+Traffic:
+- Search queries: 30M * 3 = 90M/day = ~1,040 QPS
+- Peak (3x): ~3,120 QPS
+- Availability checks: 2x searches = ~2,080 QPS
+- Bookings: 1.5M/day = ~17 TPS
+- Peak bookings: ~50 TPS
+
+Storage:
+- Property data: 1M * 20KB = ~20GB
+- Room types: 5M * 5KB = ~25GB
+- Availability (365 days * 50M rooms): 18.25B rows * 50 bytes = ~900GB
+- Bookings: 1.5M/day * 2KB * 365 = ~1TB/year
+- Reviews: 100M * 1KB = ~100GB
+- Images: 1M properties * 20 images * 500KB = ~10TB (CDN)
+</code></pre></div>
+
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────┐    ┌──────────────┐    ┌──────────────┐
+│  Client   │───&gt;│  API Gateway  │───&gt;│ Load Balancer │
+│ (Web/App) │    │              │    │              │
+└──────────┘    └──────────────┘    └──────┬───────┘
+                                          │
+              ┌───────────────┬────────────┼──────────────┐
+              │               │            │              │
+       ┌──────┴──────┐ ┌─────┴─────┐ ┌────┴────┐ ┌───────┴──────┐
+       │   Search    │ │ Booking   │ │ Pricing │ │  Property    │
+       │   Service   │ │ Service   │ │ Service │ │  Service     │
+       └──────┬──────┘ └─────┬─────┘ └────┬────┘ └───────┬──────┘
+              │              │            │              │
+       ┌──────┴──────┐ ┌────┴──────┐     │       ┌──────┴──────┐
+       │Elasticsearch│ │Booking DB │     │       │ Property DB │
+       │  (search    │ │(Postgres) │     │       │ (Postgres)  │
+       │   index)    │ │           │     │       │             │
+       └─────────────┘ └───────────┘     │       └─────────────┘
+                              │          │
+                       ┌──────┴──────┐   │
+                       │Availability │   │
+                       │  Service    │───┘
+                       └──────┬──────┘
+                              │
+                       ┌──────┴──────┐
+                       │Availability │
+                       │   Cache     │
+                       │  (Redis)    │
+                       └──────┬──────┘
+                              │
+                       ┌──────┴──────┐
+                       │Availability │
+                       │    DB       │
+                       │ (Postgres)  │
+                       └─────────────┘
+
+              ┌──────────────┐      ┌──────────────┐
+              │ Notification │      │   Payment    │
+              │   Service    │      │   Service    │
+              │  (Email/SMS) │      │   (Stripe)   │
+              └──────────────┘      └──────────────┘
+</code></pre></div>
+
+<h2>Step 4: API Design</h2>
+<h3>Search API</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// GET /api/search?location=paris&amp;checkin=2026-06-01&amp;checkout=2026-06-04</span>
+<span class="c1">//   &amp;guests=2&amp;minPrice=50&amp;maxPrice=300&amp;stars=4&amp;amenities=wifi,pool&amp;page=1</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/search&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">location</span><span class="p">,</span><span class="w"> </span><span class="nx">checkin</span><span class="p">,</span><span class="w"> </span><span class="nx">checkout</span><span class="p">,</span><span class="w"> </span><span class="nx">guests</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">minPrice</span><span class="p">,</span><span class="w"> </span><span class="nx">maxPrice</span><span class="p">,</span><span class="w"> </span><span class="nx">stars</span><span class="p">,</span><span class="w"> </span><span class="nx">amenities</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">sort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;relevance&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">20</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Validate dates</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">checkinDate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">checkin</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">checkoutDate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">checkout</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">checkinDate</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">checkoutDate</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Checkout must be after checkin&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">nights</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">ceil</span><span class="p">((</span><span class="nx">checkoutDate</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">checkinDate</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="p">(</span><span class="mf">1000</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">24</span><span class="p">));</span>
+
+<span class="w">  </span><span class="c1">// Search Elasticsearch for matching properties</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">esQuery</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">bool</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">must</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nx">multi_match</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">query</span><span class="o">:</span><span class="w"> </span><span class="nx">location</span><span class="p">,</span><span class="w"> </span><span class="nx">fields</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;city^3&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;country&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;name&#39;</span><span class="p">]</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">],</span>
+<span class="w">      </span><span class="nx">filter</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nx">range</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">maxGuests</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">gte</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">guests</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">...(</span><span class="nx">stars</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nx">term</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">starRating</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">stars</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}]</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">[]),</span>
+<span class="w">        </span><span class="p">...(</span><span class="nx">amenities</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nx">terms</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">amenities</span><span class="o">:</span><span class="w"> </span><span class="nx">amenities</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">&#39;,&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}]</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">[]),</span>
+<span class="w">      </span><span class="p">],</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">searchResults</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">elasticsearch</span><span class="p">.</span><span class="nx">search</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">index</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;properties&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kr">from</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">page</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">size</span><span class="o">:</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">query</span><span class="o">:</span><span class="w"> </span><span class="nx">esQuery</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">sort</span><span class="o">:</span><span class="w"> </span><span class="nx">sort</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;price&#39;</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nx">basePrice</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;asc&#39;</span><span class="w"> </span><span class="p">}]</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;_score&#39;</span><span class="p">],</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">propertyIds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">searchResults</span><span class="p">.</span><span class="nx">hits</span><span class="p">.</span><span class="nx">hits</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">h</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">h</span><span class="p">.</span><span class="nx">_id</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Check availability and get pricing for the date range</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">availableProperties</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">availabilityService</span><span class="p">.</span><span class="nx">checkBulkAvailability</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">propertyIds</span><span class="p">,</span><span class="w"> </span><span class="nx">checkinDate</span><span class="p">,</span><span class="w"> </span><span class="nx">checkoutDate</span><span class="p">,</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">guests</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">1</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Get dynamic pricing</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pricedResults</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pricingService</span><span class="p">.</span><span class="nx">getPrices</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">availableProperties</span><span class="p">,</span><span class="w"> </span><span class="nx">checkinDate</span><span class="p">,</span><span class="w"> </span><span class="nx">checkoutDate</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Filter by price range</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">filtered</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">pricedResults</span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">p</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">minPrice</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">nights</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">minPrice</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">maxPrice</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">nights</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">maxPrice</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">filtered</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">meta</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">page</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span><span class="w"> </span><span class="nx">total</span><span class="o">:</span><span class="w"> </span><span class="nx">searchResults</span><span class="p">.</span><span class="nx">hits</span><span class="p">.</span><span class="nx">total</span><span class="p">.</span><span class="nx">value</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">nights</span><span class="p">,</span><span class="w"> </span><span class="nx">checkin</span><span class="p">,</span><span class="w"> </span><span class="nx">checkout</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Booking API</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/bookings</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/bookings&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">propertyId</span><span class="p">,</span><span class="w"> </span><span class="nx">roomTypeId</span><span class="p">,</span><span class="w"> </span><span class="nx">checkin</span><span class="p">,</span><span class="w"> </span><span class="nx">checkout</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">guests</span><span class="p">,</span><span class="w"> </span><span class="nx">paymentMethodId</span><span class="p">,</span><span class="w"> </span><span class="nx">specialRequests</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">checkinDate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">checkin</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">checkoutDate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">checkout</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">nights</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">ceil</span><span class="p">((</span><span class="nx">checkoutDate</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">checkinDate</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="p">(</span><span class="mf">1000</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">24</span><span class="p">));</span>
+
+<span class="w">  </span><span class="c1">// 1. Check availability with lock</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">booking</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$transaction</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">tx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Lock availability rows for the date range</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">availability</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`</span>
+<span class="sb">      SELECT * FROM room_availability</span>
+<span class="sb">      WHERE room_type_id = </span><span class="si">${</span><span class="nx">roomTypeId</span><span class="si">}</span>
+<span class="sb">        AND date &gt;= </span><span class="si">${</span><span class="nx">checkinDate</span><span class="si">}</span>
+<span class="sb">        AND date &lt; </span><span class="si">${</span><span class="nx">checkoutDate</span><span class="si">}</span>
+<span class="sb">      FOR UPDATE</span>
+<span class="sb">    `</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Verify every night has rooms available</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">availability</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">nights</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Room not available for all requested dates&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">unavailable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">availability</span><span class="p">.</span><span class="nx">find</span><span class="p">(</span><span class="nx">a</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">available_rooms</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">unavailable</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`No rooms available on </span><span class="si">${</span><span class="nx">unavailable</span><span class="p">.</span><span class="nx">date</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 2. Calculate total price from availability records</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">availability</span><span class="p">.</span><span class="nx">reduce</span><span class="p">((</span><span class="nx">sum</span><span class="p">,</span><span class="w"> </span><span class="nx">a</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">sum</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">a</span><span class="p">.</span><span class="nx">price</span><span class="p">),</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 3. Decrement available rooms for each night</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">$executeRaw</span><span class="sb">`</span>
+<span class="sb">      UPDATE room_availability</span>
+<span class="sb">      SET available_rooms = available_rooms - 1,</span>
+<span class="sb">          updated_at = NOW()</span>
+<span class="sb">      WHERE room_type_id = </span><span class="si">${</span><span class="nx">roomTypeId</span><span class="si">}</span>
+<span class="sb">        AND date &gt;= </span><span class="si">${</span><span class="nx">checkinDate</span><span class="si">}</span>
+<span class="sb">        AND date &lt; </span><span class="si">${</span><span class="nx">checkoutDate</span><span class="si">}</span>
+<span class="sb">        AND available_rooms &gt; 0</span>
+<span class="sb">    `</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// 4. Create booking record</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">booking</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">booking</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">propertyId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">roomTypeId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">checkinDate</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">checkoutDate</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">guests</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">nights</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">totalPrice</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;CONFIRMED&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">specialRequests</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">confirmationCode</span><span class="o">:</span><span class="w"> </span><span class="nx">generateConfirmationCode</span><span class="p">(),</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">booking</span><span class="p">;</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// 5. Process payment</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">paymentService</span><span class="p">.</span><span class="nx">charge</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="nx">booking</span><span class="p">.</span><span class="nx">totalPrice</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">currency</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;USD&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">paymentMethodId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">bookingId</span><span class="o">:</span><span class="w"> </span><span class="nx">booking</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// 6. Send confirmation</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">notificationQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;booking-confirmation&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">bookingId</span><span class="o">:</span><span class="w"> </span><span class="nx">booking</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">email</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">booking</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">generateConfirmationCode</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">chars</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">8</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">code</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">chars</span><span class="p">[</span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nb">Math</span><span class="p">.</span><span class="nx">random</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">chars</span><span class="p">.</span><span class="nx">length</span><span class="p">)];</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">code</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 5: Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Properties (Hotels)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">properties</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">owner_id</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">name</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">300</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">description</span><span class="w">   </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">city</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">country</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">latitude</span><span class="w">      </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">7</span><span class="p">),</span>
+<span class="w">    </span><span class="n">longitude</span><span class="w">     </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">7</span><span class="p">),</span>
+<span class="w">    </span><span class="n">star_rating</span><span class="w">   </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">CHECK</span><span class="w"> </span><span class="p">(</span><span class="n">star_rating</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="mi">5</span><span class="p">),</span>
+<span class="w">    </span><span class="n">amenities</span><span class="w">     </span><span class="nb">TEXT</span><span class="p">[],</span><span class="w">           </span><span class="c1">-- ARRAY of amenity slugs</span>
+<span class="w">    </span><span class="n">check_in_time</span><span class="w"> </span><span class="k">TIME</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;15:00&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">check_out_time</span><span class="w"> </span><span class="k">TIME</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;11:00&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cancellation_policy</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">30</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;MODERATE&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">-- FREE_CANCELLATION, MODERATE, STRICT, NON_REFUNDABLE</span>
+<span class="w">    </span><span class="n">status</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;ACTIVE&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_properties_location</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">properties</span><span class="p">(</span><span class="n">city</span><span class="p">,</span><span class="w"> </span><span class="n">country</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_properties_geo</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">properties</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">GIST</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">ll_to_earth</span><span class="p">(</span><span class="n">latitude</span><span class="p">,</span><span class="w"> </span><span class="n">longitude</span><span class="p">)</span>
+<span class="p">);</span><span class="w">  </span><span class="c1">-- geospatial index</span>
+
+<span class="c1">-- Room Types (e.g., &quot;Deluxe King&quot;, &quot;Standard Twin&quot;)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">room_types</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">property_id</span><span class="w">   </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">properties</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">name</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">200</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">description</span><span class="w">   </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">max_guests</span><span class="w">    </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">bed_type</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">),</span><span class="w">      </span><span class="c1">-- KING, QUEEN, TWIN, etc.</span>
+<span class="w">    </span><span class="n">total_rooms</span><span class="w">   </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- total physical rooms of this type</span>
+<span class="w">    </span><span class="n">base_price</span><span class="w">    </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">amenities</span><span class="w">     </span><span class="nb">TEXT</span><span class="p">[]</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_room_types_property</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">room_types</span><span class="p">(</span><span class="n">property_id</span><span class="p">);</span>
+
+<span class="c1">-- Room Availability (one row per room_type per date)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">room_availability</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">room_type_id</span><span class="w">    </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">room_types</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="nb">date</span><span class="w">            </span><span class="nb">DATE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">available_rooms</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">price</span><span class="w">           </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- price for this specific date</span>
+<span class="w">    </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">    </span><span class="k">UNIQUE</span><span class="p">(</span><span class="n">room_type_id</span><span class="p">,</span><span class="w"> </span><span class="nb">date</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_availability_lookup</span>
+<span class="w">    </span><span class="k">ON</span><span class="w"> </span><span class="n">room_availability</span><span class="p">(</span><span class="n">room_type_id</span><span class="p">,</span><span class="w"> </span><span class="nb">date</span><span class="p">,</span><span class="w"> </span><span class="n">available_rooms</span><span class="p">)</span>
+<span class="w">    </span><span class="k">WHERE</span><span class="w"> </span><span class="n">available_rooms</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="c1">-- Bookings</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">bookings</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">                  </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">user_id</span><span class="w">             </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">property_id</span><span class="w">         </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">properties</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">room_type_id</span><span class="w">        </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">room_types</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">checkin_date</span><span class="w">        </span><span class="nb">DATE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">checkout_date</span><span class="w">       </span><span class="nb">DATE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">guests</span><span class="w">              </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">nights</span><span class="w">              </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">total_price</span><span class="w">         </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">12</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">status</span><span class="w">              </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">30</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;CONFIRMED&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">-- PENDING, CONFIRMED, CHECKED_IN, CHECKED_OUT, CANCELLED, NO_SHOW</span>
+<span class="w">    </span><span class="n">confirmation_code</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">special_requests</span><span class="w">    </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cancelled_at</span><span class="w">        </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">    </span><span class="n">refund_amount</span><span class="w">       </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">12</span><span class="p">,</span><span class="mi">2</span><span class="p">),</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">          </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_bookings_user</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">bookings</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_bookings_property</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">bookings</span><span class="p">(</span><span class="n">property_id</span><span class="p">,</span><span class="w"> </span><span class="n">checkin_date</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_bookings_confirmation</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">bookings</span><span class="p">(</span><span class="n">confirmation_code</span><span class="p">);</span>
+
+<span class="c1">-- Reviews</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">reviews</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">booking_id</span><span class="w">    </span><span class="n">UUID</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">bookings</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">user_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">property_id</span><span class="w">   </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">properties</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">overall</span><span class="w">       </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="k">CHECK</span><span class="w"> </span><span class="p">(</span><span class="n">overall</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="mi">10</span><span class="p">),</span>
+<span class="w">    </span><span class="n">cleanliness</span><span class="w">   </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="mi">1</span><span class="p">),</span>
+<span class="w">    </span><span class="k">location</span><span class="w">      </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="mi">1</span><span class="p">),</span>
+<span class="w">    </span><span class="n">value</span><span class="w">         </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="mi">1</span><span class="p">),</span>
+<span class="w">    </span><span class="n">service</span><span class="w">       </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="mi">1</span><span class="p">),</span>
+<span class="w">    </span><span class="n">title</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">200</span><span class="p">),</span>
+<span class="w">    </span><span class="n">body</span><span class="w">          </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Step 6: Deep Dive - Availability Management</h2>
+<p>The availability table is the most critical and most queried table. Each row represents one room type on one date.</p>
+<div class="highlight"><pre><span></span><code>Pre-population: When a hotel adds 10 &quot;Deluxe King&quot; rooms,
+generate 365 rows (one per day) with available_rooms = 10.
+
+Booking:   available_rooms -= 1 (with FOR UPDATE lock)
+Cancel:    available_rooms += 1
+Date pass: Old rows archived, new rows generated (rolling window)
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// Availability service with Redis caching</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">AvailabilityService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">checkBulkAvailability</span><span class="p">(</span><span class="nx">propertyIds</span><span class="p">,</span><span class="w"> </span><span class="nx">checkin</span><span class="p">,</span><span class="w"> </span><span class="nx">checkout</span><span class="p">,</span><span class="w"> </span><span class="nx">guests</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">propertyId</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">propertyIds</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">cacheKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`avail:</span><span class="si">${</span><span class="nx">propertyId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">checkin</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">checkout</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">guests</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">cached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">cacheKey</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">cached</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">parsed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">cached</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">parsed</span><span class="p">.</span><span class="nx">available</span><span class="p">)</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">parsed</span><span class="p">);</span>
+<span class="w">        </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="c1">// Query DB for room types with availability on ALL dates in range</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">available</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`</span>
+<span class="sb">        SELECT rt.id, rt.name, rt.max_guests, rt.base_price,</span>
+<span class="sb">               MIN(ra.available_rooms) as min_available,</span>
+<span class="sb">               SUM(ra.price) as total_price,</span>
+<span class="sb">               AVG(ra.price) as avg_nightly_price</span>
+<span class="sb">        FROM room_types rt</span>
+<span class="sb">        JOIN room_availability ra ON ra.room_type_id = rt.id</span>
+<span class="sb">        WHERE rt.property_id = </span><span class="si">${</span><span class="nx">propertyId</span><span class="si">}</span>
+<span class="sb">          AND rt.max_guests &gt;= </span><span class="si">${</span><span class="nx">guests</span><span class="si">}</span>
+<span class="sb">          AND ra.date &gt;= </span><span class="si">${</span><span class="nx">checkin</span><span class="si">}</span>
+<span class="sb">          AND ra.date &lt; </span><span class="si">${</span><span class="nx">checkout</span><span class="si">}</span>
+<span class="sb">          AND ra.available_rooms &gt; 0</span>
+<span class="sb">        GROUP BY rt.id, rt.name, rt.max_guests, rt.base_price</span>
+<span class="sb">        HAVING COUNT(ra.date) = </span><span class="si">${</span><span class="nx">nights</span><span class="si">}</span>
+<span class="sb">           AND MIN(ra.available_rooms) &gt; 0</span>
+<span class="sb">      `</span><span class="p">;</span>
+
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">propertyId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">available</span><span class="o">:</span><span class="w"> </span><span class="nx">available</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">roomTypes</span><span class="o">:</span><span class="w"> </span><span class="nx">available</span><span class="p">,</span>
+<span class="w">      </span><span class="p">};</span>
+
+<span class="w">      </span><span class="c1">// Cache for 60 seconds (availability changes frequently)</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">setex</span><span class="p">(</span><span class="nx">cacheKey</span><span class="p">,</span><span class="w"> </span><span class="mf">60</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">result</span><span class="p">));</span>
+
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">available</span><span class="p">)</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">results</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 7: Dynamic Pricing</h2>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">PricingService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">calculatePrice</span><span class="p">(</span><span class="nx">roomTypeId</span><span class="p">,</span><span class="w"> </span><span class="nx">checkin</span><span class="p">,</span><span class="w"> </span><span class="nx">checkout</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">baseAvailability</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">roomAvailability</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">roomTypeId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">date</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">gte</span><span class="o">:</span><span class="w"> </span><span class="nx">checkin</span><span class="p">,</span><span class="w"> </span><span class="nx">lt</span><span class="o">:</span><span class="w"> </span><span class="nx">checkout</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">day</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">baseAvailability</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">let</span><span class="w"> </span><span class="nx">price</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">day</span><span class="p">.</span><span class="nx">price</span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// Demand-based adjustment</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">occupancyRate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="nx">day</span><span class="p">.</span><span class="nx">availableRooms</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">day</span><span class="p">.</span><span class="nx">totalRooms</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">occupancyRate</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0.9</span><span class="p">)</span><span class="w"> </span><span class="nx">price</span><span class="w"> </span><span class="o">*=</span><span class="w"> </span><span class="mf">1.3</span><span class="p">;</span><span class="w">       </span><span class="c1">// 90%+ occupied: +30%</span>
+<span class="w">      </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">occupancyRate</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0.7</span><span class="p">)</span><span class="w"> </span><span class="nx">price</span><span class="w"> </span><span class="o">*=</span><span class="w"> </span><span class="mf">1.15</span><span class="p">;</span><span class="w">  </span><span class="c1">// 70%+ occupied: +15%</span>
+
+<span class="w">      </span><span class="c1">// Day-of-week adjustment</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">dayOfWeek</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">day</span><span class="p">.</span><span class="nx">date</span><span class="p">).</span><span class="nx">getDay</span><span class="p">();</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">dayOfWeek</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">5</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">dayOfWeek</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">6</span><span class="p">)</span><span class="w"> </span><span class="nx">price</span><span class="w"> </span><span class="o">*=</span><span class="w"> </span><span class="mf">1.2</span><span class="p">;</span><span class="w"> </span><span class="c1">// Fri/Sat: +20%</span>
+
+<span class="w">      </span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">price</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">totalPrice</span><span class="p">,</span><span class="w"> </span><span class="nx">avgNightlyPrice</span><span class="o">:</span><span class="w"> </span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">baseAvailability</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 8: Cancellation Handling</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/bookings/:id/cancel</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/bookings/:id/cancel&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">booking</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">booking</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">include</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">property</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">booking</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">booking</span><span class="p">.</span><span class="nx">userId</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Booking not found&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">booking</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;CANCELLED&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Already cancelled&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Calculate refund based on cancellation policy</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">daysUntilCheckin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">ceil</span><span class="p">(</span>
+<span class="w">    </span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">booking</span><span class="p">.</span><span class="nx">checkinDate</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">())</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="p">(</span><span class="mf">1000</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">24</span><span class="p">)</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">refundAmount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">calculateRefund</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">booking</span><span class="p">.</span><span class="nx">property</span><span class="p">.</span><span class="nx">cancellationPolicy</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">booking</span><span class="p">.</span><span class="nx">totalPrice</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">daysUntilCheckin</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$transaction</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">tx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 1. Update booking status</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">booking</span><span class="p">.</span><span class="nx">update</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">booking</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;CANCELLED&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">cancelledAt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(),</span>
+<span class="w">        </span><span class="nx">refundAmount</span><span class="p">,</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// 2. Restore room availability</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">$executeRaw</span><span class="sb">`</span>
+<span class="sb">      UPDATE room_availability</span>
+<span class="sb">      SET available_rooms = available_rooms + 1,</span>
+<span class="sb">          updated_at = NOW()</span>
+<span class="sb">      WHERE room_type_id = </span><span class="si">${</span><span class="nx">booking</span><span class="p">.</span><span class="nx">roomTypeId</span><span class="si">}</span>
+<span class="sb">        AND date &gt;= </span><span class="si">${</span><span class="nx">booking</span><span class="p">.</span><span class="nx">checkinDate</span><span class="si">}</span>
+<span class="sb">        AND date &lt; </span><span class="si">${</span><span class="nx">booking</span><span class="p">.</span><span class="nx">checkoutDate</span><span class="si">}</span>
+<span class="sb">    `</span><span class="p">;</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// 3. Process refund</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">refundAmount</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">paymentService</span><span class="p">.</span><span class="nx">refund</span><span class="p">(</span><span class="nx">booking</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">refundAmount</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 4. Invalidate availability cache</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">invalidateAvailabilityCache</span><span class="p">(</span><span class="nx">booking</span><span class="p">.</span><span class="nx">propertyId</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;CANCELLED&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">refundAmount</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">calculateRefund</span><span class="p">(</span><span class="nx">policy</span><span class="p">,</span><span class="w"> </span><span class="nx">totalPrice</span><span class="p">,</span><span class="w"> </span><span class="nx">daysUntilCheckin</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">policy</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;FREE_CANCELLATION&#39;</span><span class="o">:</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">daysUntilCheckin</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">0.5</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;MODERATE&#39;</span><span class="o">:</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">daysUntilCheckin</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mf">5</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">totalPrice</span><span class="p">;</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">daysUntilCheckin</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">0.5</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;STRICT&#39;</span><span class="o">:</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">daysUntilCheckin</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mf">14</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">0.5</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;NON_REFUNDABLE&#39;</span><span class="o">:</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">default</span><span class="o">:</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 9: Scaling Strategies</h2>
+<div class="highlight"><pre><span></span><code>Search:       Elasticsearch cluster (3+ nodes, replicated)
+              - Geo queries for &quot;near me&quot; searches
+              - Denormalized property + room data for fast search
+
+Availability: Read replicas + Redis cache (60s TTL)
+              - Sharded by property_id region
+              - Hot properties get shorter cache TTL
+
+Bookings:     Write-primary Postgres with read replicas
+              - Partitioned by checkin_date (monthly)
+              - Old partitions moved to cold storage
+
+Images:       S3 + CloudFront CDN
+              - Multiple resolutions generated on upload
+</code></pre></div>
+
+<h2>Step 10: Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Availability model</td>
+<td>Row per room per date</td>
+<td>Row per room type per date</td>
+<td>Row per room type per date (less storage)</td>
+</tr>
+<tr>
+<td>Availability cache</td>
+<td>No cache (always fresh)</td>
+<td>Redis 60s TTL</td>
+<td>Redis cache (accept slight staleness for search)</td>
+</tr>
+<tr>
+<td>Double-booking prevention</td>
+<td>Pessimistic lock (FOR UPDATE)</td>
+<td>Optimistic (check + retry)</td>
+<td>Pessimistic for bookings (critical correctness)</td>
+</tr>
+<tr>
+<td>Search</td>
+<td>PostgreSQL + PostGIS</td>
+<td>Elasticsearch</td>
+<td>Elasticsearch (better full-text + geo)</td>
+</tr>
+<tr>
+<td>Pricing</td>
+<td>Static (set by hotel)</td>
+<td>Dynamic (algorithm)</td>
+<td>Hybrid (hotel sets base, system suggests adjustments)</td>
+</tr>
+</tbody>
+</table>
+<h2>Summary</h2>
+<p>A hotel booking system centers on the availability management problem: one row per room type per date, locked during booking to prevent double-booking, cached aggressively for search. Separate the search path (Elasticsearch, eventually consistent, cached) from the booking path (PostgreSQL with transactions, strongly consistent). Dynamic pricing adjusts based on occupancy and demand. Cancellation policies determine refund amounts and restore inventory. Partition the availability table by date for efficient cleanup of past dates.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build an Availability Calendar API</div>
+                    <div class="exercise-desc"><p>Create an API that returns a 30-day availability calendar for a given room type. Pre-populate the room_availability table with seed data. Support querying available rooms and prices for a date range. Include a visual ASCII calendar representation in the response.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Generate rows with a script that creates one row per room_type per date for the next 365 days. Use GROUP BY to aggregate availability across dates. Add price variations for weekends.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Concurrent Booking Test</div>
+                    <div class="exercise-desc"><p>Set up a room with exactly 1 available room on a specific date. Write a load test that sends 50 concurrent booking requests for that room. Verify that exactly 1 booking succeeds and 49 fail gracefully with 'no availability' errors.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Promise.all to fire all requests simultaneously. The SELECT FOR UPDATE lock ensures only one transaction succeeds. Assert the final available_rooms count is 0.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Dynamic Pricing Engine</div>
+                    <div class="exercise-desc"><p>Implement a pricing service that adjusts room rates based on: occupancy rate, day of week, season, and days until checkin. Write tests that verify prices increase as occupancy rises and weekend rates are higher than weekday rates.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use multiplier functions that compound: <code>basePrice * occupancyMultiplier * weekendMultiplier * seasonMultiplier</code>. Store adjustment rules in a config table for flexibility.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Search with Geolocation</div>
+                    <div class="exercise-desc"><p>Build a property search that supports 'hotels near me' using latitude/longitude. Index properties in Elasticsearch with geo_point fields. Return results sorted by distance with a radius filter.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Elasticsearch's <code>geo_distance</code> filter and <code>geo_distance</code> sort. Index properties with <code>{ location: { lat, lon } }</code>. Support both city name search and coordinate-based search.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Double bookings occurring despite database constraints</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Two confirmed bookings for the same room on the same night. Hotel reports overbooking. available_rooms column shows negative values.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The application reads availability and creates the booking in separate, non-transactional steps. Between the availability check and the booking insert, another request books the last room.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use SELECT FOR UPDATE within a single database transaction. The lock prevents concurrent transactions from reading the same availability row until the first transaction commits or rolls back. Add a CHECK constraint (available_rooms >= 0) as a safety net.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Search results showing sold-out hotels as available</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The availability cache (Redis, 60s TTL) still holds stale data after the last room was booked. Search results use cached data that has not yet expired.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Accept this as a trade-off: search showing briefly stale data is OK. Always re-check availability at booking time (with locking). Optionally, use cache invalidation on booking to reduce staleness. Show 'limited availability' warnings when available_rooms <= 3.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Slow search queries during peak booking season</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The availability join query across millions of rows is expensive, especially when filtering by date range across many properties. Elasticsearch index is not properly tuned for concurrent queries.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Denormalize availability into the Elasticsearch index (update async via CDC). Add read replicas for the availability database. Use result caching with short TTL. Pre-compute popular search combinations (top cities + next 30 days).
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://blog.booking.com/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag blog">blog</div>
+                    <div class="resource-title">Booking.com Engineering Blog</div>
+                    
+                    <div class="resource-note">Real-world insights into building and scaling a hotel booking platform</div>
+                    
+                </a>
+                
+                <a href="https://dataintensive.net/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Designing Data-Intensive Applications (Chapter 7: Transactions)</div>
+                    
+                    <div class="resource-note">Deep coverage of transaction isolation levels and locking strategies used in booking systems</div>
+                    
+                </a>
+                
+                <a href="https://www.elastic.co/guide/en/elasticsearch/reference/current/geo-queries.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Elasticsearch Geospatial Queries</div>
+                    
+                    <div class="resource-note">Official guide to geo_point and geo_shape queries for location-based hotel search</div>
+                    
+                </a>
+                
+                <a href="https://en.wikipedia.org/wiki/Revenue_management" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Revenue Management and Dynamic Pricing</div>
+                    
+                    <div class="resource-note">Background on the pricing optimization strategies used by hotels and airlines</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.3.2-js.html" class="btn">&larr; Design a Payment System (Stripe)</a>
+            
+            
+            <a href="/backend-learning/lesson/9.3.4-js.html" class="btn">Design a Ticket Booking System (Ticketmaster) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Distributed Cache (Memcached) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Storage & Data Systems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.2.5</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design a Distributed Cache (Memcached)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>A distributed cache is like a network of speed-dial phone books. Each phone book (cache node) holds a subset of frequently called numbers (cached values). When you need a number, your personal assistant (client library) knows exactly which phone book to check (consistent hashing). If the number is there, you get it instantly. If not, you look it up in the full directory (database) and write it in the phone book for next time. When a phone book is full, the least recently looked-up number is erased (LRU eviction). If a phone book is lost (node failure), you do not panic -- you can always look numbers up in the full directory. The key insight is that losing a phone book is annoying but not catastrophic, because the directory (database) is the source of truth.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Distributed Cache (Memcached)</h1>
+<h2>Introduction</h2>
+<p>A distributed cache stores frequently accessed data in memory across multiple machines, dramatically reducing latency and database load. Memcached, Redis Cluster, and similar systems are the backbone of high-performance web applications. This design problem tests your understanding of in-memory data management, cache eviction policies, consistent hashing, cache coherence, and the fundamental trade-offs between speed, consistency, and memory efficiency.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li><strong>get(key)</strong>: Retrieve a cached value by key</li>
+<li><strong>set(key, value, ttl)</strong>: Store a value with an optional time-to-live</li>
+<li><strong>delete(key)</strong>: Remove a cached entry</li>
+<li><strong>Multi-get</strong>: Batch retrieval of multiple keys in one round trip</li>
+<li><strong>Atomic increment/decrement</strong>: For counters</li>
+<li><strong>LRU eviction</strong>: Automatically evict least recently used items when memory is full</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li><strong>Latency</strong>: &lt; 1ms for get/set at p99</li>
+<li><strong>Throughput</strong>: 1M+ operations per second per node</li>
+<li><strong>Scalability</strong>: Horizontally scale by adding cache nodes</li>
+<li><strong>Availability</strong>: 99.99% -- cache unavailability causes a thundering herd on the database</li>
+<li><strong>Memory efficiency</strong>: Maximize useful data per GB of RAM</li>
+<li><strong>Simplicity</strong>: Thin server, smart client</li>
+</ul>
+<h2>Step 2: Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Total cached data:      5 TB (across the cluster)
+Avg value size:         500 bytes
+Avg key size:           50 bytes
+Total items:            5 TB / 550 bytes = ~9 billion items
+Memory per node:        64 GB usable
+Nodes needed:           5 TB / 64 GB = ~80 nodes (without replication)
+With replication (2x):  160 nodes
+
+Operations:             10M ops/sec total cluster
+Per node:               ~125K ops/sec (well within capability)
+
+Network:
+  Avg response size:    500 bytes
+  Per node bandwidth:   125K * 500B = ~62 MB/s (easily handled by 10GbE)
+</code></pre></div>
+
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────────────────────┐
+│                        Application Servers                       │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────┐        │
+│  │              Cache Client Library                    │        │
+│  │                                                     │        │
+│  │  1. Hash the key                                    │        │
+│  │  2. Look up cache node from consistent hash ring    │        │
+│  │  3. Send request to the correct node                │        │
+│  │  4. Handle failover if node is down                 │        │
+│  └──────┬──────────────┬──────────────┬────────────────┘        │
+│         │              │              │                          │
+└─────────┼──────────────┼──────────────┼──────────────────────────┘
+          │              │              │
+          ▼              ▼              ▼
+   ┌────────────┐ ┌────────────┐ ┌────────────┐
+   │ Cache Node │ │ Cache Node │ │ Cache Node │
+   │     1      │ │     2      │ │     N      │
+   │            │ │            │ │            │
+   │ ┌────────┐ │ │ ┌────────┐ │ │ ┌────────┐ │
+   │ │Hash    │ │ │ │Hash    │ │ │ │Hash    │ │
+   │ │Table   │ │ │ │Table   │ │ │ │Table   │ │
+   │ │        │ │ │ │        │ │ │ │        │ │
+   │ ├────────┤ │ │ ├────────┤ │ │ ├────────┤ │
+   │ │LRU     │ │ │ │LRU     │ │ │ │LRU     │ │
+   │ │List    │ │ │ │List    │ │ │ │List    │ │
+   │ └────────┘ │ │ └────────┘ │ │ └────────┘ │
+   └────────────┘ └────────────┘ └────────────┘
+
+   No inter-node communication!
+   Each node is independent (shared-nothing).
+   The client determines which node to talk to.
+</code></pre></div>
+
+<h2>Step 4: API Design</h2>
+<h3>Cache Client (used by application servers)</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">net</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:net&#39;</span><span class="p">;</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">DistributedCacheClient</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">nodes</span><span class="p">,</span><span class="w"> </span><span class="nx">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">hashRing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">ConsistentHashRing</span><span class="p">(</span><span class="nx">nodes</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">connections</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span><span class="w">  </span><span class="c1">// node -&gt; connection pool</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">retries</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">options</span><span class="p">.</span><span class="nx">retries</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">2</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">options</span><span class="p">.</span><span class="nx">timeout</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">100</span><span class="p">;</span><span class="w"> </span><span class="c1">// ms</span>
+
+<span class="w">    </span><span class="c1">// Initialize connection pools</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">nodes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">connections</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">node</span><span class="p">,</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">ConnectionPool</span><span class="p">(</span><span class="nx">node</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">maxConnections</span><span class="o">:</span><span class="w"> </span><span class="mf">20</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">idleTimeout</span><span class="o">:</span><span class="w"> </span><span class="mf">30000</span><span class="p">,</span>
+<span class="w">      </span><span class="p">}));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">hashRing</span><span class="p">.</span><span class="nx">getNode</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">conn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">connections</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">node</span><span class="p">).</span><span class="nx">acquire</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">sendCommand</span><span class="p">(</span><span class="sb">`GET </span><span class="si">${</span><span class="nx">key</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">timeout</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;NOT_FOUND&#39;</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">finally</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">conn</span><span class="p">.</span><span class="nx">release</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">hashRing</span><span class="p">.</span><span class="nx">getNode</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">conn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">connections</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">node</span><span class="p">).</span><span class="nx">acquire</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">serialized</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">value</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">sendCommand</span><span class="p">(</span><span class="sb">`SET </span><span class="si">${</span><span class="nx">key</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">ttl</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">serialized</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">timeout</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">finally</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">conn</span><span class="p">.</span><span class="nx">release</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="ow">delete</span><span class="p">(</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">hashRing</span><span class="p">.</span><span class="nx">getNode</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">conn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">connections</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">node</span><span class="p">).</span><span class="nx">acquire</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">sendCommand</span><span class="p">(</span><span class="sb">`DELETE </span><span class="si">${</span><span class="nx">key</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">timeout</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">finally</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">conn</span><span class="p">.</span><span class="nx">release</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Multi-get: batch retrieval across multiple nodes</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getMulti</span><span class="p">(</span><span class="nx">keys</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Group keys by target node</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">nodeKeyMap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">keys</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">hashRing</span><span class="p">.</span><span class="nx">getNode</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">nodeKeyMap</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">node</span><span class="p">))</span><span class="w"> </span><span class="nx">nodeKeyMap</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">node</span><span class="p">,</span><span class="w"> </span><span class="p">[]);</span>
+<span class="w">      </span><span class="nx">nodeKeyMap</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">node</span><span class="p">).</span><span class="nx">push</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Send requests in parallel (one per node)</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">(</span>
+<span class="w">      </span><span class="p">[...</span><span class="nx">nodeKeyMap</span><span class="p">.</span><span class="nx">entries</span><span class="p">()].</span><span class="nx">map</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">([</span><span class="nx">node</span><span class="p">,</span><span class="w"> </span><span class="nx">nodeKeys</span><span class="p">])</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">conn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">connections</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">node</span><span class="p">).</span><span class="nx">acquire</span><span class="p">();</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="kd">const</span><span class="w"> </span><span class="nx">batchResult</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">sendCommand</span><span class="p">(</span>
+<span class="w">            </span><span class="sb">`MGET </span><span class="si">${</span><span class="nx">nodeKeys</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="s1">&#39; &#39;</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">            </span><span class="k">this</span><span class="p">.</span><span class="nx">timeout</span>
+<span class="w">          </span><span class="p">);</span>
+<span class="w">          </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nb">Object</span><span class="p">.</span><span class="nx">entries</span><span class="p">(</span><span class="nx">batchResult</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">results</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">value</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">);</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">finally</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">conn</span><span class="p">.</span><span class="nx">release</span><span class="p">();</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">})</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">results</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Cache Server (REST API for simplicity; real systems use binary protocol)</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// Get a cached value</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/cache/:key&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">entry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">cacheStore</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">entry</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Cache miss&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Check TTL</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">entry</span><span class="p">.</span><span class="nx">expiresAt</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">entry</span><span class="p">.</span><span class="nx">expiresAt</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">cacheStore</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Cache miss (expired)&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nx">entry</span><span class="p">.</span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="o">:</span><span class="w"> </span><span class="nx">entry</span><span class="p">.</span><span class="nx">remainingTTL</span><span class="p">()</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Set a cached value</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">put</span><span class="p">(</span><span class="s1">&#39;/api/v1/cache/:key&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="nx">cacheStore</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">stored</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Delete a cached value</span>
+<span class="nx">router</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="s1">&#39;/api/v1/cache/:key&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">cacheStore</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">deleted</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Multi-get</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/cache/mget&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">keys</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{};</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">keys</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">entry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">cacheStore</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">results</span><span class="p">[</span><span class="nx">key</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">entry</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="nx">entry</span><span class="p">.</span><span class="nx">isExpired</span><span class="p">()</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">entry</span><span class="p">.</span><span class="nx">value</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Stats</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/cache/stats&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">items</span><span class="o">:</span><span class="w"> </span><span class="nx">cacheStore</span><span class="p">.</span><span class="nx">size</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">memoryUsed</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">memoryUsage</span><span class="p">().</span><span class="nx">heapUsed</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">hitRate</span><span class="o">:</span><span class="w"> </span><span class="nx">cacheStore</span><span class="p">.</span><span class="nx">hitRate</span><span class="p">(),</span>
+<span class="w">    </span><span class="nx">evictions</span><span class="o">:</span><span class="w"> </span><span class="nx">cacheStore</span><span class="p">.</span><span class="nx">evictionCount</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 5: Core Data Structures</h2>
+<h3>LRU Cache Implementation</h3>
+<p>The heart of each cache node is an LRU (Least Recently Used) cache that combines a hash map for O(1) lookups with a doubly-linked list for O(1) eviction.</p>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">LRUCache</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">maxSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">maxSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">maxSize</span><span class="p">;</span><span class="w">       </span><span class="c1">// Max number of items</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">map</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span><span class="w">         </span><span class="c1">// key -&gt; Node</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">head</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">prev</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="p">};</span><span class="w">   </span><span class="c1">// Most recently used (dummy)</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">tail</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">next</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="p">};</span><span class="w">   </span><span class="c1">// Least recently used (dummy)</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">head</span><span class="p">.</span><span class="nx">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">tail</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">tail</span><span class="p">.</span><span class="nx">prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">head</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">hits</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">misses</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">evictionCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">map</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">node</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">misses</span><span class="o">++</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Check TTL</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">node</span><span class="p">.</span><span class="nx">expiresAt</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">expiresAt</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">_remove</span><span class="p">(</span><span class="nx">node</span><span class="p">);</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">map</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">misses</span><span class="o">++</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Move to front (most recently used)</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">_remove</span><span class="p">(</span><span class="nx">node</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">_addToFront</span><span class="p">(</span><span class="nx">node</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">hits</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">value</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Update existing</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">map</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">key</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">map</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">node</span><span class="p">.</span><span class="nx">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">value</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">node</span><span class="p">.</span><span class="nx">expiresAt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ttl</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">ttl</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">_remove</span><span class="p">(</span><span class="nx">node</span><span class="p">);</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">_addToFront</span><span class="p">(</span><span class="nx">node</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Evict if at capacity</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">map</span><span class="p">.</span><span class="nx">size</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">maxSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">_evict</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Insert new node</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">key</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">value</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">expiresAt</span><span class="o">:</span><span class="w"> </span><span class="nx">ttl</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">ttl</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">prev</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">next</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">_addToFront</span><span class="p">(</span><span class="nx">node</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">map</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">node</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="ow">delete</span><span class="p">(</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">map</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">node</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">_remove</span><span class="p">(</span><span class="nx">node</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">map</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">_addToFront</span><span class="p">(</span><span class="nx">node</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">node</span><span class="p">.</span><span class="nx">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">head</span><span class="p">.</span><span class="nx">next</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">node</span><span class="p">.</span><span class="nx">prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">head</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">head</span><span class="p">.</span><span class="nx">next</span><span class="p">.</span><span class="nx">prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">node</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">head</span><span class="p">.</span><span class="nx">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">node</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">_remove</span><span class="p">(</span><span class="nx">node</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">node</span><span class="p">.</span><span class="nx">prev</span><span class="p">.</span><span class="nx">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">next</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">node</span><span class="p">.</span><span class="nx">next</span><span class="p">.</span><span class="nx">prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">prev</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">_evict</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">lru</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">tail</span><span class="p">.</span><span class="nx">prev</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">lru</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">head</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span><span class="w"> </span><span class="c1">// empty</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">_remove</span><span class="p">(</span><span class="nx">lru</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">map</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">lru</span><span class="p">.</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">evictionCount</span><span class="o">++</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">get</span><span class="w"> </span><span class="nx">size</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">map</span><span class="p">.</span><span class="nx">size</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">hitRate</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">total</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">hits</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">misses</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">total</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mf">0</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">hits</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">total</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">100</span><span class="p">).</span><span class="nx">toFixed</span><span class="p">(</span><span class="mf">2</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s1">&#39;%&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Slab Allocation (Memory Efficiency)</h3>
+<p>Memcached uses slab allocation to reduce memory fragmentation:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">SlabAllocator</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Slab classes with increasing chunk sizes</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">slabClasses</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="mf">96</span><span class="p">,</span><span class="w">    </span><span class="nx">slabs</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">},</span><span class="w">   </span><span class="c1">// Class 1: up to 96 bytes</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="mf">120</span><span class="p">,</span><span class="w">   </span><span class="nx">slabs</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">},</span><span class="w">   </span><span class="c1">// Class 2: up to 120 bytes</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="mf">152</span><span class="p">,</span><span class="w">   </span><span class="nx">slabs</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">},</span><span class="w">   </span><span class="c1">// Class 3: up to 152 bytes</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="mf">192</span><span class="p">,</span><span class="w">   </span><span class="nx">slabs</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">},</span><span class="w">   </span><span class="c1">// ...</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="mf">240</span><span class="p">,</span><span class="w">   </span><span class="nx">slabs</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="mf">304</span><span class="p">,</span><span class="w">   </span><span class="nx">slabs</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="mf">384</span><span class="p">,</span><span class="w">   </span><span class="nx">slabs</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="mf">512</span><span class="p">,</span><span class="w">   </span><span class="nx">slabs</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="mf">1024</span><span class="p">,</span><span class="w">  </span><span class="nx">slabs</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="mf">2048</span><span class="p">,</span><span class="w">  </span><span class="nx">slabs</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="mf">4096</span><span class="p">,</span><span class="w">  </span><span class="nx">slabs</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="mf">8192</span><span class="p">,</span><span class="w">  </span><span class="nx">slabs</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">];</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">SLAB_PAGE_SIZE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="p">;</span><span class="w"> </span><span class="c1">// 1MB per slab page</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">findSlabClass</span><span class="p">(</span><span class="nx">itemSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">slabClasses</span><span class="p">.</span><span class="nx">find</span><span class="p">(</span><span class="nx">sc</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">sc</span><span class="p">.</span><span class="nx">chunkSize</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">itemSize</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">allocate</span><span class="p">(</span><span class="nx">itemSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">slabClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">findSlabClass</span><span class="p">(</span><span class="nx">itemSize</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">slabClass</span><span class="p">)</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Item too large: </span><span class="si">${</span><span class="nx">itemSize</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Find a slab page with a free chunk, or allocate a new page</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">slabClass</span><span class="p">.</span><span class="nx">slabs</span><span class="p">.</span><span class="nx">find</span><span class="p">(</span><span class="nx">p</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">freeChunks</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">page</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">chunksPerPage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">SLAB_PAGE_SIZE</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">slabClass</span><span class="p">.</span><span class="nx">chunkSize</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">buffer</span><span class="o">:</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="nx">alloc</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">SLAB_PAGE_SIZE</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="nx">slabClass</span><span class="p">.</span><span class="nx">chunkSize</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">totalChunks</span><span class="o">:</span><span class="w"> </span><span class="nx">chunksPerPage</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">freeChunks</span><span class="o">:</span><span class="w"> </span><span class="nx">chunksPerPage</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">freeList</span><span class="o">:</span><span class="w"> </span><span class="nb">Array</span><span class="p">.</span><span class="kr">from</span><span class="p">({</span><span class="w"> </span><span class="nx">length</span><span class="o">:</span><span class="w"> </span><span class="nx">chunksPerPage</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">(</span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">i</span><span class="p">),</span>
+<span class="w">      </span><span class="p">};</span>
+<span class="w">      </span><span class="nx">slabClass</span><span class="p">.</span><span class="nx">slabs</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">page</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">chunkIndex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">page</span><span class="p">.</span><span class="nx">freeList</span><span class="p">.</span><span class="nx">pop</span><span class="p">();</span>
+<span class="w">    </span><span class="nx">page</span><span class="p">.</span><span class="nx">freeChunks</span><span class="o">--</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">chunkIndex</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">page</span><span class="p">.</span><span class="nx">chunkSize</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">page</span><span class="p">,</span><span class="w"> </span><span class="nx">offset</span><span class="p">,</span><span class="w"> </span><span class="nx">chunkIndex</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 6: Deep Dive -- Cache Invalidation and Consistency</h2>
+<p>Cache invalidation is famously one of the two hard problems in computer science.</p>
+<h3>Invalidation Strategies</h3>
+<div class="highlight"><pre><span></span><code>1. TTL-Based Expiration:
+   - Set a TTL on every cache entry
+   - Simple and predictable
+   - Risk: stale data until TTL expires
+
+2. Write-Through:
+   App ──&gt; Write to Cache ──&gt; Write to DB
+   - Cache is always up-to-date
+   - Higher write latency
+
+3. Write-Behind (Write-Back):
+   App ──&gt; Write to Cache ──&gt; (async) Write to DB
+   - Lowest write latency
+   - Risk: data loss if cache node crashes before DB write
+
+4. Cache-Aside (Lazy Loading):
+   Read:  App ──&gt; Check Cache ──&gt; miss ──&gt; Read DB ──&gt; Update Cache
+   Write: App ──&gt; Write DB ──&gt; Invalidate Cache
+   - Most common pattern
+   - Risk: race condition between invalidation and a concurrent read
+</code></pre></div>
+
+<h3>Thundering Herd Problem</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// Problem: When a popular cache key expires, hundreds of concurrent</span>
+<span class="c1">// requests all miss the cache and hit the database simultaneously.</span>
+
+<span class="c1">// Solution: Cache stampede protection with locks</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">CacheWithStampedeProtection</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">cache</span><span class="p">,</span><span class="w"> </span><span class="nx">db</span><span class="p">,</span><span class="w"> </span><span class="nx">redis</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">cache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">cache</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">db</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">fetchFn</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">300</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 1. Try cache</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">cached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">cache</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">cached</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">cached</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// 2. Try to acquire lock</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">lockKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`lock:</span><span class="si">${</span><span class="nx">key</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">locked</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">lockKey</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;1&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;NX&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">5</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">locked</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 3. We got the lock -- fetch from DB</span>
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetchFn</span><span class="p">();</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">cache</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="p">);</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">value</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">finally</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">del</span><span class="p">(</span><span class="nx">lockKey</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 4. Another request is fetching -- wait and retry</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">(</span><span class="nx">resolve</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">setTimeout</span><span class="p">(</span><span class="nx">resolve</span><span class="p">,</span><span class="w"> </span><span class="mf">50</span><span class="p">));</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">fetchFn</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Early Expiration (Probabilistic)</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// Another stampede solution: proactively refresh before TTL expires</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">getWithEarlyExpiry</span><span class="p">(</span><span class="nx">cache</span><span class="p">,</span><span class="w"> </span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">fetchFn</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">entry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">cache</span><span class="p">.</span><span class="nx">getRaw</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">entry</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetchFn</span><span class="p">();</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">cache</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">value</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">remainingTTL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">entry</span><span class="p">.</span><span class="nx">expiresAt</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">totalTTL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ttl</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// As TTL gets closer to expiry, probabilistically refresh</span>
+<span class="w">  </span><span class="c1">// XFetch algorithm: probability increases as expiry approaches</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">probability</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">exp</span><span class="p">(</span><span class="o">-</span><span class="nx">remainingTTL</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="p">(</span><span class="nx">totalTTL</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">0.1</span><span class="p">));</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nb">Math</span><span class="p">.</span><span class="nx">random</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">probability</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Refresh in background (don&#39;t block the current request)</span>
+<span class="w">    </span><span class="nx">fetchFn</span><span class="p">().</span><span class="nx">then</span><span class="p">(</span><span class="nx">value</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">cache</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="p">)).</span><span class="k">catch</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">entry</span><span class="p">.</span><span class="nx">value</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 7: Scaling Strategies</h2>
+<ol>
+<li><strong>Consistent hashing with virtual nodes</strong>: Each physical node has 100-200 virtual nodes on the hash ring for even distribution. Adding a node remaps only 1/N of keys.</li>
+<li><strong>Client-side sharding</strong>: The client library determines which node to contact. No central router needed.</li>
+<li><strong>Connection pooling</strong>: Maintain persistent connections between application servers and cache nodes to avoid TCP handshake overhead.</li>
+<li><strong>Multi-get optimization</strong>: Group keys by target node and issue one batched request per node instead of N individual requests.</li>
+<li><strong>Gutter pool</strong>: When a cache node fails, route its keys to a dedicated "gutter" pool instead of the database. This prevents thundering herd on node failure.</li>
+<li><strong>Monitoring</strong>: Track hit rate, eviction rate, memory usage, and latency per node. A dropping hit rate indicates the cache is too small or keys are too short-lived.</li>
+</ol>
+<div class="highlight"><pre><span></span><code>Gutter Pool (Facebook&#39;s approach):
+
+Normal:  Client ──&gt; Hash Ring ──&gt; Cache Node 3 ──&gt; HIT
+
+Node 3 down:
+         Client ──&gt; Hash Ring ──&gt; Cache Node 3 ──&gt; FAIL
+                                  │
+                                  ▼
+                          Gutter Pool Node ──&gt; MISS ──&gt; DB
+                          (temporary, short TTL)
+
+  Instead of ALL of Node 3&#39;s keys hitting the DB,
+  they populate the gutter pool on first miss.
+  Subsequent requests hit the gutter pool.
+</code></pre></div>
+
+<h2>Step 8: Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Eviction policy</td>
+<td>LRU</td>
+<td>LFU</td>
+<td>LRU (simpler, good enough for most workloads)</td>
+</tr>
+<tr>
+<td>Serialization</td>
+<td>JSON</td>
+<td>Protocol Buffers</td>
+<td>JSON for simplicity, Protobuf for performance</td>
+</tr>
+<tr>
+<td>Protocol</td>
+<td>Text (Memcached ASCII)</td>
+<td>Binary</td>
+<td>Binary (less parsing overhead, 20%+ faster)</td>
+</tr>
+<tr>
+<td>Replication</td>
+<td>None (Memcached style)</td>
+<td>Primary-replica (Redis style)</td>
+<td>None for pure cache; replicated if data loss is costly</td>
+</tr>
+<tr>
+<td>Consistency</td>
+<td>None (best-effort)</td>
+<td>Lease-based</td>
+<td>Lease-based if stale reads cause serious issues</td>
+</tr>
+<tr>
+<td>Memory management</td>
+<td>Node.js heap</td>
+<td>Slab allocator (native)</td>
+<td>Slab allocator for large caches (avoids GC pauses)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Why no replication by default?</strong> A cache is not the source of truth. If a cache node dies, the worst case is a temporary increase in database load while the cache warms up. Replication doubles memory cost for data that is already stored in the database. The exception is when cache warm-up is too slow or the database cannot handle the thundering herd -- in that case, replicate or use a gutter pool.</p>
+<p><strong>LRU vs. LFU</strong>: LRU is simpler and works well for most access patterns. LFU (Least Frequently Used) is better when some items are accessed in bursts then never again (LRU would keep them too long). Redis 4.0+ uses an approximated LFU. A good compromise is Segmented LRU (SLRU) which maintains a probationary and a protected segment.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Implement an LRU Cache</div>
+                    <div class="exercise-desc"><p>Build an LRU cache in Node.js using a Map and a doubly linked list. Support get(key), set(key, value, ttl), and delete(key). All operations must be O(1). Add a stats endpoint that reports hit rate, miss rate, and eviction count. Benchmark with 1M operations.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a Map for O(1) key lookup. The doubly linked list maintains access order. On get, move the node to the head. On set, add to head and evict from tail if full.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build a Distributed Cache Client</div>
+                    <div class="exercise-desc"><p>Create a cache client that distributes keys across 3 local cache server instances using consistent hashing. Implement get, set, delete, and multi-get. Test that adding a 4th node only remaps approximately 25% of keys.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Run 3 Express servers on different ports. Use the ConsistentHashRing class from the lesson. For multi-get, group keys by node and send parallel requests.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Cache Stampede Protection</div>
+                    <div class="exercise-desc"><p>Build a cache-aside pattern with stampede protection using Redis locks. Simulate a thundering herd by firing 100 concurrent requests for the same cache key after it expires. Compare database hit count with and without stampede protection.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Redis SET with NX and EX flags for the lock. Waiting requests should retry after a short delay. Count DB calls with a counter to verify protection works.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Eviction Policy Comparison</div>
+                    <div class="exercise-desc"><p>Implement LRU, LFU, and Random eviction policies. Generate a workload with Zipfian distribution (some keys much more popular than others). Measure and compare hit rates across all three policies for the same cache size.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>For Zipfian distribution, use the formula: probability of accessing item i is proportional to 1/i^s where s is the skew parameter. Use s=1.0 for typical web workloads.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Cache hit rate drops significantly after adding a new node</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Using modulo-based hashing (key hash % N). When N changes from 3 to 4 nodes, up to 75% of keys are remapped to different nodes, causing mass cache misses.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Switch to consistent hashing with virtual nodes. When a node is added to a ring with N nodes, only approximately 1/N of keys are remapped. Use 100+ virtual nodes per physical node for even distribution.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Thundering herd on database after cache node failure</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> All keys assigned to the failed node result in cache misses. All application servers simultaneously query the database for those keys.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement a gutter pool: a small set of reserve cache nodes. When a primary cache node is unreachable, route its keys to the gutter pool instead of going to the database. Use short TTLs in the gutter pool. Also consider warming the replacement node from a database snapshot.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Memory usage on cache nodes is uneven -- some nodes are 95% full while others are 50%</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Poor distribution of keys across the hash ring, or some keys have significantly larger values than others.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Increase virtual nodes per physical node (150+) for more even distribution. Monitor per-node memory and key counts. Consider value-size-aware routing: route large values to nodes with more available memory. Alternatively, use slab rebalancing to reclaim memory from underused slab classes.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag paper">paper</div>
+                    <div class="resource-title">Scaling Memcache at Facebook</div>
+                    
+                    <div class="resource-note">The seminal paper on scaling Memcached to handle billions of requests -- introduces gutter pools, leases, and regional replication</div>
+                    
+                </a>
+                
+                <a href="https://github.com/memcached/memcached/wiki/Overview" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Memcached Internals</div>
+                    
+                    <div class="resource-note">Official wiki explaining slab allocation, LRU, and the text/binary protocol</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/docs/reference/cluster-spec/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Cluster Specification</div>
+                    
+                    <div class="resource-note">How Redis implements distributed caching with hash slots and replication</div>
+                    
+                </a>
+                
+                <a href="https://hazelcast.com/blog/a-hitchhikers-guide-to-caching-patterns/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">A Hitchhiker's Guide to Caching Patterns</div>
+                    
+                    <div class="resource-note">Comprehensive overview of cache-aside, read-through, write-through, and write-behind patterns</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.2.4-js.html" class="btn">&larr; Design a Search Engine (Google)</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

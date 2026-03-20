@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RBAC and ABAC: Role and Attribute-Based Access Control - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-py.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-py.html">Security & Reliability</a> &rsaquo;
+            Authentication & Authorization
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.2.3</span>
+                <span>~3h</span>
+            </div>
+            <h1>RBAC and ABAC: Role and Attribute-Based Access Control</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of RBAC like a building where each person gets a colored badge — red for executives, blue for engineers, green for visitors — and doors open based on badge color. ABAC adds smart locks that also check the time of day, whether you are carrying approved equipment, and whether the room belongs to your department. Together, the badge gets you through the front door quickly, while the smart lock handles the nuanced decisions at each room.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>RBAC and ABAC: Role and Attribute-Based Access Control</h1>
+<p>Access control is the gatekeeper of every backend system. Once you have authenticated a user (confirmed <em>who</em> they are), you need authorization — determining <em>what</em> they are allowed to do. Two of the most widely adopted authorization models are <strong>Role-Based Access Control (RBAC)</strong> and <strong>Attribute-Based Access Control (ABAC)</strong>. In this lesson we will build both from scratch, understand when to use each, and learn how to combine them for production-grade systems.</p>
+<hr />
+<h2>1. RBAC Fundamentals</h2>
+<h3>Core Concepts</h3>
+<p>RBAC assigns permissions not to individual users but to <strong>roles</strong>, and users are then assigned one or more roles. This creates a clean separation:</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>User</strong></td>
+<td>An authenticated identity (person, service account)</td>
+</tr>
+<tr>
+<td><strong>Role</strong></td>
+<td>A named collection of permissions (e.g., <code>admin</code>, <code>editor</code>, <code>viewer</code>)</td>
+</tr>
+<tr>
+<td><strong>Permission</strong></td>
+<td>A specific action on a resource (e.g., <code>articles:write</code>, <code>users:delete</code>)</td>
+</tr>
+<tr>
+<td><strong>Role Assignment</strong></td>
+<td>The mapping of a user to one or more roles</td>
+</tr>
+</tbody>
+</table>
+<p>The key insight is indirection: instead of managing thousands of individual user-permission mappings, you manage a handful of roles.</p>
+<h3>Role Hierarchies</h3>
+<p>In many systems, roles form a hierarchy. An <code>admin</code> inherits everything an <code>editor</code> can do, and an <code>editor</code> inherits everything a <code>viewer</code> can do:</p>
+<div class="highlight"><pre><span></span><code>admin
+  └── editor
+        └── viewer
+</code></pre></div>
+
+<p>This is sometimes called <strong>RBAC1</strong> (hierarchical RBAC) in the NIST model. We will implement this pattern shortly.</p>
+<h3>Database Schema for RBAC</h3>
+<p>A solid relational schema is the backbone of any RBAC implementation. Here is a design that supports role hierarchies and many-to-many relationships:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Core tables</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">username</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">email</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">roles</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="nb">SERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">name</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">description</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">parent_role_id</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">roles</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w">  </span><span class="c1">-- hierarchy</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">permissions</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="nb">SERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">resource</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">   </span><span class="c1">-- e.g., &#39;articles&#39;, &#39;users&#39;</span>
+<span class="w">    </span><span class="n">action</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">      </span><span class="c1">-- e.g., &#39;read&#39;, &#39;write&#39;, &#39;delete&#39;</span>
+<span class="w">    </span><span class="k">UNIQUE</span><span class="p">(</span><span class="n">resource</span><span class="p">,</span><span class="w"> </span><span class="n">action</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- Junction tables</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">user_roles</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">user_id</span><span class="w"> </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">DELETE</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">,</span>
+<span class="w">    </span><span class="n">role_id</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">roles</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">DELETE</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">,</span>
+<span class="w">    </span><span class="n">granted_at</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">    </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">role_id</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">role_permissions</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">role_id</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">roles</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">DELETE</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">,</span>
+<span class="w">    </span><span class="n">permission_id</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">permissions</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">DELETE</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">,</span>
+<span class="w">    </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">role_id</span><span class="p">,</span><span class="w"> </span><span class="n">permission_id</span><span class="p">)</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<p>The <code>parent_role_id</code> column on the <code>roles</code> table lets you express hierarchy. When checking permissions, you walk up the chain.</p>
+<h3>Resolving Permissions with Hierarchy</h3>
+<p>A recursive query retrieves all permissions for a user, including inherited ones:</p>
+<div class="highlight"><pre><span></span><code><span class="k">WITH</span><span class="w"> </span><span class="k">RECURSIVE</span><span class="w"> </span><span class="n">role_chain</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="c1">-- Start with the user&#39;s directly assigned roles</span>
+<span class="w">    </span><span class="k">SELECT</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">parent_role_id</span>
+<span class="w">    </span><span class="k">FROM</span><span class="w"> </span><span class="n">roles</span><span class="w"> </span><span class="n">r</span>
+<span class="w">    </span><span class="k">JOIN</span><span class="w"> </span><span class="n">user_roles</span><span class="w"> </span><span class="n">ur</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">ur</span><span class="p">.</span><span class="n">role_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">id</span>
+<span class="w">    </span><span class="k">WHERE</span><span class="w"> </span><span class="n">ur</span><span class="p">.</span><span class="n">user_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">:</span><span class="n">user_id</span>
+
+<span class="w">    </span><span class="k">UNION</span>
+
+<span class="w">    </span><span class="c1">-- Walk down the hierarchy (children inherit parent permissions)</span>
+<span class="w">    </span><span class="k">SELECT</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">parent_role_id</span>
+<span class="w">    </span><span class="k">FROM</span><span class="w"> </span><span class="n">roles</span><span class="w"> </span><span class="n">r</span>
+<span class="w">    </span><span class="k">JOIN</span><span class="w"> </span><span class="n">role_chain</span><span class="w"> </span><span class="n">rc</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rc</span><span class="p">.</span><span class="n">parent_role_id</span>
+<span class="p">)</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="k">DISTINCT</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">resource</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">action</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">role_chain</span><span class="w"> </span><span class="n">rc</span>
+<span class="k">JOIN</span><span class="w"> </span><span class="n">role_permissions</span><span class="w"> </span><span class="n">rp</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">rp</span><span class="p">.</span><span class="n">role_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rc</span><span class="p">.</span><span class="n">id</span>
+<span class="k">JOIN</span><span class="w"> </span><span class="n">permissions</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rp</span><span class="p">.</span><span class="n">permission_id</span><span class="p">;</span>
+</code></pre></div>
+
+<hr />
+<h2>2. Implementing RBAC in Python</h2>
+<h3>Flask Example with Decorators</h3>
+<p>Decorators provide a clean, declarative way to protect endpoints:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">functools</span><span class="w"> </span><span class="kn">import</span> <span class="n">wraps</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">flask</span><span class="w"> </span><span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">g</span><span class="p">,</span> <span class="n">jsonify</span><span class="p">,</span> <span class="n">request</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">get_user_permissions</span><span class="p">(</span><span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">set</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Fetch all permissions for a user (including inherited).</span>
+<span class="sd">    In production this would query the database or a cache.&quot;&quot;&quot;</span>
+    <span class="c1"># Simulated permission store</span>
+    <span class="n">permission_store</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">&quot;alice&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;articles:read&quot;</span><span class="p">,</span> <span class="s2">&quot;articles:write&quot;</span><span class="p">,</span> <span class="s2">&quot;articles:delete&quot;</span><span class="p">,</span> <span class="s2">&quot;users:read&quot;</span><span class="p">},</span>
+        <span class="s2">&quot;bob&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;articles:read&quot;</span><span class="p">,</span> <span class="s2">&quot;articles:write&quot;</span><span class="p">},</span>
+        <span class="s2">&quot;charlie&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;articles:read&quot;</span><span class="p">},</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">permission_store</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="nb">set</span><span class="p">())</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">require_permission</span><span class="p">(</span><span class="n">resource</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">action</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Decorator that checks if the current user has the required permission.&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">decorator</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+        <span class="nd">@wraps</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+        <span class="k">def</span><span class="w"> </span><span class="nf">decorated_function</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+            <span class="n">user_id</span> <span class="o">=</span> <span class="n">g</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;user_id&quot;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">user_id</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="s2">&quot;Authentication required&quot;</span><span class="p">}),</span> <span class="mi">401</span>
+
+            <span class="n">permissions</span> <span class="o">=</span> <span class="n">get_user_permissions</span><span class="p">(</span><span class="n">user_id</span><span class="p">)</span>
+            <span class="n">required</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">resource</span><span class="si">}</span><span class="s2">:</span><span class="si">{</span><span class="n">action</span><span class="si">}</span><span class="s2">&quot;</span>
+
+            <span class="k">if</span> <span class="n">required</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">permissions</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span>
+                    <span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="s2">&quot;Forbidden&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;detail&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Missing permission: </span><span class="si">{</span><span class="n">required</span><span class="si">}</span><span class="s2">&quot;</span>
+                <span class="p">}),</span> <span class="mi">403</span>
+
+            <span class="k">return</span> <span class="n">f</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">decorated_function</span>
+    <span class="k">return</span> <span class="n">decorator</span>
+
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">before_request</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">extract_user</span><span class="p">():</span>
+    <span class="c1"># In production, this comes from a JWT or session</span>
+    <span class="n">g</span><span class="o">.</span><span class="n">user_id</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;X-User-Id&quot;</span><span class="p">)</span>
+
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s2">&quot;/articles&quot;</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;GET&quot;</span><span class="p">])</span>
+<span class="nd">@require_permission</span><span class="p">(</span><span class="s2">&quot;articles&quot;</span><span class="p">,</span> <span class="s2">&quot;read&quot;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">list_articles</span><span class="p">():</span>
+    <span class="k">return</span> <span class="n">jsonify</span><span class="p">([{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;Hello World&quot;</span><span class="p">}])</span>
+
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s2">&quot;/articles&quot;</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;POST&quot;</span><span class="p">])</span>
+<span class="nd">@require_permission</span><span class="p">(</span><span class="s2">&quot;articles&quot;</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">create_article</span><span class="p">():</span>
+    <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;New Article&quot;</span><span class="p">}),</span> <span class="mi">201</span>
+
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s2">&quot;/articles/&lt;int:article_id&gt;&quot;</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;DELETE&quot;</span><span class="p">])</span>
+<span class="nd">@require_permission</span><span class="p">(</span><span class="s2">&quot;articles&quot;</span><span class="p">,</span> <span class="s2">&quot;delete&quot;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">delete_article</span><span class="p">(</span><span class="n">article_id</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s2">&quot;deleted&quot;</span><span class="p">:</span> <span class="n">article_id</span><span class="p">})</span>
+</code></pre></div>
+
+<h3>FastAPI Example with Dependencies</h3>
+<p>FastAPI's dependency injection system offers an even more elegant approach:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">fastapi</span><span class="w"> </span><span class="kn">import</span> <span class="n">FastAPI</span><span class="p">,</span> <span class="n">Depends</span><span class="p">,</span> <span class="n">HTTPException</span><span class="p">,</span> <span class="n">Request</span><span class="p">,</span> <span class="n">status</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Set</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">FastAPI</span><span class="p">()</span>
+
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_current_user</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">Request</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+    <span class="n">user_id</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;X-User-Id&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">user_id</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="n">status_code</span><span class="o">=</span><span class="mi">401</span><span class="p">,</span> <span class="n">detail</span><span class="o">=</span><span class="s2">&quot;Not authenticated&quot;</span><span class="p">)</span>
+    <span class="c1"># In production: decode JWT, look up session, etc.</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;user_id&quot;</span><span class="p">:</span> <span class="n">user_id</span><span class="p">}</span>
+
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_permissions</span><span class="p">(</span><span class="n">user</span><span class="p">:</span> <span class="nb">dict</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">Set</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Resolve all permissions for the authenticated user.&quot;&quot;&quot;</span>
+    <span class="c1"># In production: query DB or Redis cache</span>
+    <span class="n">store</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">&quot;alice&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;articles:read&quot;</span><span class="p">,</span> <span class="s2">&quot;articles:write&quot;</span><span class="p">,</span> <span class="s2">&quot;articles:delete&quot;</span><span class="p">},</span>
+        <span class="s2">&quot;bob&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;articles:read&quot;</span><span class="p">,</span> <span class="s2">&quot;articles:write&quot;</span><span class="p">},</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">store</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">user</span><span class="p">[</span><span class="s2">&quot;user_id&quot;</span><span class="p">],</span> <span class="nb">set</span><span class="p">())</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">PermissionChecker</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Callable dependency that checks for a specific permission.&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">resource</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">action</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">required</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">resource</span><span class="si">}</span><span class="s2">:</span><span class="si">{</span><span class="n">action</span><span class="si">}</span><span class="s2">&quot;</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">permissions</span><span class="p">:</span> <span class="n">Set</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_permissions</span><span class="p">)):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">required</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">permissions</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span>
+                <span class="n">status_code</span><span class="o">=</span><span class="n">status</span><span class="o">.</span><span class="n">HTTP_403_FORBIDDEN</span><span class="p">,</span>
+                <span class="n">detail</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;Missing permission: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">required</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+            <span class="p">)</span>
+
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/articles&quot;</span><span class="p">,</span> <span class="n">dependencies</span><span class="o">=</span><span class="p">[</span><span class="n">Depends</span><span class="p">(</span><span class="n">PermissionChecker</span><span class="p">(</span><span class="s2">&quot;articles&quot;</span><span class="p">,</span> <span class="s2">&quot;read&quot;</span><span class="p">))])</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">list_articles</span><span class="p">():</span>
+    <span class="k">return</span> <span class="p">[{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;Hello World&quot;</span><span class="p">}]</span>
+
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/articles&quot;</span><span class="p">,</span> <span class="n">dependencies</span><span class="o">=</span><span class="p">[</span><span class="n">Depends</span><span class="p">(</span><span class="n">PermissionChecker</span><span class="p">(</span><span class="s2">&quot;articles&quot;</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">))])</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">create_article</span><span class="p">():</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;New Article&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>The <code>PermissionChecker</code> class is a reusable dependency. It leverages FastAPI's <code>Depends</code> system so the permission resolution is cached within a single request.</p>
+<hr />
+<h2>3. ABAC: Going Beyond Roles</h2>
+<h3>Why ABAC?</h3>
+<p>RBAC works well for coarse-grained control ("editors can edit articles"), but it struggles with fine-grained, context-dependent rules like:</p>
+<ul>
+<li>"Users can only edit articles they authored."</li>
+<li>"Documents can only be accessed during business hours."</li>
+<li>"Managers can approve expenses under $10,000; directors can approve any amount."</li>
+</ul>
+<p>Adding a new role for every such rule leads to <strong>role explosion</strong>. ABAC solves this by evaluating <strong>attributes</strong> at decision time.</p>
+<h3>The ABAC Model</h3>
+<p>ABAC policies evaluate four categories of attributes:</p>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Examples</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Subject</strong></td>
+<td>user.role, user.department, user.clearance_level</td>
+</tr>
+<tr>
+<td><strong>Object (Resource)</strong></td>
+<td>resource.owner, resource.classification, resource.created_at</td>
+</tr>
+<tr>
+<td><strong>Action</strong></td>
+<td>action.type (read, write, delete)</td>
+</tr>
+<tr>
+<td><strong>Environment</strong></td>
+<td>env.time, env.ip_address, env.request_count</td>
+</tr>
+</tbody>
+</table>
+<p>A policy engine evaluates rules against these attributes and returns <strong>Allow</strong> or <strong>Deny</strong>.</p>
+<h3>Implementing a Simple ABAC Engine in Python</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Callable</span><span class="p">,</span> <span class="n">List</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">datetime</span>
+
+
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">AccessRequest</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Encapsulates all attributes for an access decision.&quot;&quot;&quot;</span>
+    <span class="n">subject</span><span class="p">:</span> <span class="nb">dict</span>      <span class="c1"># {&quot;id&quot;: &quot;alice&quot;, &quot;role&quot;: &quot;editor&quot;, &quot;department&quot;: &quot;engineering&quot;}</span>
+    <span class="n">resource</span><span class="p">:</span> <span class="nb">dict</span>      <span class="c1"># {&quot;type&quot;: &quot;article&quot;, &quot;owner&quot;: &quot;alice&quot;, &quot;status&quot;: &quot;draft&quot;}</span>
+    <span class="n">action</span><span class="p">:</span> <span class="nb">str</span>         <span class="c1"># &quot;read&quot;, &quot;write&quot;, &quot;delete&quot;</span>
+    <span class="n">environment</span><span class="p">:</span> <span class="nb">dict</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="k">lambda</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;time&quot;</span><span class="p">:</span> <span class="n">datetime</span><span class="o">.</span><span class="n">utcnow</span><span class="p">(),</span>
+        <span class="s2">&quot;ip_address&quot;</span><span class="p">:</span> <span class="s2">&quot;0.0.0.0&quot;</span><span class="p">,</span>
+    <span class="p">})</span>
+
+
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Policy</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;A single ABAC policy rule.&quot;&quot;&quot;</span>
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">description</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">effect</span><span class="p">:</span> <span class="nb">str</span>  <span class="c1"># &quot;allow&quot; or &quot;deny&quot;</span>
+    <span class="n">condition</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">AccessRequest</span><span class="p">],</span> <span class="nb">bool</span><span class="p">]</span>
+    <span class="n">priority</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>  <span class="c1"># higher priority policies are evaluated first</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">PolicyEngine</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Evaluates access requests against a set of policies.</span>
+
+<span class="sd">    Strategy: deny-by-default. At least one &#39;allow&#39; policy must match,</span>
+<span class="sd">    and no &#39;deny&#39; policy may match.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">policies</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">Policy</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_policy</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">policy</span><span class="p">:</span> <span class="n">Policy</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">policies</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">policy</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">policies</span><span class="o">.</span><span class="n">sort</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">p</span><span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">priority</span><span class="p">,</span> <span class="n">reverse</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">evaluate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">:</span> <span class="n">AccessRequest</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="n">allow_matched</span> <span class="o">=</span> <span class="kc">False</span>
+
+        <span class="k">for</span> <span class="n">policy</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">policies</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">policy</span><span class="o">.</span><span class="n">condition</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+                    <span class="k">if</span> <span class="n">policy</span><span class="o">.</span><span class="n">effect</span> <span class="o">==</span> <span class="s2">&quot;deny&quot;</span><span class="p">:</span>
+                        <span class="c1"># Explicit deny always wins</span>
+                        <span class="k">return</span> <span class="kc">False</span>
+                    <span class="k">elif</span> <span class="n">policy</span><span class="o">.</span><span class="n">effect</span> <span class="o">==</span> <span class="s2">&quot;allow&quot;</span><span class="p">:</span>
+                        <span class="n">allow_matched</span> <span class="o">=</span> <span class="kc">True</span>
+            <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+                <span class="c1"># If a policy evaluation fails, skip it (fail-closed)</span>
+                <span class="k">continue</span>
+
+        <span class="k">return</span> <span class="n">allow_matched</span>
+
+
+<span class="c1"># --- Define policies ---</span>
+
+<span class="n">engine</span> <span class="o">=</span> <span class="n">PolicyEngine</span><span class="p">()</span>
+
+<span class="c1"># Policy 1: Editors can read and write articles</span>
+<span class="n">engine</span><span class="o">.</span><span class="n">add_policy</span><span class="p">(</span><span class="n">Policy</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;editor-article-access&quot;</span><span class="p">,</span>
+    <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Editors can read and write articles&quot;</span><span class="p">,</span>
+    <span class="n">effect</span><span class="o">=</span><span class="s2">&quot;allow&quot;</span><span class="p">,</span>
+    <span class="n">condition</span><span class="o">=</span><span class="k">lambda</span> <span class="n">req</span><span class="p">:</span> <span class="p">(</span>
+        <span class="n">req</span><span class="o">.</span><span class="n">subject</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;role&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="s2">&quot;editor&quot;</span>
+        <span class="ow">and</span> <span class="n">req</span><span class="o">.</span><span class="n">resource</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;type&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="s2">&quot;article&quot;</span>
+        <span class="ow">and</span> <span class="n">req</span><span class="o">.</span><span class="n">action</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;read&quot;</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">)</span>
+    <span class="p">),</span>
+<span class="p">))</span>
+
+<span class="c1"># Policy 2: Users can only edit their own articles</span>
+<span class="n">engine</span><span class="o">.</span><span class="n">add_policy</span><span class="p">(</span><span class="n">Policy</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;owner-only-write&quot;</span><span class="p">,</span>
+    <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Deny writes to articles you do not own&quot;</span><span class="p">,</span>
+    <span class="n">effect</span><span class="o">=</span><span class="s2">&quot;deny&quot;</span><span class="p">,</span>
+    <span class="n">priority</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span>  <span class="c1"># Higher priority than the allow rule</span>
+    <span class="n">condition</span><span class="o">=</span><span class="k">lambda</span> <span class="n">req</span><span class="p">:</span> <span class="p">(</span>
+        <span class="n">req</span><span class="o">.</span><span class="n">action</span> <span class="o">==</span> <span class="s2">&quot;write&quot;</span>
+        <span class="ow">and</span> <span class="n">req</span><span class="o">.</span><span class="n">resource</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;type&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="s2">&quot;article&quot;</span>
+        <span class="ow">and</span> <span class="n">req</span><span class="o">.</span><span class="n">subject</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;id&quot;</span><span class="p">)</span> <span class="o">!=</span> <span class="n">req</span><span class="o">.</span><span class="n">resource</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;owner&quot;</span><span class="p">)</span>
+        <span class="ow">and</span> <span class="n">req</span><span class="o">.</span><span class="n">subject</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;role&quot;</span><span class="p">)</span> <span class="o">!=</span> <span class="s2">&quot;admin&quot;</span>  <span class="c1"># admins bypass</span>
+    <span class="p">),</span>
+<span class="p">))</span>
+
+<span class="c1"># Policy 3: No access outside business hours (9-17 UTC)</span>
+<span class="n">engine</span><span class="o">.</span><span class="n">add_policy</span><span class="p">(</span><span class="n">Policy</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;business-hours-only&quot;</span><span class="p">,</span>
+    <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Deny all access outside business hours&quot;</span><span class="p">,</span>
+    <span class="n">effect</span><span class="o">=</span><span class="s2">&quot;deny&quot;</span><span class="p">,</span>
+    <span class="n">priority</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span>
+    <span class="n">condition</span><span class="o">=</span><span class="k">lambda</span> <span class="n">req</span><span class="p">:</span> <span class="p">(</span>
+        <span class="n">req</span><span class="o">.</span><span class="n">environment</span><span class="p">[</span><span class="s2">&quot;time&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">hour</span> <span class="o">&lt;</span> <span class="mi">9</span>
+        <span class="ow">or</span> <span class="n">req</span><span class="o">.</span><span class="n">environment</span><span class="p">[</span><span class="s2">&quot;time&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">hour</span> <span class="o">&gt;=</span> <span class="mi">17</span>
+    <span class="p">),</span>
+<span class="p">))</span>
+
+
+<span class="c1"># --- Evaluate ---</span>
+
+<span class="n">request</span> <span class="o">=</span> <span class="n">AccessRequest</span><span class="p">(</span>
+    <span class="n">subject</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;alice&quot;</span><span class="p">,</span> <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;editor&quot;</span><span class="p">,</span> <span class="s2">&quot;department&quot;</span><span class="p">:</span> <span class="s2">&quot;content&quot;</span><span class="p">},</span>
+    <span class="n">resource</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;article&quot;</span><span class="p">,</span> <span class="s2">&quot;owner&quot;</span><span class="p">:</span> <span class="s2">&quot;alice&quot;</span><span class="p">,</span> <span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;draft&quot;</span><span class="p">},</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;write&quot;</span><span class="p">,</span>
+    <span class="n">environment</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;time&quot;</span><span class="p">:</span> <span class="n">datetime</span><span class="p">(</span><span class="mi">2026</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">17</span><span class="p">,</span> <span class="mi">14</span><span class="p">,</span> <span class="mi">30</span><span class="p">),</span> <span class="s2">&quot;ip_address&quot;</span><span class="p">:</span> <span class="s2">&quot;10.0.0.5&quot;</span><span class="p">},</span>
+<span class="p">)</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">engine</span><span class="o">.</span><span class="n">evaluate</span><span class="p">(</span><span class="n">request</span><span class="p">))</span>  <span class="c1"># True — alice is an editor writing her own article</span>
+
+<span class="n">request_other</span> <span class="o">=</span> <span class="n">AccessRequest</span><span class="p">(</span>
+    <span class="n">subject</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;bob&quot;</span><span class="p">,</span> <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;editor&quot;</span><span class="p">,</span> <span class="s2">&quot;department&quot;</span><span class="p">:</span> <span class="s2">&quot;content&quot;</span><span class="p">},</span>
+    <span class="n">resource</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;article&quot;</span><span class="p">,</span> <span class="s2">&quot;owner&quot;</span><span class="p">:</span> <span class="s2">&quot;alice&quot;</span><span class="p">,</span> <span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;draft&quot;</span><span class="p">},</span>
+    <span class="n">action</span><span class="o">=</span><span class="s2">&quot;write&quot;</span><span class="p">,</span>
+    <span class="n">environment</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;time&quot;</span><span class="p">:</span> <span class="n">datetime</span><span class="p">(</span><span class="mi">2026</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">17</span><span class="p">,</span> <span class="mi">14</span><span class="p">,</span> <span class="mi">30</span><span class="p">),</span> <span class="s2">&quot;ip_address&quot;</span><span class="p">:</span> <span class="s2">&quot;10.0.0.6&quot;</span><span class="p">},</span>
+<span class="p">)</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">engine</span><span class="o">.</span><span class="n">evaluate</span><span class="p">(</span><span class="n">request_other</span><span class="p">))</span>  <span class="c1"># False — bob is not the owner</span>
+</code></pre></div>
+
+<p>This engine is deliberately simple. Production policy engines like <strong>Open Policy Agent (OPA)</strong> or <strong>AWS Cedar</strong> use declarative policy languages, but the fundamental model is the same.</p>
+<hr />
+<h2>4. Integrating ABAC into FastAPI</h2>
+<p>Let us wire the ABAC engine into a real endpoint:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">fastapi</span><span class="w"> </span><span class="kn">import</span> <span class="n">FastAPI</span><span class="p">,</span> <span class="n">Depends</span><span class="p">,</span> <span class="n">HTTPException</span><span class="p">,</span> <span class="n">Request</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">datetime</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">FastAPI</span><span class="p">()</span>
+
+<span class="c1"># Assume `engine` is the PolicyEngine defined above</span>
+
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_current_user</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">Request</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+    <span class="c1"># Simplified; in production decode a JWT</span>
+    <span class="k">return</span> <span class="p">{</span>
+        <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;X-User-Id&quot;</span><span class="p">,</span> <span class="s2">&quot;anonymous&quot;</span><span class="p">),</span>
+        <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;X-User-Role&quot;</span><span class="p">,</span> <span class="s2">&quot;viewer&quot;</span><span class="p">),</span>
+        <span class="s2">&quot;department&quot;</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;X-User-Dept&quot;</span><span class="p">,</span> <span class="s2">&quot;unknown&quot;</span><span class="p">),</span>
+    <span class="p">}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">abac_check</span><span class="p">(</span><span class="n">action</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Factory that returns a dependency performing an ABAC check.&quot;&quot;&quot;</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">dependency</span><span class="p">(</span>
+        <span class="n">request</span><span class="p">:</span> <span class="n">Request</span><span class="p">,</span>
+        <span class="n">user</span><span class="p">:</span> <span class="nb">dict</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
+    <span class="p">):</span>
+        <span class="c1"># Build the resource dict from path params or DB lookup</span>
+        <span class="n">article_id</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">path_params</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;article_id&quot;</span><span class="p">)</span>
+        <span class="n">resource</span> <span class="o">=</span> <span class="k">await</span> <span class="n">fetch_article_metadata</span><span class="p">(</span><span class="n">article_id</span><span class="p">)</span> <span class="k">if</span> <span class="n">article_id</span> <span class="k">else</span> <span class="p">{}</span>
+        <span class="n">resource</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">&quot;type&quot;</span><span class="p">,</span> <span class="s2">&quot;article&quot;</span><span class="p">)</span>
+
+        <span class="n">access_request</span> <span class="o">=</span> <span class="n">AccessRequest</span><span class="p">(</span>
+            <span class="n">subject</span><span class="o">=</span><span class="n">user</span><span class="p">,</span>
+            <span class="n">resource</span><span class="o">=</span><span class="n">resource</span><span class="p">,</span>
+            <span class="n">action</span><span class="o">=</span><span class="n">action</span><span class="p">,</span>
+            <span class="n">environment</span><span class="o">=</span><span class="p">{</span>
+                <span class="s2">&quot;time&quot;</span><span class="p">:</span> <span class="n">datetime</span><span class="o">.</span><span class="n">utcnow</span><span class="p">(),</span>
+                <span class="s2">&quot;ip_address&quot;</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">host</span> <span class="k">if</span> <span class="n">request</span><span class="o">.</span><span class="n">client</span> <span class="k">else</span> <span class="s2">&quot;0.0.0.0&quot;</span><span class="p">,</span>
+            <span class="p">},</span>
+        <span class="p">)</span>
+
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">engine</span><span class="o">.</span><span class="n">evaluate</span><span class="p">(</span><span class="n">access_request</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="n">status_code</span><span class="o">=</span><span class="mi">403</span><span class="p">,</span> <span class="n">detail</span><span class="o">=</span><span class="s2">&quot;Access denied by policy&quot;</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">dependency</span>
+
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="s2">&quot;/articles/</span><span class="si">{article_id}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">dependencies</span><span class="o">=</span><span class="p">[</span><span class="n">Depends</span><span class="p">(</span><span class="n">abac_check</span><span class="p">(</span><span class="s2">&quot;write&quot;</span><span class="p">))])</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update_article</span><span class="p">(</span><span class="n">article_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;updated&quot;</span><span class="p">:</span> <span class="n">article_id</span><span class="p">}</span>
+</code></pre></div>
+
+<p>The beauty of this approach is that endpoint code stays clean. All authorization logic lives in policies, and you can add, remove, or modify policies without touching handlers.</p>
+<hr />
+<h2>5. Combining RBAC and ABAC</h2>
+<p>In practice, most mature systems use a hybrid model:</p>
+<ol>
+<li><strong>RBAC</strong> handles the coarse-grained layer: "Does this user have the <code>editor</code> role?" This is fast and cacheable.</li>
+<li><strong>ABAC</strong> handles the fine-grained layer: "Is this editor the owner of this particular resource?" This requires runtime attribute resolution.</li>
+</ol>
+<p>A clean architecture applies them sequentially:</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">hybrid_check</span><span class="p">(</span><span class="n">resource</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">action</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;First check RBAC, then ABAC.&quot;&quot;&quot;</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">dependency</span><span class="p">(</span>
+        <span class="n">request</span><span class="p">:</span> <span class="n">Request</span><span class="p">,</span>
+        <span class="n">user</span><span class="p">:</span> <span class="nb">dict</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
+        <span class="n">permissions</span><span class="p">:</span> <span class="nb">set</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_permissions</span><span class="p">),</span>
+    <span class="p">):</span>
+        <span class="c1"># Step 1: RBAC — fast, cached check</span>
+        <span class="n">required_perm</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">resource</span><span class="si">}</span><span class="s2">:</span><span class="si">{</span><span class="n">action</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="k">if</span> <span class="n">required_perm</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">permissions</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="n">status_code</span><span class="o">=</span><span class="mi">403</span><span class="p">,</span> <span class="n">detail</span><span class="o">=</span><span class="s2">&quot;Role lacks permission&quot;</span><span class="p">)</span>
+
+        <span class="c1"># Step 2: ABAC — contextual check</span>
+        <span class="n">article_id</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">path_params</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;article_id&quot;</span><span class="p">)</span>
+        <span class="n">resource_meta</span> <span class="o">=</span> <span class="k">await</span> <span class="n">fetch_article_metadata</span><span class="p">(</span><span class="n">article_id</span><span class="p">)</span> <span class="k">if</span> <span class="n">article_id</span> <span class="k">else</span> <span class="p">{}</span>
+
+        <span class="n">access_request</span> <span class="o">=</span> <span class="n">AccessRequest</span><span class="p">(</span>
+            <span class="n">subject</span><span class="o">=</span><span class="n">user</span><span class="p">,</span>
+            <span class="n">resource</span><span class="o">=</span><span class="n">resource_meta</span><span class="p">,</span>
+            <span class="n">action</span><span class="o">=</span><span class="n">action</span><span class="p">,</span>
+            <span class="n">environment</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;time&quot;</span><span class="p">:</span> <span class="n">datetime</span><span class="o">.</span><span class="n">utcnow</span><span class="p">()},</span>
+        <span class="p">)</span>
+
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">engine</span><span class="o">.</span><span class="n">evaluate</span><span class="p">(</span><span class="n">access_request</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="n">status_code</span><span class="o">=</span><span class="mi">403</span><span class="p">,</span> <span class="n">detail</span><span class="o">=</span><span class="s2">&quot;Policy denied access&quot;</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">dependency</span>
+</code></pre></div>
+
+<p>This two-phase approach is both performant (RBAC short-circuits early) and expressive (ABAC handles the edge cases).</p>
+<hr />
+<h2>6. Real-World Scenarios</h2>
+<h3>Admin Panels</h3>
+<p>Admin panels often use a straightforward RBAC model with three to five roles:</p>
+<ul>
+<li><strong>Super Admin</strong>: Full access, can manage other admins.</li>
+<li><strong>Admin</strong>: Can manage content and users, but cannot change system settings.</li>
+<li><strong>Moderator</strong>: Can review and approve/reject content.</li>
+<li><strong>Support</strong>: Read-only access to user data for troubleshooting.</li>
+</ul>
+<p>The key design decision is whether roles are <strong>global</strong> or <strong>scoped</strong>. A global <code>admin</code> has power everywhere, while a scoped admin might only manage a specific section.</p>
+<h3>Multi-Tenant Applications</h3>
+<p>Multi-tenancy introduces a critical constraint: users must never access data from another tenant. This is where ABAC shines:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Tenant isolation policy</span>
+<span class="n">engine</span><span class="o">.</span><span class="n">add_policy</span><span class="p">(</span><span class="n">Policy</span><span class="p">(</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;tenant-isolation&quot;</span><span class="p">,</span>
+    <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Users can only access resources in their own tenant&quot;</span><span class="p">,</span>
+    <span class="n">effect</span><span class="o">=</span><span class="s2">&quot;deny&quot;</span><span class="p">,</span>
+    <span class="n">priority</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span>  <span class="c1"># Highest priority — always checked</span>
+    <span class="n">condition</span><span class="o">=</span><span class="k">lambda</span> <span class="n">req</span><span class="p">:</span> <span class="p">(</span>
+        <span class="n">req</span><span class="o">.</span><span class="n">subject</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;tenant_id&quot;</span><span class="p">)</span> <span class="o">!=</span> <span class="n">req</span><span class="o">.</span><span class="n">resource</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;tenant_id&quot;</span><span class="p">)</span>
+    <span class="p">),</span>
+<span class="p">))</span>
+</code></pre></div>
+
+<p>This single policy replaces what would otherwise be hundreds of tenant-specific roles.</p>
+<h3>Database Schema for Multi-Tenant RBAC</h3>
+<p>Extend the earlier schema with tenant scoping:</p>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">tenant_user_roles</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">tenant_id</span><span class="w"> </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">tenants</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">user_id</span><span class="w"> </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">role_id</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">roles</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">tenant_id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">role_id</span><span class="p">)</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<p>Now a user can be an <code>admin</code> in Tenant A but only a <code>viewer</code> in Tenant B.</p>
+<hr />
+<h2>7. Performance Considerations</h2>
+<p>Authorization is checked on every request, so performance matters:</p>
+<ol>
+<li><strong>Cache RBAC lookups.</strong> A user's roles and permissions change infrequently. Cache them in Redis with a TTL of 5-15 minutes. Invalidate on role changes.</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">redis</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+
+<span class="n">r</span> <span class="o">=</span> <span class="n">redis</span><span class="o">.</span><span class="n">Redis</span><span class="p">()</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">get_cached_permissions</span><span class="p">(</span><span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">set</span><span class="p">:</span>
+    <span class="n">cache_key</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;permissions:</span><span class="si">{</span><span class="n">user_id</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="n">cached</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">cache_key</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">cached</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">set</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">cached</span><span class="p">))</span>
+
+    <span class="n">permissions</span> <span class="o">=</span> <span class="n">fetch_permissions_from_db</span><span class="p">(</span><span class="n">user_id</span><span class="p">)</span>
+    <span class="n">r</span><span class="o">.</span><span class="n">setex</span><span class="p">(</span><span class="n">cache_key</span><span class="p">,</span> <span class="mi">600</span><span class="p">,</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">permissions</span><span class="p">)))</span>  <span class="c1"># 10 min TTL</span>
+    <span class="k">return</span> <span class="n">permissions</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">invalidate_permissions</span><span class="p">(</span><span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+    <span class="n">r</span><span class="o">.</span><span class="n">delete</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;permissions:</span><span class="si">{</span><span class="n">user_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<ol>
+<li><strong>Minimize ABAC attribute lookups.</strong> Fetch resource metadata lazily — only when the RBAC check passes.</li>
+<li><strong>Pre-compute where possible.</strong> If an ABAC policy depends on the count of records a user owns, maintain a counter rather than running <code>COUNT(*)</code> on every request.</li>
+</ol>
+<hr />
+<h2>8. Common Pitfalls</h2>
+<h3>Pitfall 1: Checking Roles Instead of Permissions</h3>
+<p>Never write <code>if user.role == "admin"</code>. Always check permissions. Roles are an organizational abstraction; permissions are the actual capabilities. If you hardcode role names into business logic, adding a new role requires code changes everywhere.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Bad</span>
+<span class="k">if</span> <span class="n">current_user</span><span class="o">.</span><span class="n">role</span> <span class="o">==</span> <span class="s2">&quot;admin&quot;</span><span class="p">:</span>
+    <span class="n">delete_article</span><span class="p">(</span><span class="n">article_id</span><span class="p">)</span>
+
+<span class="c1"># Good</span>
+<span class="k">if</span> <span class="s2">&quot;articles:delete&quot;</span> <span class="ow">in</span> <span class="n">current_user</span><span class="o">.</span><span class="n">permissions</span><span class="p">:</span>
+    <span class="n">delete_article</span><span class="p">(</span><span class="n">article_id</span><span class="p">)</span>
+</code></pre></div>
+
+<h3>Pitfall 2: Forgetting Deny-by-Default</h3>
+<p>Your system should deny access unless an explicit allow rule matches. A missing policy should mean no access, not full access. This is the principle of least privilege.</p>
+<h3>Pitfall 3: Mixing Authorization into Business Logic</h3>
+<p>Keep authorization checks separate from business logic. Use decorators, middleware, or dependency injection. When authorization rules are scattered throughout your codebase, they become impossible to audit.</p>
+<h3>Pitfall 4: Not Logging Access Decisions</h3>
+<p>Always log authorization decisions — especially denials. This is critical for security audits, debugging, and compliance:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;authorization&quot;</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">evaluate_with_logging</span><span class="p">(</span><span class="n">engine</span><span class="p">:</span> <span class="n">PolicyEngine</span><span class="p">,</span> <span class="n">request</span><span class="p">:</span> <span class="n">AccessRequest</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">engine</span><span class="o">.</span><span class="n">evaluate</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+        <span class="s2">&quot;access_decision&quot;</span><span class="p">,</span>
+        <span class="n">extra</span><span class="o">=</span><span class="p">{</span>
+            <span class="s2">&quot;subject&quot;</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">subject</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;id&quot;</span><span class="p">),</span>
+            <span class="s2">&quot;action&quot;</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">action</span><span class="p">,</span>
+            <span class="s2">&quot;resource_type&quot;</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">resource</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;type&quot;</span><span class="p">),</span>
+            <span class="s2">&quot;resource_id&quot;</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">resource</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;id&quot;</span><span class="p">),</span>
+            <span class="s2">&quot;decision&quot;</span><span class="p">:</span> <span class="s2">&quot;allow&quot;</span> <span class="k">if</span> <span class="n">result</span> <span class="k">else</span> <span class="s2">&quot;deny&quot;</span><span class="p">,</span>
+        <span class="p">},</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">result</span>
+</code></pre></div>
+
+<hr />
+<h2>9. When to Use Which</h2>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Recommended Model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Simple app with a few fixed roles</td>
+<td>RBAC</td>
+</tr>
+<tr>
+<td>Need to enforce ownership rules</td>
+<td>ABAC (or hybrid)</td>
+</tr>
+<tr>
+<td>Multi-tenant SaaS</td>
+<td>Hybrid RBAC+ABAC</td>
+</tr>
+<tr>
+<td>Compliance-heavy (healthcare, finance)</td>
+<td>ABAC with policy engine</td>
+</tr>
+<tr>
+<td>Microservices with centralized auth</td>
+<td>RBAC with an external policy service</td>
+</tr>
+</tbody>
+</table>
+<p>Start with RBAC. It covers 80% of use cases. Add ABAC policies only when you encounter rules that cannot be cleanly expressed as role-permission mappings. The hybrid approach gives you the best of both worlds: simplicity where possible, power where necessary.</p>
+<hr />
+<h2>Summary</h2>
+<p>RBAC and ABAC are complementary, not competing. RBAC provides a stable, cacheable, easy-to-understand permission model. ABAC adds the ability to make context-sensitive decisions based on any attribute of the user, resource, action, or environment. A well-architected system layers them: RBAC for the broad strokes, ABAC for the fine details. Combined with caching, logging, and deny-by-default policies, this hybrid model can scale from a simple admin panel to a complex multi-tenant platform.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Role Hierarchy Resolver</div>
+                    <div class="exercise-desc"><p>Create a Python class <code>RoleHierarchy</code> that accepts a dictionary defining parent-child relationships between roles (e.g., <code>{"admin": ["editor"], "editor": ["viewer"]}</code>). Implement a method <code>get_effective_permissions(role, role_permissions)</code> that returns all permissions for a given role, including those inherited from child roles in the hierarchy. Write tests confirming that an <code>admin</code> inherits permissions from <code>editor</code> and <code>viewer</code>.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a recursive or iterative traversal (BFS/DFS) starting from the given role and collecting permissions from all descendant roles. A set will naturally deduplicate permissions.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">ABAC Policy Engine with JSON Rules</div>
+                    <div class="exercise-desc"><p>Extend the ABAC policy engine from the lesson so that policies are defined as JSON documents rather than Python lambdas. Each JSON policy should specify conditions as key-path comparisons (e.g., <code>{"subject.role": "editor", "action": "write"}</code>). Build a <code>JsonPolicyEngine</code> that loads these JSON policies and evaluates them against <code>AccessRequest</code> objects. Support operators: <code>eq</code>, <code>neq</code>, <code>in</code>, <code>gt</code>, <code>lt</code>.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Parse the JSON conditions into a list of (attribute_path, operator, value) tuples. For each condition, use <code>getattr</code> or dictionary traversal to resolve the attribute path on the AccessRequest, then apply the operator comparison.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Multi-Tenant RBAC API</div>
+                    <div class="exercise-desc"><p>Build a FastAPI application with a SQLite database that implements tenant-scoped RBAC. Create endpoints to: (1) create tenants, (2) create users and assign them roles within a tenant, (3) list a user's permissions in a specific tenant. A user should be able to hold different roles in different tenants. Include a protected endpoint that checks both the user's tenant and their permissions before allowing access.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the <code>tenant_user_roles</code> table from the lesson. Your permission-checking dependency should accept a tenant_id (from the URL path or a header) and resolve permissions scoped to that tenant only.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Audit Log Middleware</div>
+                    <div class="exercise-desc"><p>Create a FastAPI middleware that logs every authorization decision (allow or deny) to a database table. The log should include: timestamp, user_id, action, resource, decision (allow/deny), and the policy name that caused a deny (if applicable). Extend the PolicyEngine so that <code>evaluate</code> returns a structured result object instead of a bare boolean, including which policies matched.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Change <code>evaluate</code> to return a dataclass like <code>AccessDecision(allowed: bool, matched_policies: List[str], denied_by: Optional[str])</code>. In the middleware, call the engine, log the result, then raise HTTPException if denied.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Users with the correct role are still getting 403 Forbidden errors</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Permissions work for new users or after cache expiry but not immediately after role changes. Restarting the application or clearing Redis fixes the issue temporarily.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Role-permission mappings are cached, and the cache was not invalidated after a role's permissions were updated. The user's cached permission set is stale and missing the newly granted permission.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Invalidate the permission cache whenever role-permission mappings change. Use a pattern like `permissions:{user_id}` for per-user caches and invalidate all affected users when a role is modified. Alternatively, use short TTLs (e.g., 5 minutes) so stale entries expire quickly.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>def update_role_permissions(role_id, new_permissions):
+    # Update DB
+    db.execute("DELETE FROM role_permissions WHERE role_id = %s", (role_id,))
+    for perm_id in new_permissions:
+        db.execute("INSERT INTO role_permissions VALUES (%s, %s)", (role_id, perm_id))</p>
+<div class="highlight"><pre><span></span><code># Invalidate caches for all users with this role
+affected_users = db.fetch_all(
+    &quot;SELECT user_id FROM user_roles WHERE role_id = %s&quot;, (role_id,)
+)
+for user in affected_users:
+    redis_client.delete(f&quot;permissions:{user[&#39;user_id&#39;]}&quot;)
+</code></pre></div>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">ABAC policies allow access when they should deny, or deny when they should allow</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Policy evaluation order and conflict resolution are misconfigured. When multiple policies match — some allowing, some denying — the engine does not have a clear precedence strategy, leading to unpredictable results.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Adopt an explicit conflict resolution strategy. The most common and secure approach is 'deny overrides': if any deny policy matches, access is denied regardless of allow policies. Assign priorities to policies and ensure deny rules have higher priority. Always log which policies matched to aid debugging.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <h1>Ensure deny policies have higher priority</h1>
+<p>engine.add_policy(Policy(
+    name="deny-outside-hours",
+    effect="deny",
+    priority=100,  # High priority
+    condition=lambda req: req.environment["time"].hour &lt; 9,
+))</p>
+<p>engine.add_policy(Policy(
+    name="allow-editors",
+    effect="allow",
+    priority=10,  # Lower priority than deny
+    condition=lambda req: req.subject.get("role") == "editor",
+))</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Authorization checks cause significant latency on every request</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> API response times increase by 50-200ms under load. Database monitoring shows high query volume on the roles, permissions, and user_roles tables.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Each request triggers multiple database queries: one to resolve the user's roles, another to resolve role permissions (possibly with recursive hierarchy traversal), and additional queries to fetch resource attributes for ABAC evaluation.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Layer your caching strategy. Cache RBAC results (roles and permissions) in Redis with a TTL since they change infrequently. For ABAC, only fetch resource attributes after RBAC passes (fail fast). Pre-compute commonly needed attributes. Consider embedding essential claims (roles, tenant_id) directly into the JWT to eliminate the user-roles lookup entirely.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://csrc.nist.gov/projects/role-based-access-control" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">NIST Role-Based Access Control (RBAC) Standard</div>
+                    
+                    <div class="resource-note">The original NIST standard defining RBAC0 through RBAC3 models. Essential for understanding the theoretical foundation.</div>
+                    
+                </a>
+                
+                <a href="https://www.openpolicyagent.org/docs/latest/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">Open Policy Agent (OPA) Documentation</div>
+                    
+                    <div class="resource-note">OPA is the leading open-source policy engine. Its Rego language is the industry standard for expressing ABAC policies in production systems.</div>
+                    
+                </a>
+                
+                <a href="https://csrc.nist.gov/publications/detail/sp/800-162/final" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">Guide to Attribute Based Access Control (ABAC) — NIST SP 800-162</div>
+                    
+                    <div class="resource-note">The definitive NIST publication on ABAC, covering architecture, policy models, and implementation considerations.</div>
+                    
+                </a>
+                
+                <a href="https://casbin.org/docs/overview" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">Casbin: Authorization Library Supporting RBAC, ABAC, and More</div>
+                    
+                    <div class="resource-note">A practical, language-agnostic authorization library with a Python adapter. Great for seeing how RBAC and ABAC models are implemented in real libraries.</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/8.2.2-py.html" class="btn">&larr; OpenID Connect and Identity Providers</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-py.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

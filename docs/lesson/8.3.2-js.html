@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RabbitMQ: Exchanges, Queues, and Routing - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-js.html">System Design & Scalability</a> &rsaquo;
+            Message Queues & Async Processing
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.3.2</span>
+                <span>~3h</span>
+            </div>
+            <h1>RabbitMQ: Exchanges, Queues, and Routing</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>RabbitMQ is like a postal sorting office. Letters (messages) arrive and go to a sorting desk (exchange). Direct exchange is sorting by exact zip code. Fanout is making photocopies and sending to every branch. Topic exchange is sorting by partial address patterns — all mail for '1xx' streets goes to the north office.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>RabbitMQ: Exchanges, Queues, and Routing</h1>
+<h2>Introduction</h2>
+<p>RabbitMQ is a message broker that implements the Advanced Message Queuing Protocol (AMQP). Unlike BullMQ which is Redis-based and focused on job queues, RabbitMQ is a full-featured message broker with sophisticated routing, multiple exchange types, and guaranteed delivery. It excels in scenarios where messages need to be routed to different consumers based on content or patterns.</p>
+<h2>RabbitMQ vs BullMQ</h2>
+<div class="highlight"><pre><span></span><code>┌───────────────────┬───────────────────┬───────────────────┐
+│                   │ BullMQ            │ RabbitMQ          │
+├───────────────────┼───────────────────┼───────────────────┤
+│ Backing store     │ Redis             │ Erlang/OTP        │
+│ Protocol          │ Custom (Redis)    │ AMQP 0-9-1        │
+│ Use case          │ Job queues        │ Message routing   │
+│ Routing           │ Queue name only   │ Exchanges+routing │
+│ Priority queues   │ Yes               │ Yes               │
+│ Delayed messages  │ Built-in          │ Plugin required   │
+│ Clustering        │ Via Redis Cluster │ Built-in          │
+│ Message ordering  │ FIFO per queue    │ FIFO per queue    │
+│ Persistence       │ Via Redis         │ Built-in          │
+└───────────────────┴───────────────────┴───────────────────┘
+</code></pre></div>
+
+<h2>Core Concepts</h2>
+<div class="highlight"><pre><span></span><code>Producer ──&gt; Exchange ──&gt; Binding ──&gt; Queue ──&gt; Consumer
+
+┌──────────┐     ┌──────────────┐     ┌───────────┐     ┌──────────┐
+│ Producer │────&gt;│   Exchange   │────&gt;│   Queue   │────&gt;│ Consumer │
+│          │     │ (routes msgs)│     │ (buffers) │     │          │
+└──────────┘     └──────────────┘     └───────────┘     └──────────┘
+                       │
+                   Routing rules
+                   (bindings + routing keys)
+</code></pre></div>
+
+<h2>Setup with amqplib</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">amqp</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;amqplib&#39;</span><span class="p">;</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">connect</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">amqp</span><span class="p">.</span><span class="nx">connect</span><span class="p">(</span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">RABBITMQ_URL</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;amqp://localhost&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">connection</span><span class="p">.</span><span class="nx">createChannel</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// Handle connection errors</span>
+<span class="w">  </span><span class="nx">connection</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;error&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;RabbitMQ connection error:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">connection</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;RabbitMQ connection closed. Reconnecting...&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">setTimeout</span><span class="p">(</span><span class="nx">connect</span><span class="p">,</span><span class="w"> </span><span class="mf">5000</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="p">,</span><span class="w"> </span><span class="nx">channel</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Exchange Types</h2>
+<h3>1. Direct Exchange</h3>
+<p>Routes messages to queues with an exact matching routing key.</p>
+<div class="highlight"><pre><span></span><code>Producer                  Direct Exchange              Queues
+  │                            │
+  │ routingKey=&quot;error&quot;   ──────┼──&gt; [error queue]    ──&gt; Error handler
+  │ routingKey=&quot;info&quot;    ──────┼──&gt; [info queue]     ──&gt; Log aggregator
+  │ routingKey=&quot;warning&quot; ──────┼──&gt; [warning queue]  ──&gt; Alert service
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">setupDirectExchange</span><span class="p">(</span><span class="nx">channel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">exchange</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;logs.direct&#39;</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertExchange</span><span class="p">(</span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;direct&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Create queues and bind with routing keys</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">errorQueue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertQueue</span><span class="p">(</span><span class="s1">&#39;logs.error&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">infoQueue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertQueue</span><span class="p">(</span><span class="s1">&#39;logs.info&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">bindQueue</span><span class="p">(</span><span class="nx">errorQueue</span><span class="p">.</span><span class="nx">queue</span><span class="p">,</span><span class="w"> </span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;error&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">bindQueue</span><span class="p">(</span><span class="nx">infoQueue</span><span class="p">.</span><span class="nx">queue</span><span class="p">,</span><span class="w"> </span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;info&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Publish</span>
+<span class="w">  </span><span class="nx">channel</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;error&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Database connection failed&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">(),</span>
+<span class="w">  </span><span class="p">})),</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">persistent</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Consume</span>
+<span class="w">  </span><span class="nx">channel</span><span class="p">.</span><span class="nx">consume</span><span class="p">(</span><span class="nx">errorQueue</span><span class="p">.</span><span class="nx">queue</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">msg</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">log</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">msg</span><span class="p">.</span><span class="nx">content</span><span class="p">.</span><span class="nx">toString</span><span class="p">());</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;ERROR:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">log</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">channel</span><span class="p">.</span><span class="nx">ack</span><span class="p">(</span><span class="nx">msg</span><span class="p">);</span><span class="w"> </span><span class="c1">// Acknowledge processing</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>2. Fanout Exchange</h3>
+<p>Broadcasts messages to ALL bound queues (like pub/sub).</p>
+<div class="highlight"><pre><span></span><code>Producer ──&gt; Fanout Exchange ──┬──&gt; Queue A (Email service)
+                               ├──&gt; Queue B (SMS service)
+                               └──&gt; Queue C (Push notification)
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">setupFanoutExchange</span><span class="p">(</span><span class="nx">channel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">exchange</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;notifications.fanout&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertExchange</span><span class="p">(</span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;fanout&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Each service gets its own queue</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">emailQ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertQueue</span><span class="p">(</span><span class="s1">&#39;notifications.email&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">smsQ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertQueue</span><span class="p">(</span><span class="s1">&#39;notifications.sms&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pushQ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertQueue</span><span class="p">(</span><span class="s1">&#39;notifications.push&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Bind all queues (routing key ignored for fanout)</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">bindQueue</span><span class="p">(</span><span class="nx">emailQ</span><span class="p">.</span><span class="nx">queue</span><span class="p">,</span><span class="w"> </span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">bindQueue</span><span class="p">(</span><span class="nx">smsQ</span><span class="p">.</span><span class="nx">queue</span><span class="p">,</span><span class="w"> </span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">bindQueue</span><span class="p">(</span><span class="nx">pushQ</span><span class="p">.</span><span class="nx">queue</span><span class="p">,</span><span class="w"> </span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// One publish reaches all three queues</span>
+<span class="w">  </span><span class="nx">channel</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user-123&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">event</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;order_completed&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;ORD-456&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">})),</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">persistent</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>3. Topic Exchange</h3>
+<p>Routes based on pattern matching with wildcards.</p>
+<div class="highlight"><pre><span></span><code>Routing key format: &lt;facility&gt;.&lt;severity&gt;.&lt;region&gt;
+
+  order.created.us    ──&gt; Matches: order.* , order.created.* , *.*.us
+  order.cancelled.eu  ──&gt; Matches: order.* , *.cancelled.*
+  payment.failed.us   ──&gt; Matches: payment.* , *.failed.* , #.us
+
+  * = exactly one word
+  # = zero or more words
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">setupTopicExchange</span><span class="p">(</span><span class="nx">channel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">exchange</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;events.topic&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertExchange</span><span class="p">(</span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;topic&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Order processing service - all order events</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">orderQ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertQueue</span><span class="p">(</span><span class="s1">&#39;events.orders&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">bindQueue</span><span class="p">(</span><span class="nx">orderQ</span><span class="p">.</span><span class="nx">queue</span><span class="p">,</span><span class="w"> </span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;order.*&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Payment alerts - only failures</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">paymentAlertQ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertQueue</span><span class="p">(</span><span class="s1">&#39;events.payment-alerts&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">bindQueue</span><span class="p">(</span><span class="nx">paymentAlertQ</span><span class="p">.</span><span class="nx">queue</span><span class="p">,</span><span class="w"> </span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;payment.failed&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// US region monitor - everything from US</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">usQ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertQueue</span><span class="p">(</span><span class="s1">&#39;events.us-region&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">bindQueue</span><span class="p">(</span><span class="nx">usQ</span><span class="p">.</span><span class="nx">queue</span><span class="p">,</span><span class="w"> </span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;*.*.us&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Audit log - capture everything</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">auditQ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertQueue</span><span class="p">(</span><span class="s1">&#39;events.audit&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">bindQueue</span><span class="p">(</span><span class="nx">auditQ</span><span class="p">.</span><span class="nx">queue</span><span class="p">,</span><span class="w"> </span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;#&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Publish events</span>
+<span class="w">  </span><span class="nx">channel</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;order.created.us&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;ORD-123&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">region</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;us&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">})));</span>
+<span class="w">  </span><span class="c1">// This goes to: orderQ, usQ, auditQ</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Message Acknowledgment</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// Manual acknowledgment (recommended for reliability)</span>
+<span class="nx">channel</span><span class="p">.</span><span class="nx">consume</span><span class="p">(</span><span class="s1">&#39;tasks&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">msg</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">task</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">msg</span><span class="p">.</span><span class="nx">content</span><span class="p">.</span><span class="nx">toString</span><span class="p">());</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">processTask</span><span class="p">(</span><span class="nx">task</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">channel</span><span class="p">.</span><span class="nx">ack</span><span class="p">(</span><span class="nx">msg</span><span class="p">);</span><span class="w">          </span><span class="c1">// Success - remove from queue</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">retryable</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">channel</span><span class="p">.</span><span class="nx">nack</span><span class="p">(</span><span class="nx">msg</span><span class="p">,</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">);</span><span class="w">  </span><span class="c1">// Requeue for retry</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">channel</span><span class="p">.</span><span class="nx">nack</span><span class="p">(</span><span class="nx">msg</span><span class="p">,</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="kc">false</span><span class="p">);</span><span class="w"> </span><span class="c1">// Don&#39;t requeue (goes to DLQ if configured)</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">noAck</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">});</span><span class="w"> </span><span class="c1">// Manual ack mode</span>
+
+<span class="c1">// Prefetch: limit unacknowledged messages per consumer</span>
+<span class="nx">channel</span><span class="p">.</span><span class="nx">prefetch</span><span class="p">(</span><span class="mf">10</span><span class="p">);</span><span class="w"> </span><span class="c1">// Only deliver 10 unacked messages at a time</span>
+</code></pre></div>
+
+<h2>Dead Letter Queues</h2>
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">setupWithDLQ</span><span class="p">(</span><span class="nx">channel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Dead letter exchange and queue</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertExchange</span><span class="p">(</span><span class="s1">&#39;dlx&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;direct&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertQueue</span><span class="p">(</span><span class="s1">&#39;dead-letters&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">bindQueue</span><span class="p">(</span><span class="s1">&#39;dead-letters&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;dlx&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;failed&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Main queue with DLQ configuration</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">assertQueue</span><span class="p">(</span><span class="s1">&#39;tasks&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">arguments</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="s1">&#39;x-dead-letter-exchange&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;dlx&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;x-dead-letter-routing-key&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;failed&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;x-message-ttl&#39;</span><span class="o">:</span><span class="w"> </span><span class="mf">300000</span><span class="p">,</span><span class="w">    </span><span class="c1">// Messages expire after 5 min</span>
+<span class="w">      </span><span class="s1">&#39;x-max-length&#39;</span><span class="o">:</span><span class="w"> </span><span class="mf">10000</span><span class="p">,</span><span class="w">       </span><span class="c1">// Max queue size</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Failed messages automatically go to dead-letters queue</span>
+<span class="w">  </span><span class="c1">// Process dead letters for investigation</span>
+<span class="w">  </span><span class="nx">channel</span><span class="p">.</span><span class="nx">consume</span><span class="p">(</span><span class="s1">&#39;dead-letters&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">msg</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">original</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">msg</span><span class="p">.</span><span class="nx">content</span><span class="p">.</span><span class="nx">toString</span><span class="p">());</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">reason</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">msg</span><span class="p">.</span><span class="nx">properties</span><span class="p">.</span><span class="nx">headers</span><span class="p">[</span><span class="s1">&#39;x-death&#39;</span><span class="p">]</span><span class="o">?</span><span class="p">.[</span><span class="mf">0</span><span class="p">]</span><span class="o">?</span><span class="p">.</span><span class="nx">reason</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`Dead letter (reason: </span><span class="si">${</span><span class="nx">reason</span><span class="si">}</span><span class="sb">):`</span><span class="p">,</span><span class="w"> </span><span class="nx">original</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// Log to monitoring system, alert ops</span>
+<span class="w">    </span><span class="nx">channel</span><span class="p">.</span><span class="nx">ack</span><span class="p">(</span><span class="nx">msg</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>RabbitMQ with NestJS Microservices</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// main.ts - Microservice setup</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">NestFactory</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/core&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">MicroserviceOptions</span><span class="p">,</span><span class="w"> </span><span class="nx">Transport</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/microservices&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">NestFactory</span><span class="p">.</span><span class="nx">createMicroservice</span><span class="p">(</span><span class="nx">AppModule</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">transport</span><span class="o">:</span><span class="w"> </span><span class="nx">Transport</span><span class="p">.</span><span class="nx">RMQ</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">options</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">urls</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;amqp://localhost:5672&#39;</span><span class="p">],</span>
+<span class="w">    </span><span class="nx">queue</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;orders_queue&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">queueOptions</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">durable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">prefetchCount</span><span class="o">:</span><span class="w"> </span><span class="mf">10</span><span class="p">,</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">});</span>
+
+<span class="k">await</span><span class="w"> </span><span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">();</span>
+
+<span class="c1">// order.controller.ts</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Controller</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/common&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">MessagePattern</span><span class="p">,</span><span class="w"> </span><span class="nx">Payload</span><span class="p">,</span><span class="w"> </span><span class="nx">Ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">RmqContext</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/microservices&#39;</span><span class="p">;</span>
+
+<span class="err">@</span><span class="nx">Controller</span><span class="p">()</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">OrderController</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="err">@</span><span class="nx">MessagePattern</span><span class="p">(</span><span class="s1">&#39;order_created&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">handleOrderCreated</span><span class="p">(</span><span class="err">@</span><span class="nx">Payload</span><span class="p">()</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">any</span><span class="p">,</span><span class="w"> </span><span class="err">@</span><span class="nx">Ctx</span><span class="p">()</span><span class="w"> </span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="nx">RmqContext</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">getChannelRef</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">originalMsg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">getMessage</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">orderService</span><span class="p">.</span><span class="nx">processOrder</span><span class="p">(</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">channel</span><span class="p">.</span><span class="nx">ack</span><span class="p">(</span><span class="nx">originalMsg</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">channel</span><span class="p">.</span><span class="nx">nack</span><span class="p">(</span><span class="nx">originalMsg</span><span class="p">,</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">);</span><span class="w"> </span><span class="c1">// Requeue</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Connection Management</h2>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">RabbitMQConnection</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">url</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">url</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">connection</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">connect</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">connection</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">amqp</span><span class="p">.</span><span class="nx">connect</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">url</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">connection</span><span class="p">.</span><span class="nx">createConfirmChannel</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// Publish confirmations</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">channel</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;return&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">msg</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Message returned (unroutable):&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">msg</span><span class="p">);</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">connection</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Connection closed. Reconnecting...&#39;</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">setTimeout</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">connect</span><span class="p">(),</span><span class="w"> </span><span class="mf">5000</span><span class="p">);</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">publishWithConfirm</span><span class="p">(</span><span class="nx">exchange</span><span class="p">,</span><span class="w"> </span><span class="nx">routingKey</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">resolve</span><span class="p">,</span><span class="w"> </span><span class="nx">reject</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">channel</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span>
+<span class="w">        </span><span class="nx">exchange</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">routingKey</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">data</span><span class="p">)),</span>
+<span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nx">persistent</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">mandatory</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="nx">reject</span><span class="p">(</span><span class="nx">err</span><span class="p">);</span>
+<span class="w">          </span><span class="k">else</span><span class="w"> </span><span class="nx">resolve</span><span class="p">();</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">);</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">close</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">channel</span><span class="o">?</span><span class="p">.</span><span class="nx">close</span><span class="p">();</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">connection</span><span class="o">?</span><span class="p">.</span><span class="nx">close</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Not acknowledging messages</strong>: Unacknowledged messages stay in the queue and are redelivered when the consumer disconnects, causing duplicates.</li>
+<li><strong>Using one channel for everything</strong>: Channels are not thread-safe. Use one channel per consumer/producer thread.</li>
+<li><strong>Not setting prefetch</strong>: Without prefetch, RabbitMQ dumps all messages to one consumer, leaving others idle.</li>
+<li><strong>Losing messages without persistent flag</strong>: Messages are stored in memory by default. Use <code>{ persistent: true }</code> for durability.</li>
+</ol>
+<h2>Summary</h2>
+<p>RabbitMQ provides sophisticated message routing through exchanges (direct, fanout, topic) and queues. It excels at routing messages to different services based on content, unlike BullMQ which is focused on job processing. Use direct exchanges for targeted routing, fanout for broadcasting, and topic for pattern-based routing. Always use manual acknowledgment, configure dead letter queues, and set prefetch counts for reliable message processing.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Multi-Service Notification System</div>
+                    <div class="exercise-desc"><p>Build a fanout exchange that broadcasts user events to email, SMS, and push notification services. Each service has its own queue and consumer.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Create a fanout exchange with three bound queues. Each consumer processes independently. Use Docker to run RabbitMQ locally.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Topic-Based Log Router</div>
+                    <div class="exercise-desc"><p>Implement a logging system using a topic exchange. Route logs based on <code>&lt;service&gt;.&lt;level&gt;</code> patterns. Error logs go to an alerting queue, all logs go to storage, and specific service logs go to their dashboard.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Bind queues with patterns: <code>*.error</code> for alerts, <code>#</code> for storage, <code>auth.*</code> for auth dashboard.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Dead Letter Queue Handler</div>
+                    <div class="exercise-desc"><p>Set up a queue with a dead letter exchange. Implement a consumer that rejects messages after 3 processing attempts. Build a dead letter processor that logs failed messages and alerts operators.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Track attempt count in message headers. Use <code>channel.nack(msg, false, false)</code> to send to DLQ after max attempts.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Messages being processed multiple times</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Consumer processes the message but crashes before calling `channel.ack()`. RabbitMQ redelivers the unacknowledged message.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Make message processing idempotent (safe to run multiple times). Use unique message IDs and track processed IDs in the database. Check `msg.fields.redelivered` flag.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">One consumer gets all messages while others sit idle</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Prefetch count is not set, so RabbitMQ dispatches all messages to the first consumer in round-robin.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Set `channel.prefetch(1)` or an appropriate number. This ensures RabbitMQ only sends N unacknowledged messages to each consumer.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>channel.prefetch(10); // Each consumer gets max 10 unacked messages</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Messages lost after RabbitMQ restart</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Queue and/or messages were not configured as durable/persistent.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Declare queues with `{ durable: true }` and publish messages with `{ persistent: true }`. Also enable publisher confirms for guaranteed delivery.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://www.rabbitmq.com/getstarted.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">RabbitMQ Tutorials</div>
+                    
+                    <div class="resource-note">Official tutorials covering all exchange types</div>
+                    
+                </a>
+                
+                <a href="https://amqp-node.github.io/amqplib/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">amqplib Documentation</div>
+                    
+                </a>
+                
+                <a href="https://docs.nestjs.com/microservices/rabbitmq" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">NestJS RabbitMQ Microservices</div>
+                    
+                </a>
+                
+                <a href="https://www.cloudamqp.com/blog/part1-rabbitmq-best-practice.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">RabbitMQ Best Practices</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/8.3.1-js.html" class="btn">&larr; BullMQ: Jobs, Workers, Queues, and Scheduling</a>
+            
+            
+            <a href="/backend-learning/lesson/8.3.3-js.html" class="btn">Dead Letter Queues, Retry Strategies, and Idempotency &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-js.html">&larr; Back to System Design & Scalability</a>
+        </div>
+    </div>
+</body>
+</html>

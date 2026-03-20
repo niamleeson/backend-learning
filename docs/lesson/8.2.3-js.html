@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distributed Caching with Redis and Memcached - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-js.html">System Design & Scalability</a> &rsaquo;
+            Caching Strategies
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.2.3</span>
+                <span>~2h</span>
+            </div>
+            <h1>Distributed Caching with Redis and Memcached</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Distributed caching is like having multiple refrigerators in different rooms of a restaurant. Redis Sentinel is having a backup fridge that automatically takes over when the main one breaks. Redis Cluster is having specialized fridges — one for meats, one for vegetables, one for dairy — so each holds less but together they store everything.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Distributed Caching with Redis and Memcached</h1>
+<h2>Introduction</h2>
+<p>When a single cache server is not enough — because of memory limits, throughput requirements, or reliability needs — you need distributed caching. This lesson covers Redis Cluster, Redis Sentinel, and Memcached, comparing their architectures and showing how to use them from Node.js.</p>
+<h2>Single Redis vs Distributed Redis</h2>
+<div class="highlight"><pre><span></span><code>Single Redis:                    Redis Cluster:
+┌──────────┐                     ┌──────────┐ ┌──────────┐ ┌──────────┐
+│  Redis   │                     │ Redis M1 │ │ Redis M2 │ │ Redis M3 │
+│ (single) │                     │ Slots    │ │ Slots    │ │ Slots    │
+│          │                     │ 0-5460   │ │ 5461-    │ │ 10923-   │
+└──────────┘                     │          │ │ 10922    │ │ 16383    │
+                                 └────┬─────┘ └────┬─────┘ └────┬─────┘
+ Single point of failure              │            │            │
+ Limited to one server&#39;s RAM     ┌────┴─────┐ ┌────┴─────┐ ┌────┴─────┐
+                                 │ Redis R1 │ │ Redis R2 │ │ Redis R3 │
+                                 │ (replica)│ │ (replica)│ │ (replica)│
+                                 └──────────┘ └──────────┘ └──────────┘
+</code></pre></div>
+
+<h2>Redis Sentinel (High Availability)</h2>
+<p>Sentinel provides automatic failover for standalone Redis:</p>
+<div class="highlight"><pre><span></span><code>┌────────────┐  ┌────────────┐  ┌────────────┐
+│ Sentinel 1 │  │ Sentinel 2 │  │ Sentinel 3 │
+└─────┬──────┘  └──────┬─────┘  └──────┬─────┘
+      │                │               │
+      │    monitors    │    monitors   │
+      ▼                ▼               ▼
+┌──────────┐      ┌──────────┐
+│  Master  │─────&gt;│  Replica │
+│  (R/W)   │ repl │  (Read)  │
+└──────────┘      └──────────┘
+
+If Master dies:
+  Sentinels elect new master
+  Replica promoted automatically
+  Clients redirected
+</code></pre></div>
+
+<h3>ioredis with Sentinel</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">sentinels</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sentinel-1&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">26379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sentinel-2&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">26379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sentinel-3&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">26379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;mymaster&#39;</span><span class="p">,</span><span class="w"> </span><span class="c1">// Sentinel master name</span>
+<span class="w">  </span><span class="nx">role</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;master&#39;</span><span class="p">,</span><span class="w">   </span><span class="c1">// Connect to master</span>
+<span class="w">  </span><span class="nx">sentinelRetryStrategy</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">times</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nx">times</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span><span class="w"> </span><span class="mf">3000</span><span class="p">),</span>
+<span class="p">});</span>
+
+<span class="c1">// Read from replica for read-heavy workloads</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">readReplica</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">sentinels</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sentinel-1&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">26379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sentinel-2&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">26379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sentinel-3&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">26379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;mymaster&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">role</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;slave&#39;</span><span class="p">,</span><span class="w">    </span><span class="c1">// Connect to replica</span>
+<span class="w">  </span><span class="nx">preferredSlaves</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">ip</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;replica-1&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">6379</span><span class="p">,</span><span class="w"> </span><span class="nx">prio</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="p">});</span>
+
+<span class="c1">// Writes go to master</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="s1">&#39;key&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;value&#39;</span><span class="p">);</span>
+
+<span class="c1">// Reads can go to replica</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">readReplica</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;key&#39;</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Redis Cluster (Horizontal Scaling)</h2>
+<p>Redis Cluster shards data across multiple masters using 16384 hash slots:</p>
+<div class="highlight"><pre><span></span><code>Key &quot;user:123&quot; ──&gt; CRC16(&quot;user:123&quot;) % 16384 = 5649 ──&gt; Master 2
+
+┌─────────────────────────────────────────────────────┐
+│ Slot Range    │ Master  │ Replicas                   │
+├───────────────┼─────────┼────────────────────────────┤
+│ 0 - 5460     │ Node 1  │ Node 4                     │
+│ 5461 - 10922 │ Node 2  │ Node 5                     │
+│ 10923 - 16383│ Node 3  │ Node 6                     │
+└─────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>ioredis Cluster Client</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">cluster</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">.</span><span class="nx">Cluster</span><span class="p">([</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-node-1&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">6379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-node-2&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">6379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-node-3&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">6379</span><span class="w"> </span><span class="p">},</span>
+<span class="p">],</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">redisOptions</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">password</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">REDIS_PASSWORD</span><span class="p">,</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">scaleReads</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;slave&#39;</span><span class="p">,</span><span class="w">         </span><span class="c1">// Read from replicas</span>
+<span class="w">  </span><span class="nx">maxRedirections</span><span class="o">:</span><span class="w"> </span><span class="mf">16</span><span class="p">,</span><span class="w">          </span><span class="c1">// Handle MOVED/ASK redirections</span>
+<span class="w">  </span><span class="nx">retryDelayOnMoved</span><span class="o">:</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">retryDelayOnFailover</span><span class="o">:</span><span class="w"> </span><span class="mf">200</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">clusterRetryStrategy</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">times</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nx">times</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span><span class="w"> </span><span class="mf">3000</span><span class="p">),</span>
+
+<span class="w">  </span><span class="c1">// Natural reconnect on node failures</span>
+<span class="w">  </span><span class="nx">enableOfflineQueue</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">lazyConnect</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="nx">cluster</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;error&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Cluster error:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">));</span>
+<span class="nx">cluster</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;+node&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">node</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Node added:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">options</span><span class="p">.</span><span class="nx">host</span><span class="p">));</span>
+<span class="nx">cluster</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;-node&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">node</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Node removed:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">options</span><span class="p">.</span><span class="nx">host</span><span class="p">));</span>
+
+<span class="c1">// Basic operations work the same as standalone</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">cluster</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="s1">&#39;user:123&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Alice&#39;</span><span class="w"> </span><span class="p">}));</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">cluster</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;user:123&#39;</span><span class="p">));</span>
+</code></pre></div>
+
+<h3>Hash Tags for Multi-Key Operations</h3>
+<p>Redis Cluster only supports multi-key operations when all keys are on the same slot. Use hash tags:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// These keys may be on different slots - CROSSSLOT error</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">cluster</span><span class="p">.</span><span class="nx">mget</span><span class="p">(</span><span class="s1">&#39;user:1&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;user:2&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;user:3&#39;</span><span class="p">);</span><span class="w"> </span><span class="c1">// ERROR!</span>
+
+<span class="c1">// Hash tags force keys to the same slot</span>
+<span class="c1">// {user}.1, {user}.2, {user}.3 all hash based on &quot;user&quot;</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">cluster</span><span class="p">.</span><span class="nx">mset</span><span class="p">(</span>
+<span class="w">  </span><span class="s1">&#39;{user}.1&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Alice&#39;</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">  </span><span class="s1">&#39;{user}.2&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Bob&#39;</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">  </span><span class="s1">&#39;{user}.3&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Charlie&#39;</span><span class="w"> </span><span class="p">})</span>
+<span class="p">);</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">cluster</span><span class="p">.</span><span class="nx">mget</span><span class="p">(</span><span class="s1">&#39;{user}.1&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;{user}.2&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;{user}.3&#39;</span><span class="p">);</span><span class="w"> </span><span class="c1">// Works!</span>
+
+<span class="c1">// Pipeline with hash tags</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">cluster</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="nx">pipeline</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;{order:42}.items&#39;</span><span class="p">);</span>
+<span class="nx">pipeline</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;{order:42}.total&#39;</span><span class="p">);</span>
+<span class="nx">pipeline</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;{order:42}.status&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+
+<span class="c1">// Transactions require same slot</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">cluster</span><span class="p">.</span><span class="nx">multi</span><span class="p">();</span>
+<span class="nx">tx</span><span class="p">.</span><span class="nx">decr</span><span class="p">(</span><span class="s1">&#39;{inventory}.product:1&#39;</span><span class="p">);</span>
+<span class="nx">tx</span><span class="p">.</span><span class="nx">incr</span><span class="p">(</span><span class="s1">&#39;{inventory}.product:1:sold&#39;</span><span class="p">);</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+</code></pre></div>
+
+<h2>Memcached</h2>
+<p>Memcached is a simpler, purely in-memory distributed cache. It has no persistence, no data structures, just key-value pairs.</p>
+<div class="highlight"><pre><span></span><code>┌──────────┐  ┌──────────┐  ┌──────────┐
+│Memcached │  │Memcached │  │Memcached │
+│ Node 1   │  │ Node 2   │  │ Node 3   │
+└──────────┘  └──────────┘  └──────────┘
+     ▲              ▲              ▲
+     │              │              │
+     └──────────────┼──────────────┘
+                    │
+          Client-side hashing
+          (consistent hashing ring)
+</code></pre></div>
+
+<p>Key difference: Memcached nodes are independent. The client decides which node to talk to using consistent hashing.</p>
+<h3>Memcached with Node.js</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">Memcached</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;memcached&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">memcached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Memcached</span><span class="p">([</span>
+<span class="w">  </span><span class="s1">&#39;memcached-1:11211&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="s1">&#39;memcached-2:11211&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="s1">&#39;memcached-3:11211&#39;</span><span class="p">,</span>
+<span class="p">],</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">retries</span><span class="o">:</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">poolSize</span><span class="o">:</span><span class="w"> </span><span class="mf">25</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="c1">// Promisify for async/await</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">memGet</span><span class="p">(</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">resolve</span><span class="p">,</span><span class="w"> </span><span class="nx">reject</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">memcached</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="nx">reject</span><span class="p">(</span><span class="nx">err</span><span class="p">);</span>
+<span class="w">      </span><span class="k">else</span><span class="w"> </span><span class="nx">resolve</span><span class="p">(</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">memSet</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">resolve</span><span class="p">,</span><span class="w"> </span><span class="nx">reject</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">memcached</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="nx">reject</span><span class="p">(</span><span class="nx">err</span><span class="p">);</span>
+<span class="w">      </span><span class="k">else</span><span class="w"> </span><span class="nx">resolve</span><span class="p">();</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">memSet</span><span class="p">(</span><span class="s1">&#39;user:123&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Alice&#39;</span><span class="w"> </span><span class="p">}),</span><span class="w"> </span><span class="mf">3600</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">memGet</span><span class="p">(</span><span class="s1">&#39;user:123&#39;</span><span class="p">));</span>
+</code></pre></div>
+
+<h2>Redis vs Memcached Comparison</h2>
+<div class="highlight"><pre><span></span><code>┌────────────────────┬──────────────────┬──────────────────┐
+│ Feature            │ Redis            │ Memcached        │
+├────────────────────┼──────────────────┼──────────────────┤
+│ Data structures    │ Rich (lists,     │ Key-value only   │
+│                    │ sets, hashes...) │                  │
+├────────────────────┼──────────────────┼──────────────────┤
+│ Persistence        │ RDB + AOF        │ None             │
+├────────────────────┼──────────────────┼──────────────────┤
+│ Clustering         │ Built-in         │ Client-side only │
+├────────────────────┼──────────────────┼──────────────────┤
+│ Replication        │ Built-in         │ None             │
+├────────────────────┼──────────────────┼──────────────────┤
+│ Max value size     │ 512 MB           │ 1 MB default     │
+├────────────────────┼──────────────────┼──────────────────┤
+│ Pub/Sub            │ Yes              │ No               │
+├────────────────────┼──────────────────┼──────────────────┤
+│ Lua scripting      │ Yes              │ No               │
+├────────────────────┼──────────────────┼──────────────────┤
+│ Multi-threading    │ Single + I/O     │ Multi-threaded   │
+│                    │ threads          │                  │
+├────────────────────┼──────────────────┼──────────────────┤
+│ Memory efficiency  │ Higher overhead  │ Lower overhead   │
+│                    │ per key          │ (slab allocator) │
+├────────────────────┼──────────────────┼──────────────────┤
+│ Best for           │ Complex caching, │ Simple caching   │
+│                    │ sessions, queues │ at massive scale │
+└────────────────────┴──────────────────┴──────────────────┘
+</code></pre></div>
+
+<h2>Multi-Tier Caching Architecture</h2>
+<p>Production systems often use multiple cache layers:</p>
+<div class="highlight"><pre><span></span><code>┌──────────┐    ┌───────────┐    ┌───────────┐    ┌──────────┐
+│ L1 Cache │───&gt;│ L2 Cache  │───&gt;│ L3 Cache  │───&gt;│ Database │
+│ In-Memory│    │ Redis     │    │ Redis     │    │ Postgres │
+│ (per     │    │ (local    │    │ Cluster   │    │          │
+│  process)│    │  region)  │    │ (global)  │    │          │
+│ ~1ms     │    │ ~2-5ms    │    │ ~10-50ms  │    │ ~50-200ms│
+└──────────┘    └───────────┘    └───────────┘    └──────────┘
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">MultiTierCache</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">({</span><span class="w"> </span><span class="nx">l1MaxSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span><span class="w"> </span><span class="nx">redis</span><span class="p">,</span><span class="w"> </span><span class="nx">prisma</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">l1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span><span class="w"> </span><span class="c1">// In-memory LRU</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">l1MaxSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">l1MaxSize</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">prisma</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">fetchFn</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">l1TTL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">10000</span><span class="p">,</span><span class="w"> </span><span class="nx">l2TTL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">300</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// L1: In-memory</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">l1Entry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">l1</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">l1Entry</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">l1Entry</span><span class="p">.</span><span class="nx">expiry</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">l1Entry</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// L2: Redis</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">l2Data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">l2Data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">l2Data</span><span class="p">);</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">_setL1</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">,</span><span class="w"> </span><span class="nx">l1TTL</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">data</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// L3: Database</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetchFn</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">setex</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">l2TTL</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">data</span><span class="p">));</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">_setL1</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">,</span><span class="w"> </span><span class="nx">l1TTL</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">data</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">_setL1</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">l1</span><span class="p">.</span><span class="nx">size</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">l1MaxSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">firstKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">l1</span><span class="p">.</span><span class="nx">keys</span><span class="p">().</span><span class="nx">next</span><span class="p">().</span><span class="nx">value</span><span class="p">;</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">l1</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">firstKey</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">l1</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">data</span><span class="p">,</span><span class="w"> </span><span class="nx">expiry</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">ttl</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">invalidate</span><span class="p">(</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">l1</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">del</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Connection Pooling and Pipelining</h2>
+<p>For high-throughput caching, use pipelining to batch commands:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Without pipelining: 100 round trips</span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">id</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">userIds</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`user:</span><span class="si">${</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span><span class="w"> </span><span class="c1">// 100 network round trips</span>
+<span class="p">}</span>
+
+<span class="c1">// With pipelining: 1 round trip</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">id</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">userIds</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`user:</span><span class="si">${</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">users</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">map</span><span class="p">(([</span><span class="nx">err</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">])</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Hot key problem</strong>: A single popular key overwhelms one Redis node. Use local caching or key replication.</li>
+<li><strong>Large values</strong>: Storing multi-MB values blocks Redis. Compress large values or split into smaller keys.</li>
+<li><strong>Connection exhaustion</strong>: Too many connections to Redis. Use connection pooling (ioredis handles this).</li>
+<li><strong>Not handling cluster MOVED errors</strong>: ioredis handles this automatically, but custom clients must follow redirections.</li>
+</ol>
+<h2>Summary</h2>
+<p>Redis Sentinel provides high availability through automatic failover. Redis Cluster provides horizontal scaling by sharding data across nodes. Memcached is simpler but lacks Redis's rich features. Most Node.js applications should use Redis (with ioredis), adding Sentinel for HA or Cluster for scale. Multi-tier caching (L1 in-memory + L2 Redis) provides the best performance for high-throughput applications.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Redis Cluster Setup</div>
+                    <div class="exercise-desc"><p>Set up a 3-master, 3-replica Redis Cluster using Docker Compose. Connect with ioredis Cluster client and verify data is distributed across nodes.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the official Redis image with <code>--cluster-enabled yes</code>. Use <code>redis-cli --cluster create</code> to initialize. Check slot distribution with <code>CLUSTER SLOTS</code>.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Multi-Tier Cache</div>
+                    <div class="exercise-desc"><p>Implement a two-tier cache (in-memory Map + Redis) with automatic promotion and invalidation. Measure hit rates at each tier.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Track hit/miss counters for L1 and L2. Use LRU eviction for the in-memory tier. Test with a zipfian distribution of key access.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Pipeline vs Sequential Benchmark</div>
+                    <div class="exercise-desc"><p>Write a benchmark comparing sequential Redis GET operations vs pipelined operations for 1000 keys. Measure latency and throughput difference.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>console.time</code> to measure. Pipeline should be 10-100x faster due to reducing network round trips.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">CROSSSLOT error in Redis Cluster</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Attempting multi-key operations (MGET, transactions) on keys that map to different hash slots.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use hash tags to ensure related keys map to the same slot. `{user:123}.profile` and `{user:123}.settings` will be on the same slot.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>// Bad: different slots\nawait cluster.mget('user:1', 'user:2');\n// Good: same slot via hash tag\nawait cluster.mget('{user}.1', '{user}.2');</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Redis Cluster failover causes brief data loss</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Asynchronous replication means a replica may not have received the latest writes when promoted to master.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use WAIT command for critical writes to ensure replication. Accept that Redis Cluster provides 'best effort' durability, not strong consistency.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>await redis.set('critical:key', value);\nawait redis.wait(1, 1000); // Wait for 1 replica, 1s timeout</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://redis.io/docs/management/scaling/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Cluster Tutorial</div>
+                    
+                </a>
+                
+                <a href="https://github.com/redis/ioredis#cluster" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">ioredis Cluster Documentation</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/docs/management/sentinel/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Sentinel Documentation</div>
+                    
+                </a>
+                
+                <a href="https://research.facebook.com/publications/scaling-memcache-at-facebook/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag paper">paper</div>
+                    <div class="resource-title">Scaling Memcached at Facebook</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/8.2.2-js.html" class="btn">&larr; Cache Invalidation and TTL Strategies</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-js.html">&larr; Back to System Design & Scalability</a>
+        </div>
+    </div>
+</body>
+</html>

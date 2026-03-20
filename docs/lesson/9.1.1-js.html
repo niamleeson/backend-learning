@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a URL Shortener (TinyURL) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Core System Design Problems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.1.1</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design a URL Shortener (TinyURL)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a URL shortener like a coat check at a theater. You hand over your bulky coat (long URL), receive a small numbered ticket (short code), and when you return with the ticket, you get your coat back instantly. The system needs to be fast at both issuing tickets and retrieving coats, and it must never give two people the same ticket number.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a URL Shortener (TinyURL)</h1>
+<h2>Introduction</h2>
+<p>A URL shortener takes a long URL and creates a compact alias that redirects to the original. Services like TinyURL, Bitly, and short.io handle billions of redirects daily. This is one of the most commonly asked system design interview questions because it touches on hashing, database design, caching, scalability, and analytics -- all in a deceptively simple-looking system.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ol>
+<li>Given a long URL, generate a unique short URL</li>
+<li>When a user visits the short URL, redirect them to the original long URL</li>
+<li>Users can optionally specify a custom short alias</li>
+<li>Short links expire after a configurable time (default: 5 years)</li>
+<li>Analytics: track click count, referrer, and geographic data</li>
+</ol>
+<h3>Non-Functional Requirements</h3>
+<ol>
+<li>The system should be highly available -- a broken redirect is a terrible user experience</li>
+<li>Redirection must happen in real-time with minimal latency (&lt; 100ms)</li>
+<li>Short URLs should not be predictable (guessable) for security</li>
+<li>The system should scale to handle 100M+ URLs and 10B+ redirects per month</li>
+</ol>
+<h2>Step 2: Capacity Estimation</h2>
+<h3>Traffic Estimates</h3>
+<ul>
+<li>New URL shortenings: 100M per month (~40 per second)</li>
+<li>Read-to-write ratio: 100:1 (redirects dominate)</li>
+<li>Redirects: 10B per month (~4,000 per second)</li>
+<li>Peak redirects: ~8,000 per second (2x average)</li>
+</ul>
+<h3>Storage Estimates</h3>
+<ul>
+<li>Average URL length: 200 bytes</li>
+<li>Short URL key: 7 characters = 7 bytes</li>
+<li>Metadata (timestamps, user_id): ~100 bytes</li>
+<li>Per record: ~500 bytes</li>
+<li>100M URLs/month x 12 months x 5 years = 6B URLs</li>
+<li>Total storage: 6B x 500 bytes = 3 TB</li>
+</ul>
+<h3>Bandwidth</h3>
+<ul>
+<li>Incoming (writes): 40 req/s x 500 bytes = 20 KB/s</li>
+<li>Outgoing (reads): 4,000 req/s x 500 bytes = 2 MB/s</li>
+</ul>
+<h3>Cache</h3>
+<ul>
+<li>If we cache 20% of hot URLs: 6B x 0.20 x 500 bytes = 600 GB</li>
+<li>In practice, URL popularity follows a power law, so caching the top 20% covers 80%+ of traffic</li>
+</ul>
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>                           +------------------+
+                           |   Load Balancer  |
+                           +--------+---------+
+                                    |
+                    +---------------+---------------+
+                    |                               |
+           +--------v--------+             +--------v--------+
+           |  API Server (1) |             |  API Server (N) |
+           |  (Node.js)      |             |  (Node.js)      |
+           +--------+--------+             +--------+--------+
+                    |                               |
+                    +---------------+---------------+
+                                    |
+                    +---------------+---------------+
+                    |                               |
+           +--------v--------+             +--------v--------+
+           |   Redis Cache   |             |   PostgreSQL    |
+           |   (hot URLs)    |             |   (persistent)  |
+           +-----------------+             +-----------------+
+                                                    |
+                                           +--------v--------+
+                                           | Analytics Queue  |
+                                           | (Kafka/BullMQ)   |
+                                           +---------+--------+
+                                                     |
+                                           +---------v--------+
+                                           | Analytics Worker  |
+                                           | (ClickHouse/PG)   |
+                                           +-------------------+
+</code></pre></div>
+
+<h3>Component Responsibilities</h3>
+<ul>
+<li><strong>Load Balancer</strong>: Distributes traffic across API servers. Uses round-robin or least-connections.</li>
+<li><strong>API Servers</strong>: Stateless Node.js instances handling URL creation and redirection.</li>
+<li><strong>Redis Cache</strong>: Stores frequently accessed short-to-long URL mappings for sub-millisecond lookups.</li>
+<li><strong>PostgreSQL</strong>: Persistent storage for all URL mappings, user data, and metadata.</li>
+<li><strong>Analytics Queue</strong>: Decouples click tracking from the redirect hot path.</li>
+<li><strong>Analytics Worker</strong>: Processes click events asynchronously for dashboards and reporting.</li>
+</ul>
+<h2>Step 4: API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/v1/urls - Create a short URL</span>
+<span class="c1">// Request:</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="s2">&quot;long_url&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;https://example.com/very/long/path?with=params&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;custom_alias&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;my-link&quot;</span><span class="p">,</span><span class="w">    </span><span class="c1">// optional</span>
+<span class="w">  </span><span class="s2">&quot;expires_at&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;2029-01-01&quot;</span><span class="w">    </span><span class="c1">// optional</span>
+<span class="p">}</span>
+<span class="c1">// Response (201 Created):</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="s2">&quot;short_url&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;https://short.ly/aB3kF9x&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;short_code&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;aB3kF9x&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;long_url&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;https://example.com/very/long/path?with=params&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;expires_at&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;2029-01-01T00:00:00Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;created_at&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;2024-03-18T10:00:00Z&quot;</span>
+<span class="p">}</span>
+
+<span class="c1">// GET /:shortCode - Redirect to original URL</span>
+<span class="c1">// Response: 301 (permanent) or 302 (temporary) redirect</span>
+<span class="c1">// Header: Location: https://example.com/very/long/path?with=params</span>
+
+<span class="c1">// GET /api/v1/urls/:shortCode/stats - Get analytics</span>
+<span class="c1">// Response:</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="s2">&quot;short_code&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;aB3kF9x&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;total_clicks&quot;</span><span class="o">:</span><span class="w"> </span><span class="mf">15230</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;clicks_today&quot;</span><span class="o">:</span><span class="w"> </span><span class="mf">342</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;top_referrers&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;twitter.com&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;facebook.com&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="s2">&quot;top_countries&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;US&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;UK&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;DE&quot;</span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Express Route Implementation</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">createShortUrl</span><span class="p">,</span><span class="w"> </span><span class="nx">resolveShortUrl</span><span class="p">,</span><span class="w"> </span><span class="nx">getStats</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./url.service&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// Create short URL</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/urls&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">long_url</span><span class="p">,</span><span class="w"> </span><span class="nx">custom_alias</span><span class="p">,</span><span class="w"> </span><span class="nx">expires_at</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">long_url</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;long_url is required&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">createShortUrl</span><span class="p">({</span><span class="w"> </span><span class="nx">long_url</span><span class="p">,</span><span class="w"> </span><span class="nx">custom_alias</span><span class="p">,</span><span class="w"> </span><span class="nx">expires_at</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;ALIAS_TAKEN&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">409</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Custom alias already in use&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Internal server error&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="c1">// Redirect</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/:shortCode&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">shortCode</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">longUrl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">resolveShortUrl</span><span class="p">(</span><span class="nx">shortCode</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">longUrl</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Short URL not found&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Fire-and-forget analytics event</span>
+<span class="w">  </span><span class="nx">trackClick</span><span class="p">(</span><span class="nx">shortCode</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">headers</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">ip</span><span class="p">).</span><span class="k">catch</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="mf">301</span><span class="p">,</span><span class="w"> </span><span class="nx">longUrl</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Analytics</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/urls/:shortCode/stats&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">stats</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getStats</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">shortCode</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">stats</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="k">export</span><span class="w"> </span><span class="k">default</span><span class="w"> </span><span class="nx">router</span><span class="p">;</span>
+</code></pre></div>
+
+<h2>Step 5: Short Code Generation</h2>
+<p>This is the core algorithmic challenge. We need to generate unique, compact identifiers.</p>
+<h3>Approach 1: Base62 Encoding of Auto-Increment ID</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">BASE62_CHARS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz&#39;</span><span class="p">;</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">encodeBase62</span><span class="p">(</span><span class="nx">num</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">num</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">BASE62_CHARS</span><span class="p">[</span><span class="mf">0</span><span class="p">];</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nx">num</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">BASE62_CHARS</span><span class="p">[</span><span class="nx">num</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mf">62</span><span class="p">]</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">num</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">62</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// 7-character Base62 can encode 62^7 = 3.5 trillion unique URLs</span>
+<span class="c1">// encodeBase62(1000000) =&gt; &quot;4C92&quot;</span>
+</code></pre></div>
+
+<ul>
+<li>Pros: Simple, sequential, guaranteed unique</li>
+<li>Cons: Predictable (users can guess next URL), single point of failure for ID generation</li>
+</ul>
+<h3>Approach 2: MD5/SHA256 Hash + Truncation</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;crypto&#39;</span><span class="p">;</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">generateShortCode</span><span class="p">(</span><span class="nx">longUrl</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">createHash</span><span class="p">(</span><span class="s1">&#39;md5&#39;</span><span class="p">).</span><span class="nx">update</span><span class="p">(</span><span class="nx">longUrl</span><span class="p">).</span><span class="nx">digest</span><span class="p">(</span><span class="s1">&#39;base64url&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">hash</span><span class="p">.</span><span class="nx">substring</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="mf">7</span><span class="p">);</span><span class="w"> </span><span class="c1">// Take first 7 characters</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li>Pros: Deterministic (same URL gives same code), no counter needed</li>
+<li>Cons: Collision risk -- must handle collisions in the database</li>
+</ul>
+<h3>Approach 3: Pre-Generated Key Service (Recommended)</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// A separate Key Generation Service (KGS) pre-generates unique keys</span>
+<span class="c1">// and stores them in a database. API servers fetch keys in batches.</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">KeyGenerationService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">redisClient</span><span class="p">,</span><span class="w"> </span><span class="nx">batchSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redisClient</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">localKeys</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">batchSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">batchSize</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getKey</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">localKeys</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Atomically pop a batch of pre-generated keys from Redis</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">keys</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">spop</span><span class="p">(</span><span class="s1">&#39;available_keys&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">batchSize</span><span class="p">);</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">localKeys</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">keys</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">localKeys</span><span class="p">.</span><span class="nx">pop</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li>Pros: No collisions, fast (keys are ready), not predictable</li>
+<li>Cons: Requires a separate service, keys need pre-generation</li>
+</ul>
+<h2>Step 6: Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Core URL mappings table</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">urls</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">short_code</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">long_url</span><span class="w">      </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">       </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">expires_at</span><span class="w">    </span><span class="k">TIMESTAMP</span><span class="p">,</span>
+<span class="w">  </span><span class="n">click_count</span><span class="w">   </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span>
+<span class="p">);</span>
+
+<span class="c1">-- Index for fast lookups by short_code (the hot path)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_urls_short_code</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">urls</span><span class="p">(</span><span class="n">short_code</span><span class="p">);</span>
+
+<span class="c1">-- Index for expiration cleanup</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_urls_expires_at</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">urls</span><span class="p">(</span><span class="n">expires_at</span><span class="p">)</span>
+<span class="w">  </span><span class="k">WHERE</span><span class="w"> </span><span class="n">expires_at</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">;</span>
+
+<span class="c1">-- Click events for detailed analytics</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">click_events</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">short_code</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">clicked_at</span><span class="w">    </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">ip_address</span><span class="w">    </span><span class="n">INET</span><span class="p">,</span>
+<span class="w">  </span><span class="n">user_agent</span><span class="w">    </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">referrer</span><span class="w">      </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">country</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- Partition click_events by month for efficient querying</span>
+<span class="c1">-- In production, use a time-series DB like ClickHouse for this</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_clicks_short_code</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">click_events</span><span class="p">(</span><span class="n">short_code</span><span class="p">,</span><span class="w"> </span><span class="n">clicked_at</span><span class="p">);</span>
+</code></pre></div>
+
+<h3>Prisma Schema Equivalent</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// schema.prisma</span>
+<span class="nx">model</span><span class="w"> </span><span class="nx">Url</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">id</span><span class="w">         </span><span class="nb">BigInt</span><span class="w">    </span><span class="err">@</span><span class="nx">id</span><span class="w"> </span><span class="err">@</span><span class="k">default</span><span class="p">(</span><span class="nx">autoincrement</span><span class="p">())</span>
+<span class="w">  </span><span class="nx">shortCode</span><span class="w">  </span><span class="nb">String</span><span class="w">    </span><span class="err">@</span><span class="nx">unique</span><span class="w"> </span><span class="err">@</span><span class="nx">map</span><span class="p">(</span><span class="s2">&quot;short_code&quot;</span><span class="p">)</span><span class="w"> </span><span class="err">@</span><span class="nx">db</span><span class="p">.</span><span class="nx">VarChar</span><span class="p">(</span><span class="mf">10</span><span class="p">)</span>
+<span class="w">  </span><span class="nx">longUrl</span><span class="w">    </span><span class="nb">String</span><span class="w">    </span><span class="err">@</span><span class="nx">map</span><span class="p">(</span><span class="s2">&quot;long_url&quot;</span><span class="p">)</span>
+<span class="w">  </span><span class="nx">userId</span><span class="w">     </span><span class="nb">BigInt</span><span class="o">?</span><span class="w">   </span><span class="err">@</span><span class="nx">map</span><span class="p">(</span><span class="s2">&quot;user_id&quot;</span><span class="p">)</span>
+<span class="w">  </span><span class="nx">createdAt</span><span class="w">  </span><span class="nx">DateTime</span><span class="w">  </span><span class="err">@</span><span class="k">default</span><span class="p">(</span><span class="nx">now</span><span class="p">())</span><span class="w"> </span><span class="err">@</span><span class="nx">map</span><span class="p">(</span><span class="s2">&quot;created_at&quot;</span><span class="p">)</span>
+<span class="w">  </span><span class="nx">expiresAt</span><span class="w">  </span><span class="nx">DateTime</span><span class="o">?</span><span class="w"> </span><span class="err">@</span><span class="nx">map</span><span class="p">(</span><span class="s2">&quot;expires_at&quot;</span><span class="p">)</span>
+<span class="w">  </span><span class="nx">clickCount</span><span class="w"> </span><span class="nb">BigInt</span><span class="w">    </span><span class="err">@</span><span class="k">default</span><span class="p">(</span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="err">@</span><span class="nx">map</span><span class="p">(</span><span class="s2">&quot;click_count&quot;</span><span class="p">)</span>
+
+<span class="w">  </span><span class="nx">user</span><span class="w">       </span><span class="nx">User</span><span class="o">?</span><span class="w">     </span><span class="err">@</span><span class="nx">relation</span><span class="p">(</span><span class="nx">fields</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">userId</span><span class="p">],</span><span class="w"> </span><span class="nx">references</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">id</span><span class="p">])</span>
+
+<span class="w">  </span><span class="err">@@</span><span class="nx">map</span><span class="p">(</span><span class="s2">&quot;urls&quot;</span><span class="p">)</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 7: Scaling Strategies</h2>
+<h3>Caching Layer</h3>
+<p>Since reads massively outnumber writes (100:1), caching is critical:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">CACHE_TTL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">24</span><span class="p">;</span><span class="w"> </span><span class="c1">// 24 hours</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">resolveShortUrl</span><span class="p">(</span><span class="nx">shortCode</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 1. Check cache first</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">cached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`url:</span><span class="si">${</span><span class="nx">shortCode</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">cached</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">cached</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 2. Cache miss -&gt; query database</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">url</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">shortCode</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">select</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">longUrl</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">expiresAt</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">url</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">(</span><span class="nx">url</span><span class="p">.</span><span class="nx">expiresAt</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">url</span><span class="p">.</span><span class="nx">expiresAt</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">()))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 3. Populate cache</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">setex</span><span class="p">(</span><span class="sb">`url:</span><span class="si">${</span><span class="nx">shortCode</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">CACHE_TTL</span><span class="p">,</span><span class="w"> </span><span class="nx">url</span><span class="p">.</span><span class="nx">longUrl</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">url</span><span class="p">.</span><span class="nx">longUrl</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Database Sharding</h3>
+<p>At billions of URLs, a single PostgreSQL instance will not suffice. Shard by the first character(s) of the short code:</p>
+<div class="highlight"><pre><span></span><code>Sharding Strategy:
+  short_code[0] in [0-9, A-F] -&gt; Shard 1
+  short_code[0] in [G-V]      -&gt; Shard 2
+  short_code[0] in [W-Z, a-m] -&gt; Shard 3
+  short_code[0] in [n-z]      -&gt; Shard 4
+</code></pre></div>
+
+<p>Alternatively, use consistent hashing on the short code for more even distribution.</p>
+<h3>Rate Limiting</h3>
+<p>Prevent abuse by limiting URL creation per IP or user:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">rateLimit</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express-rate-limit&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">createUrlLimiter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">rateLimit</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">windowMs</span><span class="o">:</span><span class="w"> </span><span class="mf">15</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span><span class="w"> </span><span class="c1">// 15 minutes</span>
+<span class="w">  </span><span class="nx">max</span><span class="o">:</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span><span class="w">                  </span><span class="c1">// 100 URLs per window</span>
+<span class="w">  </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Too many URLs created, try again later&#39;</span><span class="w"> </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/urls&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">createUrlLimiter</span><span class="p">,</span><span class="w"> </span><span class="nx">createUrlHandler</span><span class="p">);</span>
+</code></pre></div>
+
+<h3>301 vs 302 Redirects</h3>
+<p>This is a critical trade-off:</p>
+<ul>
+<li><strong>301 (Moved Permanently)</strong>: Browser caches the redirect. Reduces server load but you lose analytics visibility since subsequent visits never hit your server.</li>
+<li><strong>302 (Found / Temporary)</strong>: Browser always hits your server first. More server load but you can track every click.</li>
+</ul>
+<p>Most URL shorteners use <strong>302</strong> to preserve analytics accuracy, even though 301 is more semantically correct.</p>
+<h2>Step 8: Trade-Offs and Discussion Points</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ID Generation</td>
+<td>Auto-increment + Base62</td>
+<td>Pre-generated keys</td>
+<td>Pre-generated keys (no single point of failure)</td>
+</tr>
+<tr>
+<td>Redirect Code</td>
+<td>301 Permanent</td>
+<td>302 Temporary</td>
+<td>302 if analytics matter, 301 for performance</td>
+</tr>
+<tr>
+<td>Database</td>
+<td>SQL (PostgreSQL)</td>
+<td>NoSQL (DynamoDB)</td>
+<td>NoSQL for pure key-value at massive scale</td>
+</tr>
+<tr>
+<td>Cache Eviction</td>
+<td>LRU</td>
+<td>TTL-based</td>
+<td>TTL + LRU combination</td>
+</tr>
+<tr>
+<td>Custom Aliases</td>
+<td>Allow</td>
+<td>Disallow</td>
+<td>Allow with validation and profanity filter</td>
+</tr>
+</tbody>
+</table>
+<h3>What Happens When a Key Collides?</h3>
+<p>With the hash approach, two different URLs might produce the same 7-character code. Handle it with retry logic:</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">createShortUrl</span><span class="p">(</span><span class="nx">longUrl</span><span class="p">,</span><span class="w"> </span><span class="nx">maxRetries</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">3</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">maxRetries</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">generateShortCode</span><span class="p">(</span><span class="nx">longUrl</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="nx">i</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nb">String</span><span class="p">(</span><span class="nx">i</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">));</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">url</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">shortCode</span><span class="o">:</span><span class="w"> </span><span class="nx">code</span><span class="p">,</span><span class="w"> </span><span class="nx">longUrl</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">code</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">code</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;P2002&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">continue</span><span class="p">;</span><span class="w"> </span><span class="c1">// Unique constraint violation</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Failed to generate unique short code&#39;</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Summary</h2>
+<p>A URL shortener is a read-heavy system where the core challenge is generating unique, compact identifiers efficiently. The key architectural decisions are: choosing an ID generation strategy (pre-generated keys win for scale), caching aggressively with Redis for the redirect hot path, decoupling analytics into an async pipeline, and picking the right redirect status code based on your analytics requirements. At extreme scale, shard the database by short code prefix and use a NoSQL store for the simple key-value lookups that dominate the workload.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Implement Base62 Encoding</div>
+                    <div class="exercise-desc"><p>Write a Base62 encoder and decoder in JavaScript. The encoder should convert a numeric ID to a string using characters [0-9A-Za-z]. The decoder should convert back to a number. Verify that encodeBase62(decodeBase62(x)) === x for several test values. Calculate how many unique 7-character codes Base62 can produce.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use modulo (%) and integer division (Math.floor) in a loop. For decoding, multiply each character's index by 62^position. 62^7 = 3,521,614,606,208.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build the Redirect Service with Caching</div>
+                    <div class="exercise-desc"><p>Implement an Express endpoint GET /:shortCode that first checks a Redis cache, falls back to a database lookup, populates the cache on miss, and returns a 302 redirect. Use ioredis and Prisma. Include expiration checking -- expired URLs should return 410 Gone.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use redis.get() for cache check, prisma.url.findUnique() for DB lookup, and redis.setex() to cache with TTL. Compare expiresAt with new Date() to check expiration.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Collision-Resistant Short Code Generator</div>
+                    <div class="exercise-desc"><p>Implement a createShortUrl function that uses MD5 hashing with collision handling. If the generated 7-character code already exists in the database, append a counter to the input and rehash. Write tests that simulate a collision scenario by mocking the database to reject the first attempt.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use crypto.createHash('md5').update(url + suffix).digest('base64url').slice(0, 7). Catch Prisma unique constraint errors (code P2002) and retry with an incremented suffix.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Design the Analytics Pipeline</div>
+                    <div class="exercise-desc"><p>Design and implement an async click-tracking pipeline using BullMQ. When a redirect occurs, enqueue a job with the short code, IP, user agent, and referrer. Create a worker that processes these events and inserts them into a click_events table. Ensure the redirect response is not delayed by analytics processing.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Queue.add() in the redirect handler (fire-and-forget). Create a Worker that listens on the queue and calls prisma.clickEvent.create(). The redirect should call res.redirect() before the analytics job completes.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Short codes are predictable and users can enumerate all URLs</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Using sequential auto-increment IDs with Base62 encoding produces sequential short codes (aB3, aB4, aB5...), making it trivial to guess the next URL.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use a pre-generated random key service, or hash-based generation. If using auto-increment, apply a bijective scrambling function (e.g., multiply by a large prime modulo a larger prime) before Base62 encoding to destroy sequentiality.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Database becomes a bottleneck under heavy redirect traffic</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Every redirect performs a database lookup. At 4,000+ requests per second, the database connection pool is exhausted and queries queue up.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Add a Redis caching layer in front of the database. Since URL mappings are immutable (the long URL never changes), they are perfect for aggressive caching with long TTLs. Cache hit rates above 90% are typical.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Click counts are inaccurate under high concurrency</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Multiple concurrent requests read the same click_count, increment it, and write back, causing lost updates (classic race condition).
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use atomic database increments (UPDATE urls SET click_count = click_count + 1), or better, decouple click counting into an async pipeline using a message queue and aggregate counts periodically.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://bytebytego.com/courses/system-design-interview/design-a-url-shortener" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">System Design: URL Shortener - Alex Xu</div>
+                    
+                    <div class="resource-note">Chapter from the System Design Interview book with detailed capacity estimation</div>
+                    
+                </a>
+                
+                <a href="https://word.bitly.com/post/28558800777/10-lessons-from-building-and-scaling-bitly" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">How Bitly Generates Unique Short URLs</div>
+                    
+                    <div class="resource-note">Real-world lessons from scaling a URL shortener to billions of links</div>
+                    
+                </a>
+                
+                <a href="https://en.wikipedia.org/wiki/Base62" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag reference">reference</div>
+                    <div class="resource-title">Base62 Encoding Explained</div>
+                    
+                    <div class="resource-note">Mathematical foundation for the encoding scheme used in short code generation</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/docs/latest/develop/connect/clients/nodejs/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Caching Patterns for Node.js</div>
+                    
+                    <div class="resource-note">Official Redis guide for Node.js integration with ioredis</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/9.1.2-js.html" class="btn">Design a Rate Limiter &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

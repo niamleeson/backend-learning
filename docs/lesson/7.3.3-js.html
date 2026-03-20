@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Certificates, Certificate Authorities, and mTLS - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-7-js.html">Security & Reliability</a> &rsaquo;
+            Cryptography Basics
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">7.3.3</span>
+                <span>~2h</span>
+            </div>
+            <h1>Certificates, Certificate Authorities, and mTLS</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>A certificate is like a government-issued passport: the passport itself (certificate) contains your photo and name (public key and identity), and it is stamped by the government (Certificate Authority). When you cross a border, the guard verifies the stamp is legitimate. Mutual TLS is like a border where BOTH sides must show their passports before either is allowed through.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Certificates, Certificate Authorities, and mTLS</h1>
+<h2>Introduction</h2>
+<p>Every time you visit a website over HTTPS, an invisible handshake takes place: the server presents a digital certificate to prove its identity, your browser verifies that certificate against a trusted authority, and then both sides negotiate an encrypted connection. This system -- called the Public Key Infrastructure (PKI) -- is the foundation of secure communication on the internet.</p>
+<p>As a backend developer, you need to understand certificates for configuring HTTPS servers, setting up TLS termination, debugging connection failures, and implementing mutual TLS (mTLS) for service-to-service authentication in microservice architectures. In this lesson, you will learn how certificates work, how the chain of trust is established, and how to implement both standard TLS and mutual TLS in Node.js.</p>
+<h2>Public Key Cryptography: The Foundation</h2>
+<p>Before we can understand certificates, we need to understand asymmetric (public key) cryptography. Unlike symmetric encryption (one key for both encrypt and decrypt), asymmetric cryptography uses a <strong>key pair</strong>:</p>
+<div class="highlight"><pre><span></span><code>ASYMMETRIC CRYPTOGRAPHY:
+
+  +-------------------+       +--------------------+
+  |   Public Key      |       |   Private Key      |
+  |   (share freely)  |       |   (keep secret)    |
+  +-------------------+       +--------------------+
+
+  Use Case 1: ENCRYPTION
+  Anyone can encrypt with the public key.
+  Only the private key holder can decrypt.
+
+    Plaintext --[Public Key]--&gt; Ciphertext --[Private Key]--&gt; Plaintext
+
+  Use Case 2: DIGITAL SIGNATURES
+  The private key holder signs a message.
+  Anyone with the public key can verify the signature.
+
+    Message --[Private Key]--&gt; Signature
+    Message + Signature --[Public Key]--&gt; Valid / Invalid
+</code></pre></div>
+
+<h3>Generating a Key Pair with node:crypto</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">generateKeyPairSync</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:crypto&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">publicKey</span><span class="p">,</span><span class="w"> </span><span class="nx">privateKey</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">generateKeyPairSync</span><span class="p">(</span><span class="s1">&#39;rsa&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">modulusLength</span><span class="o">:</span><span class="w"> </span><span class="mf">2048</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">publicKeyEncoding</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;spki&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">format</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;pem&#39;</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">privateKeyEncoding</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;pkcs8&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">format</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;pem&#39;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">publicKey</span><span class="p">);</span>
+<span class="c1">// -----BEGIN PUBLIC KEY-----</span>
+<span class="c1">// MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A...</span>
+<span class="c1">// -----END PUBLIC KEY-----</span>
+
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">privateKey</span><span class="p">);</span>
+<span class="c1">// -----BEGIN PRIVATE KEY-----</span>
+<span class="c1">// MIIEvQIBADANBgkqhkiG9w0BAQEFAASC...</span>
+<span class="c1">// -----END PRIVATE KEY-----</span>
+</code></pre></div>
+
+<h3>Digital Signatures in Node.js</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">createSign</span><span class="p">,</span><span class="w"> </span><span class="nx">createVerify</span><span class="p">,</span><span class="w"> </span><span class="nx">generateKeyPairSync</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:crypto&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">publicKey</span><span class="p">,</span><span class="w"> </span><span class="nx">privateKey</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">generateKeyPairSync</span><span class="p">(</span><span class="s1">&#39;rsa&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">modulusLength</span><span class="o">:</span><span class="w"> </span><span class="mf">2048</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">publicKeyEncoding</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;spki&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">format</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;pem&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">privateKeyEncoding</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;pkcs8&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">format</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;pem&#39;</span><span class="w"> </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="c1">// Sign a message</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">message</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;This message is from the server&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">signer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">createSign</span><span class="p">(</span><span class="s1">&#39;SHA256&#39;</span><span class="p">);</span>
+<span class="nx">signer</span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">message</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">signature</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">signer</span><span class="p">.</span><span class="nx">sign</span><span class="p">(</span><span class="nx">privateKey</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Signature:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">signature</span><span class="p">);</span>
+
+<span class="c1">// Verify the signature</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">verifier</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">createVerify</span><span class="p">(</span><span class="s1">&#39;SHA256&#39;</span><span class="p">);</span>
+<span class="nx">verifier</span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">message</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">isValid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">verifier</span><span class="p">.</span><span class="nx">verify</span><span class="p">(</span><span class="nx">publicKey</span><span class="p">,</span><span class="w"> </span><span class="nx">signature</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Valid:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">isValid</span><span class="p">);</span><span class="w"> </span><span class="c1">// true</span>
+
+<span class="c1">// Tampered message fails verification</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">verifier2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">createVerify</span><span class="p">(</span><span class="s1">&#39;SHA256&#39;</span><span class="p">);</span>
+<span class="nx">verifier2</span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="s1">&#39;This message was tampered&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">isValid2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">verifier2</span><span class="p">.</span><span class="nx">verify</span><span class="p">(</span><span class="nx">publicKey</span><span class="p">,</span><span class="w"> </span><span class="nx">signature</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Tampered valid:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">isValid2</span><span class="p">);</span><span class="w"> </span><span class="c1">// false</span>
+</code></pre></div>
+
+<h2>What Is a Digital Certificate?</h2>
+<p>A digital certificate is a document that binds a public key to an identity (like a domain name). It is signed by a Certificate Authority (CA) to assert: "I have verified that the holder of this public key is indeed the entity they claim to be."</p>
+<div class="highlight"><pre><span></span><code>ANATOMY OF AN X.509 CERTIFICATE:
+
++----------------------------------------------------------+
+| Certificate                                              |
+|                                                          |
+|  Subject:    CN=api.example.com                          |
+|  Issuer:     CN=Let&#39;s Encrypt Authority X3               |
+|  Valid From: 2025-01-01                                  |
+|  Valid To:   2025-04-01                                  |
+|  Public Key: RSA 2048-bit                                |
+|  Serial:     03:a1:b2:c3:d4:e5:f6                       |
+|                                                          |
+|  Extensions:                                             |
+|    Subject Alternative Names (SAN):                      |
+|      DNS: api.example.com                                |
+|      DNS: www.example.com                                |
+|    Key Usage: Digital Signature, Key Encipherment        |
+|                                                          |
+|  Signature: (signed by the Issuer&#39;s private key)         |
++----------------------------------------------------------+
+</code></pre></div>
+
+<p>Key fields:
+- <strong>Subject</strong> -- the entity the certificate identifies (domain, organization)
+- <strong>Issuer</strong> -- the CA that signed the certificate
+- <strong>Validity period</strong> -- the certificate's start and expiration dates
+- <strong>Public Key</strong> -- the subject's public key
+- <strong>Subject Alternative Names (SAN)</strong> -- additional domains covered
+- <strong>Signature</strong> -- the issuer's digital signature over all the above fields</p>
+<h2>The Chain of Trust</h2>
+<p>Certificates form a chain from the server's certificate (leaf) up to a trusted root CA:</p>
+<div class="highlight"><pre><span></span><code>CHAIN OF TRUST:
+
++---------------------------+
+| Root CA Certificate       |  Pre-installed in OS/browser
+| (Self-signed)             |  trust stores. Highly secured.
+| e.g., DigiCert Root       |
++---------------------------+
+        |
+        | signs
+        v
++---------------------------+
+| Intermediate CA Cert      |  Issued by the Root CA.
+| e.g., Let&#39;s Encrypt R3   |  Adds a layer of security.
++---------------------------+
+        |
+        | signs
+        v
++---------------------------+
+| Leaf Certificate          |  Your server&#39;s certificate.
+| CN=api.example.com        |  Sent to clients during TLS.
++---------------------------+
+
+
+VERIFICATION PROCESS:
+
+  1. Server sends: [Leaf Cert] + [Intermediate Cert]
+  2. Client checks: Leaf signed by Intermediate? (verify signature)
+  3. Client checks: Intermediate signed by Root? (verify signature)
+  4. Client checks: Root is in my trust store? YES -&gt; TRUSTED
+  5. Client checks: Leaf cert&#39;s domain matches requested domain?
+  6. Client checks: Certificate is not expired?
+  7. Client checks: Certificate is not revoked? (CRL/OCSP)
+  8. ALL checks pass -&gt; TLS connection established
+</code></pre></div>
+
+<h2>Certificate Formats</h2>
+<p>You will encounter several certificate file formats:</p>
+<div class="highlight"><pre><span></span><code>+----------+-----------------------------------------------------------+
+| Format   | Description                                               |
++----------+-----------------------------------------------------------+
+| PEM      | Base64-encoded, text format. Most common for web servers. |
+|          | Files: .pem, .crt, .cer, .key                            |
+|          | Begins with -----BEGIN CERTIFICATE-----                   |
++----------+-----------------------------------------------------------+
+| DER      | Binary format. Common on Windows and Java.                |
+|          | Files: .der, .cer                                        |
++----------+-----------------------------------------------------------+
+| PKCS#12  | Binary bundle of cert + private key + chain.              |
+|          | Files: .p12, .pfx                                        |
++----------+-----------------------------------------------------------+
+</code></pre></div>
+
+<h2>Creating a Self-Signed Certificate</h2>
+<p>For development and testing, you can generate a self-signed certificate using OpenSSL:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Generate a private key and self-signed certificate in one command</span>
+openssl<span class="w"> </span>req<span class="w"> </span>-x509<span class="w"> </span>-newkey<span class="w"> </span>rsa:2048<span class="w"> </span>-keyout<span class="w"> </span>key.pem<span class="w"> </span>-out<span class="w"> </span>cert.pem<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-sha256<span class="w"> </span>-days<span class="w"> </span><span class="m">365</span><span class="w"> </span>-nodes<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-subj<span class="w"> </span><span class="s2">&quot;/CN=localhost&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-addext<span class="w"> </span><span class="s2">&quot;subjectAltName=DNS:localhost,IP:127.0.0.1&quot;</span>
+</code></pre></div>
+
+<p>Breaking down the options:
+- <code>-x509</code> -- output a self-signed certificate (not a CSR)
+- <code>-newkey rsa:2048</code> -- generate a new 2048-bit RSA key
+- <code>-keyout key.pem</code> -- write the private key here
+- <code>-out cert.pem</code> -- write the certificate here
+- <code>-nodes</code> -- do not encrypt the private key (no passphrase)
+- <code>-subj</code> -- set the subject fields
+- <code>-addext</code> -- add Subject Alternative Name extension</p>
+<h2>HTTPS Server in Node.js</h2>
+<h3>Basic HTTPS Server</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">https</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:https&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">fs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:fs&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Hello over HTTPS!&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;key.pem&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">cert</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;cert.pem&#39;</span><span class="p">)</span>
+<span class="p">};</span>
+
+<span class="nx">https</span><span class="p">.</span><span class="nx">createServer</span><span class="p">(</span><span class="nx">options</span><span class="p">,</span><span class="w"> </span><span class="nx">app</span><span class="p">).</span><span class="nx">listen</span><span class="p">(</span><span class="mf">443</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;HTTPS server running on port 443&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>HTTPS with Certificate Chain</h3>
+<p>In production, you typically have a leaf certificate and an intermediate CA certificate. They must be provided together:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;/etc/ssl/private/server.key&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">cert</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;/etc/ssl/certs/server.crt&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">ca</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;/etc/ssl/certs/intermediate.crt&#39;</span><span class="p">)</span>
+<span class="p">};</span>
+
+<span class="c1">// Alternatively, concatenate leaf + intermediate into one PEM file:</span>
+<span class="c1">// cat server.crt intermediate.crt &gt; fullchain.pem</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">optionsAlt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;/etc/ssl/private/server.key&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">cert</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;/etc/ssl/certs/fullchain.pem&#39;</span><span class="p">)</span>
+<span class="p">};</span>
+</code></pre></div>
+
+<h2>TLS Handshake</h2>
+<p>Understanding the TLS handshake helps with debugging connection issues:</p>
+<div class="highlight"><pre><span></span><code>TLS 1.3 HANDSHAKE (simplified):
+
+  Client                                    Server
+    |                                          |
+    |--- ClientHello ---------------------------&gt;|
+    |    (supported ciphers, TLS version,       |
+    |     client random, key share)             |
+    |                                          |
+    |&lt;--- ServerHello --------------------------|
+    |     (chosen cipher, server random,        |
+    |      key share)                           |
+    |&lt;--- Certificate -------------------------|
+    |     (server&#39;s cert chain)                 |
+    |&lt;--- CertificateVerify --------------------|
+    |     (signature proving key ownership)     |
+    |&lt;--- Finished -----------------------------|
+    |                                          |
+    |--- Finished -----------------------------&gt;|
+    |                                          |
+    |&lt;========= Encrypted Data ===============&gt;|
+
+  Total: 1 round trip (TLS 1.3) vs 2 round trips (TLS 1.2)
+</code></pre></div>
+
+<h2>Mutual TLS (mTLS)</h2>
+<p>Standard TLS is one-way: only the server proves its identity. In mutual TLS (mTLS), both the client and the server present certificates to authenticate each other. This is widely used for:</p>
+<ul>
+<li><strong>Service-to-service communication</strong> in microservices</li>
+<li><strong>Zero-trust architectures</strong> where every connection is verified</li>
+<li><strong>API authentication</strong> as an alternative to API keys</li>
+</ul>
+<div class="highlight"><pre><span></span><code>STANDARD TLS vs MUTUAL TLS:
+
+Standard TLS:
+  Client -------&gt; Server
+  &quot;Show me your cert&quot;     Server proves identity
+  Client trusts server    Client is anonymous
+
+mTLS:
+  Client &lt;------&gt; Server
+  &quot;Show me your cert&quot;     Server proves identity
+  &quot;Show ME your cert&quot;     Client proves identity
+  Both sides verified     Both sides trusted
+</code></pre></div>
+
+<h3>Setting Up mTLS in Node.js</h3>
+<p>First, generate certificates for the CA, server, and client:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. Create a Certificate Authority (CA)</span>
+openssl<span class="w"> </span>req<span class="w"> </span>-x509<span class="w"> </span>-newkey<span class="w"> </span>rsa:2048<span class="w"> </span>-keyout<span class="w"> </span>ca-key.pem<span class="w"> </span>-out<span class="w"> </span>ca-cert.pem<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-sha256<span class="w"> </span>-days<span class="w"> </span><span class="m">3650</span><span class="w"> </span>-nodes<span class="w"> </span>-subj<span class="w"> </span><span class="s2">&quot;/CN=My Internal CA&quot;</span>
+
+<span class="c1"># 2. Generate server key and Certificate Signing Request (CSR)</span>
+openssl<span class="w"> </span>req<span class="w"> </span>-newkey<span class="w"> </span>rsa:2048<span class="w"> </span>-keyout<span class="w"> </span>server-key.pem<span class="w"> </span>-out<span class="w"> </span>server-csr.pem<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-nodes<span class="w"> </span>-subj<span class="w"> </span><span class="s2">&quot;/CN=localhost&quot;</span>
+
+<span class="c1"># 3. Sign the server CSR with the CA</span>
+openssl<span class="w"> </span>x509<span class="w"> </span>-req<span class="w"> </span>-in<span class="w"> </span>server-csr.pem<span class="w"> </span>-CA<span class="w"> </span>ca-cert.pem<span class="w"> </span>-CAkey<span class="w"> </span>ca-key.pem<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-CAcreateserial<span class="w"> </span>-out<span class="w"> </span>server-cert.pem<span class="w"> </span>-days<span class="w"> </span><span class="m">365</span><span class="w"> </span>-sha256<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-extfile<span class="w"> </span>&lt;<span class="o">(</span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;subjectAltName=DNS:localhost,IP:127.0.0.1&quot;</span><span class="o">)</span>
+
+<span class="c1"># 4. Generate client key and CSR</span>
+openssl<span class="w"> </span>req<span class="w"> </span>-newkey<span class="w"> </span>rsa:2048<span class="w"> </span>-keyout<span class="w"> </span>client-key.pem<span class="w"> </span>-out<span class="w"> </span>client-csr.pem<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-nodes<span class="w"> </span>-subj<span class="w"> </span><span class="s2">&quot;/CN=service-a&quot;</span>
+
+<span class="c1"># 5. Sign the client CSR with the same CA</span>
+openssl<span class="w"> </span>x509<span class="w"> </span>-req<span class="w"> </span>-in<span class="w"> </span>client-csr.pem<span class="w"> </span>-CA<span class="w"> </span>ca-cert.pem<span class="w"> </span>-CAkey<span class="w"> </span>ca-key.pem<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-CAcreateserial<span class="w"> </span>-out<span class="w"> </span>client-cert.pem<span class="w"> </span>-days<span class="w"> </span><span class="m">365</span><span class="w"> </span>-sha256
+</code></pre></div>
+
+<h3>mTLS Server</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">https</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:https&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">fs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:fs&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Access client certificate information</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">clientCert</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">socket</span><span class="p">.</span><span class="nx">getPeerCertificate</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">clientCert</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="nx">clientCert</span><span class="p">.</span><span class="nx">subject</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">401</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;No client certificate provided&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;mTLS connection established&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">client</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">commonName</span><span class="o">:</span><span class="w"> </span><span class="nx">clientCert</span><span class="p">.</span><span class="nx">subject</span><span class="p">.</span><span class="nx">CN</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">issuer</span><span class="o">:</span><span class="w"> </span><span class="nx">clientCert</span><span class="p">.</span><span class="nx">issuer</span><span class="p">.</span><span class="nx">CN</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">validFrom</span><span class="o">:</span><span class="w"> </span><span class="nx">clientCert</span><span class="p">.</span><span class="nx">valid_from</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">validTo</span><span class="o">:</span><span class="w"> </span><span class="nx">clientCert</span><span class="p">.</span><span class="nx">valid_to</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">fingerprint</span><span class="o">:</span><span class="w"> </span><span class="nx">clientCert</span><span class="p">.</span><span class="nx">fingerprint</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;server-key.pem&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">cert</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;server-cert.pem&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">ca</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;ca-cert.pem&#39;</span><span class="p">),</span><span class="w">         </span><span class="c1">// Trust this CA for client certs</span>
+<span class="w">  </span><span class="nx">requestCert</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w">                           </span><span class="c1">// Request client certificate</span>
+<span class="w">  </span><span class="nx">rejectUnauthorized</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w">                     </span><span class="c1">// Reject connections without valid cert</span>
+<span class="p">};</span>
+
+<span class="nx">https</span><span class="p">.</span><span class="nx">createServer</span><span class="p">(</span><span class="nx">options</span><span class="p">,</span><span class="w"> </span><span class="nx">app</span><span class="p">).</span><span class="nx">listen</span><span class="p">(</span><span class="mf">8443</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;mTLS server running on https://localhost:8443&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<p>Key options:
+- <strong><code>requestCert: true</code></strong> -- the server asks the client for a certificate
+- <strong><code>rejectUnauthorized: true</code></strong> -- connections without a valid client cert are rejected
+- <strong><code>ca</code></strong> -- the CA certificate(s) used to validate client certificates</p>
+<h3>mTLS Client</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">https</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:https&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">fs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:fs&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">hostname</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;localhost&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">8443</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">path</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;/&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;GET&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;client-key.pem&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">cert</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;client-cert.pem&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">ca</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;ca-cert.pem&#39;</span><span class="p">)</span><span class="w">           </span><span class="c1">// Trust the server&#39;s CA</span>
+<span class="p">};</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">https</span><span class="p">.</span><span class="nx">request</span><span class="p">(</span><span class="nx">options</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;data&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">chunk</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">chunk</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;end&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Response:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">data</span><span class="p">));</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="nx">req</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;error&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Connection failed:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">req</span><span class="p">.</span><span class="nx">end</span><span class="p">();</span>
+</code></pre></div>
+
+<h3>mTLS with Axios (more practical for services)</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">axios</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;axios&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">https</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:https&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">fs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:fs&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">httpsAgent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">https</span><span class="p">.</span><span class="nx">Agent</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;client-key.pem&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">cert</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;client-cert.pem&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">ca</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;ca-cert.pem&#39;</span><span class="p">)</span>
+<span class="p">});</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">callSecureService</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">axios</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;https://localhost:8443/&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">httpsAgent</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Response:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Request failed:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="nx">callSecureService</span><span class="p">();</span>
+</code></pre></div>
+
+<h2>Certificate-Based Authorization</h2>
+<p>With mTLS, you can authorize requests based on the client certificate's identity:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">ALLOWED_SERVICES</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;service-a&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;service-b&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;admin-service&#39;</span><span class="p">];</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">mTLSAuthMiddleware</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">cert</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">socket</span><span class="p">.</span><span class="nx">getPeerCertificate</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">cert</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="nx">cert</span><span class="p">.</span><span class="nx">subject</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">401</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Client certificate required&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">clientName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">cert</span><span class="p">.</span><span class="nx">subject</span><span class="p">.</span><span class="nx">CN</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">ALLOWED_SERVICES</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="nx">clientName</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Service not authorized&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">client</span><span class="o">:</span><span class="w"> </span><span class="nx">clientName</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Attach client identity to request for downstream use</span>
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">clientService</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">clientName</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">next</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">mTLSAuthMiddleware</span><span class="p">);</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/internal/data&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Request from: </span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">clientService</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sensitive internal data&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Certificate Rotation and Management</h2>
+<p>Certificates expire, and rotating them without downtime is critical:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">tls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:tls&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">fs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:fs&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">https</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:https&#39;</span><span class="p">);</span>
+
+<span class="c1">// Dynamic certificate loading -- reload certs without restart</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">loadCertificates</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;/etc/ssl/private/server.key&#39;</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">cert</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;/etc/ssl/certs/server.crt&#39;</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">ca</span><span class="o">:</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;/etc/ssl/certs/ca.crt&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">https</span><span class="p">.</span><span class="nx">createServer</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">SNICallback</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">hostname</span><span class="p">,</span><span class="w"> </span><span class="nx">cb</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Reload certificates on each connection</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">certs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">loadCertificates</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">ctx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tls</span><span class="p">.</span><span class="nx">createSecureContext</span><span class="p">(</span><span class="nx">certs</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">cb</span><span class="p">(</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nx">ctx</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">},</span><span class="w"> </span><span class="nx">app</span><span class="p">);</span>
+
+<span class="nx">server</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="mf">443</span><span class="p">);</span>
+</code></pre></div>
+
+<p>For production environments, you should:
+1. <strong>Automate renewal</strong> -- use tools like certbot (for Let's Encrypt) or Vault
+2. <strong>Monitor expiration</strong> -- alert well before certificates expire (30 days out)
+3. <strong>Use short-lived certificates</strong> -- especially for mTLS between services (e.g., 24-hour certs from a Vault PKI)</p>
+<h2>Inspecting Certificates</h2>
+<p>Useful commands for debugging certificate issues:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># View certificate details</span>
+openssl<span class="w"> </span>x509<span class="w"> </span>-in<span class="w"> </span>cert.pem<span class="w"> </span>-text<span class="w"> </span>-noout
+
+<span class="c1"># Check what certificate a server presents</span>
+openssl<span class="w"> </span>s_client<span class="w"> </span>-connect<span class="w"> </span>api.example.com:443<span class="w"> </span>-showcerts
+
+<span class="c1"># Verify a certificate against a CA</span>
+openssl<span class="w"> </span>verify<span class="w"> </span>-CAfile<span class="w"> </span>ca-cert.pem<span class="w"> </span>server-cert.pem
+
+<span class="c1"># Check certificate expiration</span>
+openssl<span class="w"> </span>x509<span class="w"> </span>-in<span class="w"> </span>cert.pem<span class="w"> </span>-noout<span class="w"> </span>-dates
+
+<span class="c1"># View the full chain</span>
+openssl<span class="w"> </span>s_client<span class="w"> </span>-connect<span class="w"> </span>api.example.com:443<span class="w"> </span><span class="m">2</span>&gt;/dev/null<span class="w"> </span><span class="p">|</span><span class="w"> </span>openssl<span class="w"> </span>x509<span class="w"> </span>-noout<span class="w"> </span>-subject<span class="w"> </span>-issuer
+</code></pre></div>
+
+<h3>Inspecting Certificates Programmatically</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">tls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:tls&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">X509Certificate</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:crypto&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">fs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:fs&#39;</span><span class="p">);</span>
+
+<span class="c1">// Read and inspect a local certificate</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">certPem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;cert.pem&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">cert</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">X509Certificate</span><span class="p">(</span><span class="nx">certPem</span><span class="p">);</span>
+
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Subject:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">cert</span><span class="p">.</span><span class="nx">subject</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Issuer:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">cert</span><span class="p">.</span><span class="nx">issuer</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Valid From:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">cert</span><span class="p">.</span><span class="nx">validFrom</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Valid To:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">cert</span><span class="p">.</span><span class="nx">validTo</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Serial:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">cert</span><span class="p">.</span><span class="nx">serialNumber</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Fingerprint:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">cert</span><span class="p">.</span><span class="nx">fingerprint256</span><span class="p">);</span>
+
+<span class="c1">// Check if certificate is currently valid</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">notBefore</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">cert</span><span class="p">.</span><span class="nx">validFrom</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">notAfter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">cert</span><span class="p">.</span><span class="nx">validTo</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">isValid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">now</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">notBefore</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">now</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">notAfter</span><span class="p">;</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Currently valid:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">isValid</span><span class="p">);</span>
+
+<span class="c1">// Check days until expiration</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">daysLeft</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">((</span><span class="nx">notAfter</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">now</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="p">(</span><span class="mf">1000</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">24</span><span class="p">));</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Days until expiration:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">daysLeft</span><span class="p">);</span>
+
+<span class="c1">// Verify a certificate was signed by a CA</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">caCertPem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;ca-cert.pem&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">caCert</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">X509Certificate</span><span class="p">(</span><span class="nx">caCertPem</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Signed by CA:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">cert</span><span class="p">.</span><span class="nx">checkIssued</span><span class="p">(</span><span class="nx">caCert</span><span class="p">));</span>
+</code></pre></div>
+
+<h2>Certificate Monitoring Endpoint</h2>
+<p>A health check endpoint that monitors certificate expiration:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">X509Certificate</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:crypto&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">fs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:fs&#39;</span><span class="p">);</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/health/tls&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">certPem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="s1">&#39;/etc/ssl/certs/server.crt&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">cert</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">X509Certificate</span><span class="p">(</span><span class="nx">certPem</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">notAfter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">cert</span><span class="p">.</span><span class="nx">validTo</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">daysLeft</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">((</span><span class="nx">notAfter</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">())</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="p">(</span><span class="mf">1000</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">24</span><span class="p">));</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">daysLeft</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">30</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;healthy&#39;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="nx">daysLeft</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">7</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;warning&#39;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;critical&#39;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">status</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">certificate</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">subject</span><span class="o">:</span><span class="w"> </span><span class="nx">cert</span><span class="p">.</span><span class="nx">subject</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">issuer</span><span class="o">:</span><span class="w"> </span><span class="nx">cert</span><span class="p">.</span><span class="nx">issuer</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">validTo</span><span class="o">:</span><span class="w"> </span><span class="nx">cert</span><span class="p">.</span><span class="nx">validTo</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">daysUntilExpiry</span><span class="o">:</span><span class="w"> </span><span class="nx">daysLeft</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;error&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="nx">error</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Let's Encrypt and ACME Protocol</h2>
+<p>Let's Encrypt provides free, automated TLS certificates. The typical setup for a Node.js server:</p>
+<div class="highlight"><pre><span></span><code>PRODUCTION SETUP WITH NGINX + LET&#39;S ENCRYPT:
+
+  Internet
+     |
+     v
++-----------+     +------------------+
+|  Nginx    |----&gt;| Node.js App      |
+|  (port 443)     | (port 3000)      |
+|  TLS termination| Plain HTTP       |
+|  Let&#39;s Encrypt  |                  |
++-----------+     +------------------+
+
+  Nginx handles:
+  - TLS termination (decrypts HTTPS)
+  - Certificate renewal (certbot)
+  - Reverse proxy to Node.js
+
+  Node.js handles:
+  - Application logic
+  - Receives plain HTTP from Nginx
+  - Trusts Nginx for client info (X-Forwarded-For)
+</code></pre></div>
+
+<p>This is the recommended production pattern. Let Nginx handle TLS termination rather than terminating TLS directly in Node.js, as Nginx is significantly faster at TLS operations.</p>
+<h2>Summary</h2>
+<p>Digital certificates bind public keys to identities and are verified through a chain of trust from leaf certificates to trusted root CAs. In Node.js, you can create HTTPS servers by providing a private key and certificate to <code>https.createServer</code>. Mutual TLS (mTLS) extends standard TLS by requiring both parties to present certificates, making it ideal for service-to-service authentication. Use <code>requestCert: true</code> and <code>rejectUnauthorized: true</code> on the server side, and provide client certificates on the client side. For production, terminate TLS at a reverse proxy like Nginx, automate renewal with Let's Encrypt, and monitor certificate expiration proactively. When building microservices, consider mTLS as a strong alternative to API keys or JWT tokens for inter-service authentication.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Generate and Inspect Certificates</div>
+                    <div class="exercise-desc"><p>Using OpenSSL, generate a self-signed CA certificate, then use that CA to sign a server certificate for localhost. Write a Node.js script that reads both certificates using the X509Certificate class and prints: subject, issuer, validity dates, days until expiration, and whether the server cert was issued by the CA.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use 'openssl req -x509' for the CA and 'openssl req -new' + 'openssl x509 -req -CA' for the server cert. In Node.js, use new X509Certificate(pem) and the checkIssued() method.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">HTTPS Server with Express</div>
+                    <div class="exercise-desc"><p>Create an Express HTTPS server that uses the self-signed certificates you generated. Add a /health endpoint that returns the server's certificate fingerprint and expiration date. Test it with curl using the --cacert flag to trust your CA, and observe the error when you do not provide the CA.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use https.createServer({ key, cert }, app). With curl, use: curl --cacert ca-cert.pem https://localhost:8443/health. Without --cacert, curl will reject the self-signed cert.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Mutual TLS Service Communication</div>
+                    <div class="exercise-desc"><p>Set up a complete mTLS system: (1) create a CA, (2) issue a server cert and a client cert both signed by the CA, (3) create an Express mTLS server that requires client certificates, (4) create a client that presents its certificate when connecting. Add middleware that extracts the client's CN (Common Name) and logs it. Test that connections without a client certificate are rejected.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Server options need requestCert: true and rejectUnauthorized: true. Use req.socket.getPeerCertificate() to read client cert details. For the client, use https.Agent with key, cert, and ca options.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">HTTPS server fails with 'error:0906D06C:PEM routines:PEM_read_bio:no start line'</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The certificate or key file is not in PEM format, is empty, or the file path is wrong. This also occurs when the key and cert files are swapped (key passed as cert or vice versa).
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Verify the file begins with '-----BEGIN CERTIFICATE-----' (for certs) or '-----BEGIN PRIVATE KEY-----' (for keys). Check that fs.readFileSync paths are correct and the files are readable. Ensure you are not passing the key file as the cert option.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">mTLS client connection fails with 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The client does not trust the CA that signed the server's certificate. The ca option is missing from the client's HTTPS agent, or the wrong CA certificate file was provided.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Pass the CA certificate that signed the server's cert in the client's ca option: new https.Agent({ ca: fs.readFileSync('ca-cert.pem'), key: ..., cert: ... }). If the server uses a different CA than the client certificates, both CAs must be included.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">req.socket.getPeerCertificate() returns an empty object even though requestCert is true</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The rejectUnauthorized option is set to false, which allows connections without valid client certificates. In this case, getPeerCertificate() returns an empty object for unauthenticated clients.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Set rejectUnauthorized: true to require valid client certificates. If you need to allow optional client certs, check if the returned object has a 'subject' property before accessing cert fields: if (cert && cert.subject) { ... }.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://blog.bytebytego.com/p/how-does-https-work" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">How Does HTTPS Work? (ByteByteGo)</div>
+                    
+                    <div class="resource-note">Visual explanation of TLS handshake and certificate verification</div>
+                    
+                </a>
+                
+                <a href="https://nodejs.org/api/tls.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Node.js TLS/SSL Documentation</div>
+                    
+                    <div class="resource-note">Official Node.js documentation for the tls module including mTLS configuration options</div>
+                    
+                </a>
+                
+                <a href="https://www.cloudflare.com/learning/access-management/what-is-mutual-tls/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">mTLS Guide (Cloudflare)</div>
+                    
+                    <div class="resource-note">Clear explanation of mutual TLS concepts and use cases from Cloudflare</div>
+                    
+                </a>
+                
+                <a href="https://letsencrypt.org/how-it-works/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Let's Encrypt: How It Works</div>
+                    
+                    <div class="resource-note">Overview of the ACME protocol and automated certificate issuance</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/7.3.2-js.html" class="btn">&larr; node:crypto: Encryption, HMAC, and Random Values</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-7-js.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

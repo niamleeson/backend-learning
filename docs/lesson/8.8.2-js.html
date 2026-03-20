@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distributed Consensus: Raft and Paxos - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-js.html">System Design & Scalability</a> &rsaquo;
+            Distributed Systems Concepts
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.8.2</span>
+                <span>~3h</span>
+            </div>
+            <h1>Distributed Consensus: Raft and Paxos</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Distributed consensus is like a group of friends trying to decide on a restaurant over a flaky group chat. Raft's approach: one person becomes the 'organizer' (leader) by getting a majority vote. The organizer proposes a restaurant, and everyone agrees if the organizer is still in charge. If the organizer goes offline, the group votes for a new organizer. The key rule: decisions only count if a majority participates.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Distributed Consensus: Raft and Paxos</h1>
+<h2>Introduction</h2>
+<p>Distributed consensus is the problem of getting multiple nodes in a distributed system to agree on a value. This is fundamental to leader election, configuration management, and replicated state machines. Raft and Paxos are the two most important consensus algorithms.</p>
+<h2>Why Consensus?</h2>
+<div class="highlight"><pre><span></span><code>Problem: Who is the leader?
+
+Node 1: &quot;I&#39;m the leader!&quot;     ← Split brain
+Node 2: &quot;I&#39;m the leader!&quot;     ← Both accept writes
+Node 3: &quot;Who&#39;s the leader?&quot;   ← Confusion
+
+Solution: Consensus algorithm ensures
+  ONE leader is elected and ALL nodes agree
+</code></pre></div>
+
+<p>Without consensus, distributed systems face:
+- <strong>Split brain</strong>: Multiple nodes think they are the leader
+- <strong>Data loss</strong>: Conflicting writes on different "leaders"
+- <strong>Inconsistency</strong>: Nodes diverge and cannot reconcile</p>
+<h2>Raft Consensus Algorithm</h2>
+<p>Raft was designed to be understandable. It breaks consensus into three sub-problems: leader election, log replication, and safety.</p>
+<h3>Raft Node States</h3>
+<div class="highlight"><pre><span></span><code>┌──────────┐    timeout     ┌────────────┐   wins election  ┌──────────┐
+│ Follower │───────────────&gt;│ Candidate  │────────────────&gt;│  Leader  │
+│          │                │            │                  │          │
+│          │&lt;───────────────│            │&lt;─────────────────│          │
+│          │  discovers     │            │  discovers       │          │
+│          │  current       │            │  higher term     │          │
+│          │  leader        │            │  leader          │          │
+└──────────┘                └────────────┘                  └──────────┘
+</code></pre></div>
+
+<h3>Leader Election</h3>
+<div class="highlight"><pre><span></span><code>Term 1: Node 1 is leader
+  Node 1 (Leader) ──heartbeat──&gt; Node 2 (Follower)
+  Node 1 (Leader) ──heartbeat──&gt; Node 3 (Follower)
+
+Node 1 crashes! Heartbeat stops.
+
+Term 2: Election
+  Node 2: &quot;Timeout! No heartbeat. Starting election for Term 2&quot;
+  Node 2 ──RequestVote──&gt; Node 3: &quot;Vote for me?&quot;
+  Node 3: &quot;OK, you have my vote&quot;
+  Node 2: &quot;I have 2/3 votes (majority). I am the new leader!&quot;
+
+Term 2: Node 2 is leader
+  Node 2 (Leader) ──heartbeat──&gt; Node 3 (Follower)
+  (Node 1 is down)
+
+Node 1 comes back:
+  Node 1: &quot;I was leader of Term 1&quot;
+  Node 2: &quot;I&#39;m leader of Term 2 (higher term)&quot;
+  Node 1: &quot;OK, I&#39;ll be a follower&quot;
+</code></pre></div>
+
+<h3>Simplified Raft Implementation (Educational)</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">RaftNode</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">peers</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">id</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">peers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">peers</span><span class="p">;</span><span class="w"> </span><span class="c1">// Other node URLs</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;follower&#39;</span><span class="p">;</span><span class="w"> </span><span class="c1">// follower, candidate, leader</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">votedFor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">log</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">commitIndex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Timeouts</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">electionTimeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_randomTimeout</span><span class="p">(</span><span class="mf">150</span><span class="p">,</span><span class="w"> </span><span class="mf">300</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">heartbeatInterval</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">50</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">resetElectionTimer</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">_randomTimeout</span><span class="p">(</span><span class="nx">min</span><span class="p">,</span><span class="w"> </span><span class="nx">max</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">min</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">random</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="nx">max</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">min</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">resetElectionTimer</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">clearTimeout</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">electionTimer</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">electionTimer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">setTimeout</span><span class="p">(</span>
+<span class="w">      </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">startElection</span><span class="p">(),</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">electionTimeout</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">startElection</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;candidate&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">votedFor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">id</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">votesReceived</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span><span class="w"> </span><span class="c1">// Vote for self</span>
+
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Node </span><span class="si">${</span><span class="k">this</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">: Starting election for term </span><span class="si">${</span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">votePromises</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">peers</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">peer</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">peer</span><span class="si">}</span><span class="sb">/request-vote`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/json&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">            </span><span class="nx">term</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">candidateId</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">lastLogIndex</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">log</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">lastLogTerm</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">log</span><span class="p">[</span><span class="k">this</span><span class="p">.</span><span class="nx">log</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">]</span><span class="o">?</span><span class="p">.</span><span class="nx">term</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">          </span><span class="p">}),</span>
+<span class="w">          </span><span class="nx">signal</span><span class="o">:</span><span class="w"> </span><span class="nx">AbortSignal</span><span class="p">.</span><span class="nx">timeout</span><span class="p">(</span><span class="mf">1000</span><span class="p">),</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">voteGranted</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">};</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">(</span><span class="nx">votePromises</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">votesReceived</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">voteGranted</span><span class="p">).</span><span class="nx">length</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">majority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">((</span><span class="k">this</span><span class="p">.</span><span class="nx">peers</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">2</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;candidate&#39;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">votesReceived</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">majority</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">becomeLeader</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">resetElectionTimer</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">becomeLeader</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;leader&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Node </span><span class="si">${</span><span class="k">this</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">: Became leader for term </span><span class="si">${</span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Send periodic heartbeats</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">heartbeatTimer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">setInterval</span><span class="p">(</span>
+<span class="w">      </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">sendHeartbeats</span><span class="p">(),</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">heartbeatInterval</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">sendHeartbeats</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">peer</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">peers</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">peer</span><span class="si">}</span><span class="sb">/append-entries`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/json&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">            </span><span class="nx">term</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">leaderId</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">entries</span><span class="o">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">            </span><span class="nx">leaderCommit</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">commitIndex</span><span class="p">,</span>
+<span class="w">          </span><span class="p">}),</span>
+<span class="w">          </span><span class="nx">signal</span><span class="o">:</span><span class="w"> </span><span class="nx">AbortSignal</span><span class="p">.</span><span class="nx">timeout</span><span class="p">(</span><span class="mf">500</span><span class="p">),</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Peer may be down</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Handle vote request</span>
+<span class="w">  </span><span class="nx">handleVoteRequest</span><span class="p">({</span><span class="w"> </span><span class="nx">term</span><span class="p">,</span><span class="w"> </span><span class="nx">candidateId</span><span class="p">,</span><span class="w"> </span><span class="nx">lastLogIndex</span><span class="p">,</span><span class="w"> </span><span class="nx">lastLogTerm</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">term</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">term</span><span class="p">;</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;follower&#39;</span><span class="p">;</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">votedFor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">voteGranted</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="nx">term</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">      </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">votedFor</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">votedFor</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">candidateId</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">voteGranted</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">votedFor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">candidateId</span><span class="p">;</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">resetElectionTimer</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">term</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">,</span><span class="w"> </span><span class="nx">voteGranted</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Handle heartbeat / log entries</span>
+<span class="w">  </span><span class="nx">handleAppendEntries</span><span class="p">({</span><span class="w"> </span><span class="nx">term</span><span class="p">,</span><span class="w"> </span><span class="nx">leaderId</span><span class="p">,</span><span class="w"> </span><span class="nx">entries</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">term</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">term</span><span class="p">;</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;follower&#39;</span><span class="p">;</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">resetElectionTimer</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">term</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">,</span><span class="w"> </span><span class="nx">success</span><span class="o">:</span><span class="w"> </span><span class="nx">term</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Where Consensus is Used in Practice</h2>
+<div class="highlight"><pre><span></span><code>┌────────────────────────────────────────────────────────┐
+│ System           │ Consensus Used For                   │
+├──────────────────┼──────────────────────────────────────┤
+│ etcd             │ Key-value store (uses Raft)           │
+│ ZooKeeper        │ Configuration, leader election (ZAB)  │
+│ Consul           │ Service discovery (uses Raft)         │
+│ Kafka            │ Controller election, ISR (uses Raft)  │
+│ Redis Sentinel   │ Leader election (custom protocol)     │
+│ CockroachDB      │ Distributed SQL (uses Raft)           │
+│ MongoDB          │ Replica set election (custom Raft)    │
+│ PostgreSQL       │ Patroni uses etcd/ZooKeeper/Consul    │
+└────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>Using etcd for Leader Election in Node.js</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Etcd3</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;etcd3&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Etcd3</span><span class="p">({</span><span class="w"> </span><span class="nx">hosts</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;http://etcd:2379&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">LeaderElection</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">client</span><span class="p">,</span><span class="w"> </span><span class="nx">electionName</span><span class="p">,</span><span class="w"> </span><span class="nx">instanceId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">client</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">electionName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">electionName</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">instanceId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">instanceId</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">isLeader</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">start</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">lease</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">client</span><span class="p">.</span><span class="nx">lease</span><span class="p">(</span><span class="mf">10</span><span class="p">);</span><span class="w"> </span><span class="c1">// 10 second TTL</span>
+<span class="w">    </span><span class="nx">lease</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;lost&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">isLeader</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Lost leadership, re-electing...&#39;</span><span class="p">);</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">start</span><span class="p">();</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`election/</span><span class="si">${</span><span class="k">this</span><span class="p">.</span><span class="nx">electionName</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Try to become leader (atomic put-if-absent)</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">client</span><span class="p">.</span><span class="k">if</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;Create&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;==&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span>
+<span class="w">        </span><span class="p">.</span><span class="nx">then</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">client</span><span class="p">.</span><span class="nx">put</span><span class="p">(</span><span class="nx">key</span><span class="p">).</span><span class="nx">value</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">instanceId</span><span class="p">).</span><span class="nx">lease</span><span class="p">(</span><span class="nx">lease</span><span class="p">.</span><span class="nx">grant</span><span class="p">))</span>
+<span class="w">        </span><span class="p">.</span><span class="nx">commit</span><span class="p">();</span>
+
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">isLeader</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="k">this</span><span class="p">.</span><span class="nx">instanceId</span><span class="si">}</span><span class="sb">: I am the leader!`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Someone else is leader — watch for changes</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">isLeader</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="k">this</span><span class="p">.</span><span class="nx">instanceId</span><span class="si">}</span><span class="sb">: Following. Watching for leader change...`</span><span class="p">);</span>
+
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">watcher</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">client</span><span class="p">.</span><span class="nx">watch</span><span class="p">().</span><span class="nx">key</span><span class="p">(</span><span class="nx">key</span><span class="p">).</span><span class="nx">create</span><span class="p">();</span>
+<span class="w">      </span><span class="nx">watcher</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;delete&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">watcher</span><span class="p">.</span><span class="nx">cancel</span><span class="p">();</span>
+<span class="w">        </span><span class="k">this</span><span class="p">.</span><span class="nx">start</span><span class="p">();</span><span class="w"> </span><span class="c1">// Re-try election</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">election</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">LeaderElection</span><span class="p">(</span><span class="nx">client</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;scheduler&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;instance-1&#39;</span><span class="p">);</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">election</span><span class="p">.</span><span class="nx">start</span><span class="p">();</span>
+
+<span class="c1">// Only leader runs scheduled tasks</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">election</span><span class="p">.</span><span class="nx">isLeader</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">runScheduledTasks</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Paxos vs Raft</h2>
+<div class="highlight"><pre><span></span><code>┌────────────────┬─────────────────────┬────────────────────┐
+│                │ Paxos               │ Raft               │
+├────────────────┼─────────────────────┼────────────────────┤
+│ Understandable │ Notoriously hard    │ Designed to be     │
+│                │                     │ understandable     │
+├────────────────┼─────────────────────┼────────────────────┤
+│ Leader         │ Multiple proposers  │ Single leader      │
+│                │ (no fixed leader)   │                    │
+├────────────────┼─────────────────────┼────────────────────┤
+│ Phases         │ Prepare + Accept    │ Leader election +  │
+│                │ (2 phases per value)│ Log replication    │
+├────────────────┼─────────────────────┼────────────────────┤
+│ Used in        │ Google Chubby       │ etcd, Consul,      │
+│                │ (historical)        │ CockroachDB        │
+└────────────────┴─────────────────────┴────────────────────┘
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Implementing your own consensus</strong>: Use established implementations (etcd, ZooKeeper, Consul). Rolling your own is extremely error-prone.</li>
+<li><strong>Not handling split brain</strong>: If two nodes both think they are leader, data corruption can occur. Always verify leadership before performing leader-only operations.</li>
+<li><strong>Network partition between minority and majority</strong>: The minority partition cannot elect a leader (no majority). Ensure your cluster has an odd number of nodes.</li>
+<li><strong>Not testing failure scenarios</strong>: Consensus algorithms are only as good as their implementation. Test node crashes, network partitions, and slow nodes.</li>
+</ol>
+<h2>Summary</h2>
+<p>Distributed consensus enables multiple nodes to agree on values, leader election, and state machine replication. Raft is the preferred algorithm for its understandability — it separates leader election from log replication and guarantees safety through term-based voting. In practice, use established consensus systems (etcd, Consul, ZooKeeper) rather than implementing your own. Consensus is the foundation of reliable distributed systems, from database replication to service discovery.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Leader Election with etcd</div>
+                    <div class="exercise-desc"><p>Implement leader election using etcd. Run 3 Node.js instances that compete for leadership. When the leader stops, another instance should take over within the TTL.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use etcd lease with TTL. Put-if-absent for leader key. Watch for key deletion to trigger re-election.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Raft Visualization</div>
+                    <div class="exercise-desc"><p>Build a simple web-based Raft visualization with 5 nodes. Show leader election, heartbeats, and what happens when the leader crashes.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Express + WebSocket. Each 'node' is a state machine. Visualize state transitions with different colors.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Split Brain Detector</div>
+                    <div class="exercise-desc"><p>Create a monitoring system that detects split-brain scenarios in a cluster. Alert when multiple nodes claim leadership simultaneously.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Each leader writes its ID and timestamp to a shared store. Check for multiple recent leader claims.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Two nodes both acting as leader (split brain)</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Network partition isolated the old leader from the majority. The majority elected a new leader, but the old leader doesn't know and continues operating.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Leaders must verify their lease/term before performing write operations. Use fencing tokens that increase with each leadership change. Old leaders with stale tokens are rejected.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Cluster cannot elect a leader</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Even number of nodes causes tied votes. Or too many nodes are down, preventing a majority.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Always use an odd number of nodes (3, 5, 7). Ensure at least (N/2 + 1) nodes are healthy for the cluster to function.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://raft.github.io/raft.pdf" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag paper">paper</div>
+                    <div class="resource-title">The Raft Paper</div>
+                    
+                    <div class="resource-note">Original Raft paper - surprisingly readable</div>
+                    
+                </a>
+                
+                <a href="https://thesecretlivesofdata.com/raft/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag interactive">interactive</div>
+                    <div class="resource-title">Raft Visualization</div>
+                    
+                    <div class="resource-note">Animated visualization of the Raft algorithm</div>
+                    
+                </a>
+                
+                <a href="https://etcd.io/docs/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">etcd Documentation</div>
+                    
+                </a>
+                
+                <a href="https://dataintensive.net/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Designing Data-Intensive Applications</div>
+                    
+                    <div class="resource-note">Chapter 9 covers consensus in detail</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/8.8.1-js.html" class="btn">&larr; CAP Theorem and Consistency Models</a>
+            
+            
+            <a href="/backend-learning/lesson/8.8.3-js.html" class="btn">Idempotency and Distributed Transactions &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-js.html">&larr; Back to System Design & Scalability</a>
+        </div>
+    </div>
+</body>
+</html>

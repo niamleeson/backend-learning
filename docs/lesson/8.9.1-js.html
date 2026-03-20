@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distributed Tracing with OpenTelemetry for Node.js - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-js.html">System Design & Scalability</a> &rsaquo;
+            Observability
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.9.1</span>
+                <span>~3h</span>
+            </div>
+            <h1>Distributed Tracing with OpenTelemetry for Node.js</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Distributed tracing is like a package tracking system. When you ship a package (request), it gets a tracking number (trace ID). At each facility (service) it passes through, a scan is recorded (span). You can follow the package's entire journey — see where it was, how long each stop took, and where it got stuck — all from one tracking number.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Distributed Tracing with OpenTelemetry for Node.js</h1>
+<h2>Introduction</h2>
+<p>In a microservices architecture, a single user request can traverse 5-10 services. When something goes wrong — a slow response, an error, a timeout — you need to trace the request across all services to find the root cause. <strong>Distributed tracing</strong> with OpenTelemetry gives you this visibility by propagating trace context across service boundaries.</p>
+<h2>Why Distributed Tracing?</h2>
+<div class="highlight"><pre><span></span><code>Without tracing:
+  User: &quot;The checkout is slow&quot;
+  Developer: Checks API Gateway logs... looks fine (200ms)
+  Developer: Checks Order Service logs... looks fine (150ms)
+  Developer: Checks Payment Service logs... AH HA! (3500ms)
+  Developer: Checks Payment Service code... calls Fraud Service
+  Developer: Checks Fraud Service logs... (2800ms for ML model)
+
+  Time to debug: 45 minutes
+
+With tracing:
+  User: &quot;The checkout is slow&quot;
+  Developer: Opens trace in Jaeger/Zipkin
+  Developer: Sees full request waterfall instantly:
+
+  API Gateway ─────────────────────── 4200ms
+    └─ Order Service ──────────────── 3800ms
+         └─ Payment Service ───────── 3500ms
+              └─ Fraud Service ────── 2800ms ← BOTTLENECK
+                   └─ ML Model ────── 2500ms
+
+  Time to debug: 2 minutes
+</code></pre></div>
+
+<h2>OpenTelemetry Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────┐
+│                    Your Application                       │
+│                                                          │
+│  ┌───────────┐  ┌──────────┐  ┌────────────────────┐    │
+│  │ Traces    │  │ Metrics  │  │ Logs               │    │
+│  │ (spans)   │  │(counters)│  │(structured events) │    │
+│  └─────┬─────┘  └────┬─────┘  └──────────┬─────────┘    │
+│        │              │                    │              │
+│  ┌─────▼──────────────▼────────────────────▼─────────┐   │
+│  │           OpenTelemetry SDK                        │   │
+│  │  Auto-instrumentation + Manual spans               │   │
+│  └──────────────────────┬────────────────────────────┘   │
+│                         │                                │
+│  ┌──────────────────────▼────────────────────────────┐   │
+│  │        OTLP Exporter (OpenTelemetry Protocol)      │   │
+│  └──────────────────────┬────────────────────────────┘   │
+└─────────────────────────┼────────────────────────────────┘
+                          │
+                          ▼
+              ┌──────────────────────┐
+              │   OTel Collector     │
+              │  (receives, process, │
+              │   exports telemetry) │
+              └──────────┬───────────┘
+                         │
+          ┌──────────────┼──────────────┐
+          │              │              │
+          ▼              ▼              ▼
+    ┌──────────┐  ┌──────────┐  ┌──────────┐
+    │  Jaeger  │  │Prometheus│  │  Loki    │
+    │ (traces) │  │(metrics) │  │ (logs)   │
+    └──────────┘  └──────────┘  └──────────┘
+</code></pre></div>
+
+<h2>Setup</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// tracing.js - MUST be imported BEFORE any other modules</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">NodeSDK</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@opentelemetry/sdk-node&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">getNodeAutoInstrumentations</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@opentelemetry/auto-instrumentations-node&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">OTLPTraceExporter</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@opentelemetry/exporter-trace-otlp-http&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">OTLPMetricExporter</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@opentelemetry/exporter-metrics-otlp-http&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PeriodicExportingMetricReader</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@opentelemetry/sdk-metrics&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Resource</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@opentelemetry/resources&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ATTR_SERVICE_NAME</span><span class="p">,</span><span class="w"> </span><span class="nx">ATTR_SERVICE_VERSION</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@opentelemetry/semantic-conventions&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">sdk</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">NodeSDK</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Resource</span><span class="p">({</span>
+<span class="w">    </span><span class="p">[</span><span class="nx">ATTR_SERVICE_NAME</span><span class="p">]</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">SERVICE_NAME</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;order-service&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">[</span><span class="nx">ATTR_SERVICE_VERSION</span><span class="p">]</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">SERVICE_VERSION</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;1.0.0&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">environment</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">NODE_ENV</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;development&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}),</span>
+
+<span class="w">  </span><span class="c1">// Trace exporter</span>
+<span class="w">  </span><span class="nx">traceExporter</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">OTLPTraceExporter</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">url</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">OTEL_EXPORTER_OTLP_ENDPOINT</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;http://otel-collector:4318/v1/traces&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}),</span>
+
+<span class="w">  </span><span class="c1">// Metric exporter</span>
+<span class="w">  </span><span class="nx">metricReader</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PeriodicExportingMetricReader</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">exporter</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">OTLPMetricExporter</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">url</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">OTEL_EXPORTER_OTLP_ENDPOINT</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;http://otel-collector:4318/v1/metrics&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}),</span>
+<span class="w">    </span><span class="nx">exportIntervalMillis</span><span class="o">:</span><span class="w"> </span><span class="mf">30000</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}),</span>
+
+<span class="w">  </span><span class="c1">// Auto-instrumentation for common libraries</span>
+<span class="w">  </span><span class="nx">instrumentations</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="nx">getNodeAutoInstrumentations</span><span class="p">({</span>
+<span class="w">      </span><span class="s1">&#39;@opentelemetry/instrumentation-express&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">enabled</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="s1">&#39;@opentelemetry/instrumentation-http&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">enabled</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="s1">&#39;@opentelemetry/instrumentation-pg&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">enabled</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="s1">&#39;@opentelemetry/instrumentation-redis&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">enabled</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="s1">&#39;@opentelemetry/instrumentation-ioredis&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">enabled</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">}),</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="p">});</span>
+
+<span class="nx">sdk</span><span class="p">.</span><span class="nx">start</span><span class="p">();</span>
+
+<span class="c1">// Graceful shutdown</span>
+<span class="nx">process</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;SIGTERM&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">sdk</span><span class="p">.</span><span class="nx">shutdown</span><span class="p">().</span><span class="nx">then</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">exit</span><span class="p">(</span><span class="mf">0</span><span class="p">));</span>
+<span class="p">});</span>
+
+<span class="k">export</span><span class="w"> </span><span class="k">default</span><span class="w"> </span><span class="nx">sdk</span><span class="p">;</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// app.js</span>
+<span class="k">import</span><span class="w"> </span><span class="s1">&#39;./tracing.js&#39;</span><span class="p">;</span><span class="w"> </span><span class="c1">// MUST be first import!</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@prisma/client&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+<span class="c1">// Auto-instrumentation will trace all Express routes,</span>
+<span class="c1">// HTTP calls, database queries, and Redis operations automatically</span>
+</code></pre></div>
+
+<h2>Manual Spans</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">trace</span><span class="p">,</span><span class="w"> </span><span class="nx">SpanStatusCode</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@opentelemetry/api&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">tracer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">trace</span><span class="p">.</span><span class="nx">getTracer</span><span class="p">(</span><span class="s1">&#39;order-service&#39;</span><span class="p">);</span>
+
+<span class="c1">// Add custom spans for business logic</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">processOrder</span><span class="p">(</span><span class="nx">orderData</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">tracer</span><span class="p">.</span><span class="nx">startActiveSpan</span><span class="p">(</span><span class="s1">&#39;processOrder&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">span</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">span</span><span class="p">.</span><span class="nx">setAttribute</span><span class="p">(</span><span class="s1">&#39;order.id&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">orderData</span><span class="p">.</span><span class="nx">orderId</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">span</span><span class="p">.</span><span class="nx">setAttribute</span><span class="p">(</span><span class="s1">&#39;order.total&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">orderData</span><span class="p">.</span><span class="nx">total</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">span</span><span class="p">.</span><span class="nx">setAttribute</span><span class="p">(</span><span class="s1">&#39;order.items_count&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">orderData</span><span class="p">.</span><span class="nx">items</span><span class="p">.</span><span class="nx">length</span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// Child span for validation</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">validationResult</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tracer</span><span class="p">.</span><span class="nx">startActiveSpan</span><span class="p">(</span><span class="s1">&#39;validateOrder&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">validationSpan</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">validateItems</span><span class="p">(</span><span class="nx">orderData</span><span class="p">.</span><span class="nx">items</span><span class="p">);</span>
+<span class="w">        </span><span class="nx">validationSpan</span><span class="p">.</span><span class="nx">setAttribute</span><span class="p">(</span><span class="s1">&#39;validation.items_checked&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">itemsChecked</span><span class="p">);</span>
+<span class="w">        </span><span class="nx">validationSpan</span><span class="p">.</span><span class="nx">end</span><span class="p">();</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span>
+<span class="w">      </span><span class="p">});</span>
+
+<span class="w">      </span><span class="c1">// Child span for payment</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">paymentResult</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tracer</span><span class="p">.</span><span class="nx">startActiveSpan</span><span class="p">(</span><span class="s1">&#39;chargePayment&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">paymentSpan</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">paymentSpan</span><span class="p">.</span><span class="nx">setAttribute</span><span class="p">(</span><span class="s1">&#39;payment.amount&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">orderData</span><span class="p">.</span><span class="nx">total</span><span class="p">);</span>
+<span class="w">        </span><span class="nx">paymentSpan</span><span class="p">.</span><span class="nx">setAttribute</span><span class="p">(</span><span class="s1">&#39;payment.method&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">orderData</span><span class="p">.</span><span class="nx">paymentMethod</span><span class="p">);</span>
+
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">paymentService</span><span class="p">.</span><span class="nx">charge</span><span class="p">(</span><span class="nx">orderData</span><span class="p">);</span>
+<span class="w">        </span><span class="nx">paymentSpan</span><span class="p">.</span><span class="nx">setAttribute</span><span class="p">(</span><span class="s1">&#39;payment.charge_id&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">chargeId</span><span class="p">);</span>
+<span class="w">        </span><span class="nx">paymentSpan</span><span class="p">.</span><span class="nx">end</span><span class="p">();</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span>
+<span class="w">      </span><span class="p">});</span>
+
+<span class="w">      </span><span class="nx">span</span><span class="p">.</span><span class="nx">setAttribute</span><span class="p">(</span><span class="s1">&#39;order.status&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;completed&#39;</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">span</span><span class="p">.</span><span class="nx">setStatus</span><span class="p">({</span><span class="w"> </span><span class="nx">code</span><span class="o">:</span><span class="w"> </span><span class="nx">SpanStatusCode</span><span class="p">.</span><span class="nx">OK</span><span class="w"> </span><span class="p">});</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">success</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">chargeId</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentResult</span><span class="p">.</span><span class="nx">chargeId</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">span</span><span class="p">.</span><span class="nx">setStatus</span><span class="p">({</span><span class="w"> </span><span class="nx">code</span><span class="o">:</span><span class="w"> </span><span class="nx">SpanStatusCode</span><span class="p">.</span><span class="nx">ERROR</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="p">});</span>
+<span class="w">      </span><span class="nx">span</span><span class="p">.</span><span class="nx">recordException</span><span class="p">(</span><span class="nx">err</span><span class="p">);</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">finally</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">span</span><span class="p">.</span><span class="nx">end</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Context Propagation Across Services</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">context</span><span class="p">,</span><span class="w"> </span><span class="nx">propagation</span><span class="p">,</span><span class="w"> </span><span class="nx">trace</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@opentelemetry/api&#39;</span><span class="p">;</span>
+
+<span class="c1">// Service A: Make HTTP call to Service B (auto-instrumented)</span>
+<span class="c1">// The HTTP instrumentation automatically injects trace context headers</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s1">&#39;http://order-service:3002/api/orders&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/json&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">orderData</span><span class="p">),</span>
+<span class="p">});</span>
+<span class="c1">// Headers like &#39;traceparent&#39; are added automatically</span>
+
+<span class="c1">// For manual propagation (e.g., message queues):</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">injectTraceContext</span><span class="p">(</span><span class="nx">carrier</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">propagation</span><span class="p">.</span><span class="nx">inject</span><span class="p">(</span><span class="nx">context</span><span class="p">.</span><span class="nx">active</span><span class="p">(),</span><span class="w"> </span><span class="nx">carrier</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">carrier</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">extractTraceContext</span><span class="p">(</span><span class="nx">carrier</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">propagation</span><span class="p">.</span><span class="nx">extract</span><span class="p">(</span><span class="nx">context</span><span class="p">.</span><span class="nx">active</span><span class="p">(),</span><span class="w"> </span><span class="nx">carrier</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="c1">// Producer: Inject into message headers</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">publishEvent</span><span class="p">(</span><span class="nx">topic</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">headers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{};</span>
+<span class="w">  </span><span class="nx">injectTraceContext</span><span class="p">(</span><span class="nx">headers</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">producer</span><span class="p">.</span><span class="nx">send</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">topic</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">messages</span><span class="o">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">      </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">data</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">headers</span><span class="p">,</span><span class="w"> </span><span class="c1">// Contains traceparent header</span>
+<span class="w">    </span><span class="p">}],</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="c1">// Consumer: Extract from message headers</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">handleMessage</span><span class="p">(</span><span class="nx">message</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">parentContext</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">extractTraceContext</span><span class="p">(</span><span class="nx">message</span><span class="p">.</span><span class="nx">headers</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Create child span in the extracted context</span>
+<span class="w">  </span><span class="nx">context</span><span class="p">.</span><span class="kd">with</span><span class="p">(</span><span class="nx">parentContext</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">tracer</span><span class="p">.</span><span class="nx">startActiveSpan</span><span class="p">(</span><span class="s1">&#39;processMessage&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">span</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">span</span><span class="p">.</span><span class="nx">setAttribute</span><span class="p">(</span><span class="s1">&#39;messaging.topic&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="p">.</span><span class="nx">topic</span><span class="p">);</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">processEvent</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">message</span><span class="p">.</span><span class="nx">value</span><span class="p">));</span>
+<span class="w">      </span><span class="nx">span</span><span class="p">.</span><span class="nx">end</span><span class="p">();</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Custom Metrics</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">metrics</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@opentelemetry/api&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">meter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">metrics</span><span class="p">.</span><span class="nx">getMeter</span><span class="p">(</span><span class="s1">&#39;order-service&#39;</span><span class="p">);</span>
+
+<span class="c1">// Counter</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">orderCounter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">meter</span><span class="p">.</span><span class="nx">createCounter</span><span class="p">(</span><span class="s1">&#39;orders.created&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">description</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Number of orders created&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">unit</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;orders&#39;</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="c1">// Histogram</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">orderValueHistogram</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">meter</span><span class="p">.</span><span class="nx">createHistogram</span><span class="p">(</span><span class="s1">&#39;orders.value&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">description</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Distribution of order values&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">unit</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;USD&#39;</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="c1">// UpDownCounter (can go up and down)</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">activeOrders</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">meter</span><span class="p">.</span><span class="nx">createUpDownCounter</span><span class="p">(</span><span class="s1">&#39;orders.active&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">description</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Number of currently active orders&#39;</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="c1">// Usage</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/orders&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">createOrder</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">orderCounter</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="s1">&#39;order.type&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">type</span><span class="p">,</span>
+<span class="w">    </span><span class="s1">&#39;order.region&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">region</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">orderValueHistogram</span><span class="p">.</span><span class="nx">record</span><span class="p">(</span><span class="nx">order</span><span class="p">.</span><span class="nx">total</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="s1">&#39;order.type&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">type</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">activeOrders</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="mf">1</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">order</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Docker Compose with OTel Collector and Jaeger</h2>
+<div class="highlight"><pre><span></span><code><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;3.8&#39;</span>
+<span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">otel-collector</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">otel/opentelemetry-collector-contrib</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;4317:4317&quot;</span><span class="w">   </span><span class="c1"># gRPC</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;4318:4318&quot;</span><span class="w">   </span><span class="c1"># HTTP</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./otel-config.yaml:/etc/otel/config.yaml</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;--config=/etc/otel/config.yaml&quot;</span><span class="p p-Indicator">]</span>
+
+<span class="w">  </span><span class="nt">jaeger</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">jaegertracing/all-in-one:latest</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;16686:16686&quot;</span><span class="w">  </span><span class="c1"># Jaeger UI</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;14250:14250&quot;</span><span class="w">  </span><span class="c1"># gRPC</span>
+
+<span class="w">  </span><span class="nt">prometheus</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">prom/prometheus</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;9090:9090&quot;</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./prometheus.yml:/etc/prometheus/prometheus.yml</span>
+
+<span class="w">  </span><span class="nt">order-service</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">build</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./apps/order-service</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">SERVICE_NAME</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">order-service</span>
+<span class="w">      </span><span class="nt">OTEL_EXPORTER_OTLP_ENDPOINT</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http://otel-collector:4318</span>
+<span class="w">    </span><span class="nt">depends_on</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">otel-collector</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># otel-config.yaml</span>
+<span class="nt">receivers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">otlp</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">protocols</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">grpc</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">endpoint</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.0.0.0:4317</span>
+<span class="w">      </span><span class="nt">http</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">endpoint</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.0.0.0:4318</span>
+
+<span class="nt">processors</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">batch</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1s</span>
+<span class="w">    </span><span class="nt">send_batch_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1024</span>
+
+<span class="nt">exporters</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">jaeger</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">endpoint</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">jaeger:14250</span>
+<span class="w">    </span><span class="nt">tls</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">insecure</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">prometheus</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">endpoint</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.0.0.0:8889</span>
+
+<span class="nt">service</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">pipelines</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">traces</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">receivers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">otlp</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">processors</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">batch</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">exporters</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">jaeger</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">metrics</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">receivers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">otlp</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">processors</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">batch</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">exporters</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">prometheus</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Importing tracing after other modules</strong>: OpenTelemetry must be initialized before importing Express, pg, ioredis, etc. The auto-instrumentation patches these modules at import time.</li>
+<li><strong>Not ending spans</strong>: Unclosed spans leak memory and produce incomplete traces. Always use try/finally.</li>
+<li><strong>Too many spans</strong>: Creating a span for every function call creates noise. Span meaningful operations only.</li>
+<li><strong>Not propagating context in async boundaries</strong>: Use <code>context.with()</code> when crossing async boundaries like message queues.</li>
+</ol>
+<h2>Summary</h2>
+<p>OpenTelemetry provides a unified standard for distributed tracing, metrics, and logging. Auto-instrumentation captures traces for Express, HTTP, PostgreSQL, and Redis with zero code changes. Manual spans add business-context to traces. Context propagation links spans across services via HTTP headers or message queue headers. Use Jaeger for trace visualization and Prometheus for metrics. Always initialize OpenTelemetry before importing application modules.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">OpenTelemetry Setup</div>
+                    <div class="exercise-desc"><p>Set up OpenTelemetry with auto-instrumentation for an Express + PostgreSQL + Redis application. Configure Jaeger as the trace backend and visualize request traces.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Import tracing.js before all other imports. Use getNodeAutoInstrumentations(). Start Jaeger with Docker.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Cross-Service Tracing</div>
+                    <div class="exercise-desc"><p>Build two microservices that communicate via HTTP. Set up trace context propagation so a single trace spans both services. View the connected trace in Jaeger.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Auto-instrumentation handles HTTP propagation. Both services need OTel SDK configured with the same collector endpoint.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Custom Business Metrics</div>
+                    <div class="exercise-desc"><p>Add custom OpenTelemetry metrics to an order service: order count (counter), order value (histogram), and active orders (up-down counter). View in Prometheus/Grafana.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use meter.createCounter(), createHistogram(), createUpDownCounter(). Add labels for dimensions like order type and region.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Traces show disconnected spans (no parent-child relationship)</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Trace context is not being propagated between services. Services create independent root spans.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Ensure HTTP auto-instrumentation is enabled (it propagates traceparent header). For message queues, manually inject/extract trace context.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Auto-instrumentation not capturing database queries</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> OpenTelemetry SDK was initialized after the database client was imported.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Import and initialize the tracing module as the very first import in your application entry point, before any other modules.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://opentelemetry.io/docs/languages/js/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">OpenTelemetry Node.js</div>
+                    
+                </a>
+                
+                <a href="https://www.jaegertracing.io/docs/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Jaeger Documentation</div>
+                    
+                </a>
+                
+                <a href="https://opentelemetry.io/docs/collector/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">OpenTelemetry Collector</div>
+                    
+                </a>
+                
+                <a href="https://www.oreilly.com/library/view/distributed-tracing-in/9781492056621/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Distributed Tracing in Practice</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/8.9.2-js.html" class="btn">SLIs, SLOs, SLAs: Defining Reliability Targets &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-js.html">&larr; Back to System Design & Scalability</a>
+        </div>
+    </div>
+</body>
+</html>

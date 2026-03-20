@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Search Engine (Google) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Storage & Data Systems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.2.4</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a Search Engine (Google)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>A search engine is like a massive library with a card catalog. The web crawler is a team of librarians constantly visiting bookstores (websites), bringing back books (pages), and noting what each book is about. The indexer builds the card catalog (inverted index) -- under each subject, it lists which books mention it. When a patron (user) asks a question, the librarian does not read every book. Instead, they look up the subject in the card catalog, find matching books, and rank them by quality (PageRank) and relevance (TF-IDF). The most popular questions are posted on a bulletin board (cache) so the librarian does not even need to check the catalog.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Search Engine (Google)</h1>
+<h2>Introduction</h2>
+<p>A web search engine is arguably the most complex software system ever built. It crawls billions of web pages, indexes their content, and returns the most relevant results in under 200 milliseconds. In a system design interview, you are not expected to replicate Google -- but you must demonstrate understanding of the core components: web crawling, indexing, ranking, and serving. We will focus on the backend infrastructure and data systems that make search work.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li><strong>Web crawling</strong>: Discover and download web pages continuously</li>
+<li><strong>Indexing</strong>: Build a searchable index from crawled content</li>
+<li><strong>Search queries</strong>: Accept a text query and return ranked results</li>
+<li><strong>Autocomplete</strong>: Suggest queries as the user types</li>
+<li><strong>Snippet generation</strong>: Show relevant excerpts from matching pages</li>
+<li><strong>Freshness</strong>: New and updated content appears in results quickly</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li><strong>Latency</strong>: Search results returned in &lt; 200ms (p95)</li>
+<li><strong>Scale</strong>: Index 10B+ web pages, serve 100K queries/sec</li>
+<li><strong>Availability</strong>: 99.99% uptime for search serving</li>
+<li><strong>Freshness</strong>: Breaking news indexed within minutes</li>
+<li><strong>Relevance</strong>: Results should be highly relevant (measured by click-through rate)</li>
+</ul>
+<h2>Step 2: Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Web pages indexed:     10 billion
+Avg page size:         50 KB (text content after stripping HTML)
+Raw content:           10B * 50KB = 500 TB
+Inverted index size:   ~20% of raw content = 100 TB
+Total index (with metadata): ~200 TB
+
+Queries per second:    100,000 QPS (peak: 300K)
+Crawl rate:            1 billion pages/day (recrawl + new)
+Bandwidth for crawling: 1B * 50KB / 86400 = ~580 GB/s
+
+Serving infrastructure:
+  Each query touches ~100 index shards
+  Each shard returns top 10 results in ~50ms
+  Merge + rank in ~50ms
+  Total: ~200ms
+</code></pre></div>
+
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌────────────────────────────────────────────────────────────────────┐
+│                        Search Architecture                         │
+└────────────────────────────────────────────────────────────────────┘
+
+           ┌──────────────────────────────────────┐
+           │           Search Frontend             │
+           │     (Query parsing, autocomplete)     │
+           └──────────────────┬───────────────────┘
+                              │
+                              ▼
+           ┌──────────────────────────────────────┐
+           │           Query Coordinator           │
+           │  (Fan-out to shards, merge results)   │
+           └───┬──────────┬──────────┬────────────┘
+               │          │          │
+               ▼          ▼          ▼
+          ┌────────┐ ┌────────┐ ┌────────┐
+          │Shard 1 │ │Shard 2 │ │Shard N │   Index Serving
+          │        │ │        │ │        │   Cluster
+          │Inverted│ │Inverted│ │Inverted│   (100+ shards)
+          │Index   │ │Index   │ │Index   │
+          └────────┘ └────────┘ └────────┘
+
+
+           Offline Pipeline (Batch + Streaming):
+
+┌─────────┐    ┌──────────┐    ┌───────────┐    ┌──────────────┐
+│  Web    │───&gt;│  URL     │───&gt;│  Content  │───&gt;│   Indexer    │
+│ Crawler │    │ Frontier │    │ Processor │    │  (builds     │
+│         │    │ (queue)  │    │ (parse,   │    │   inverted   │
+│         │    │          │    │  extract) │    │   index)     │
+└─────────┘    └──────────┘    └───────────┘    └──────┬───────┘
+                                                       │
+                                                       ▼
+                                                ┌──────────────┐
+                                                │  Index       │
+                                                │  Segments    │
+                                                │  (pushed to  │
+                                                │   serving)   │
+                                                └──────────────┘
+
+           Ranking Pipeline:
+
+┌──────────────┐    ┌─────────────┐    ┌────────────────┐
+│  PageRank    │    │  Link       │    │  Click-Through │
+│  Computation │    │  Analysis   │    │  Rate Model    │
+│  (offline)   │    │             │    │  (ML ranking)  │
+└──────────────┘    └─────────────┘    └────────────────┘
+</code></pre></div>
+
+<h2>Step 4: API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// Search endpoint</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/search&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">q</span><span class="p">,</span><span class="w">                    </span><span class="c1">// search query</span>
+<span class="w">    </span><span class="nx">page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w">             </span><span class="c1">// page number</span>
+<span class="w">    </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">10</span><span class="p">,</span><span class="w">           </span><span class="c1">// results per page</span>
+<span class="w">    </span><span class="nx">lang</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;en&#39;</span><span class="p">,</span><span class="w">          </span><span class="c1">// language filter</span>
+<span class="w">    </span><span class="nx">freshness</span><span class="p">,</span><span class="w">            </span><span class="c1">// &#39;hour&#39;, &#39;day&#39;, &#39;week&#39;, &#39;month&#39;</span>
+<span class="w">    </span><span class="nx">safe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;moderate&#39;</span><span class="p">,</span><span class="w">    </span><span class="c1">// safe search level</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">q</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">q</span><span class="p">.</span><span class="nx">trim</span><span class="p">().</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Query is required&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">startTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">hrtime</span><span class="p">.</span><span class="nx">bigint</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// 1. Parse and analyze query</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">parsedQuery</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">queryParser</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">q</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">lang</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="c1">// { terms: [&#39;distributed&#39;, &#39;systems&#39;], phrases: [&#39;cap theorem&#39;],</span>
+<span class="w">  </span><span class="c1">//   filters: { site: null, filetype: null }, intent: &#39;informational&#39; }</span>
+
+<span class="w">  </span><span class="c1">// 2. Check query cache</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">cacheKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`search:</span><span class="si">${</span><span class="nx">lang</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">q</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">page</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">cached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">cacheKey</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">cached</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">elapsed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Number</span><span class="p">(</span><span class="nx">process</span><span class="p">.</span><span class="nx">hrtime</span><span class="p">.</span><span class="nx">bigint</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">startTime</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1e6</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">cached</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">result</span><span class="p">.</span><span class="nx">meta</span><span class="p">.</span><span class="nx">cached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">result</span><span class="p">.</span><span class="nx">meta</span><span class="p">.</span><span class="nx">took_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">elapsed</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 3. Fan out to index shards</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">shardResults</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">queryCoordinator</span><span class="p">.</span><span class="nx">fanOut</span><span class="p">(</span><span class="nx">parsedQuery</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">offset</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">page</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">freshness</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// 4. Merge and re-rank results</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">rankedResults</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ranker</span><span class="p">.</span><span class="nx">merge</span><span class="p">(</span><span class="nx">shardResults</span><span class="p">,</span><span class="w"> </span><span class="nx">parsedQuery</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 5. Generate snippets</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">resultsWithSnippets</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">rankedResults</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">result</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">title</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">title</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">url</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">url</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">snippet</span><span class="o">:</span><span class="w"> </span><span class="nx">snippetGenerator</span><span class="p">.</span><span class="nx">generate</span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">content</span><span class="p">,</span><span class="w"> </span><span class="nx">parsedQuery</span><span class="p">.</span><span class="nx">terms</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">favicon</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">favicon</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">publishedAt</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">publishedAt</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}))</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">elapsed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Number</span><span class="p">(</span><span class="nx">process</span><span class="p">.</span><span class="nx">hrtime</span><span class="p">.</span><span class="nx">bigint</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">startTime</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1e6</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">results</span><span class="o">:</span><span class="w"> </span><span class="nx">resultsWithSnippets</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">meta</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">query</span><span class="o">:</span><span class="w"> </span><span class="nx">q</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">total</span><span class="o">:</span><span class="w"> </span><span class="nx">shardResults</span><span class="p">.</span><span class="nx">totalHits</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">page</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">took_ms</span><span class="o">:</span><span class="w"> </span><span class="nx">elapsed</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">cached</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="c1">// Cache for 5 minutes</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">setex</span><span class="p">(</span><span class="nx">cacheKey</span><span class="p">,</span><span class="w"> </span><span class="mf">300</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">response</span><span class="p">));</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">response</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Autocomplete endpoint</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/suggest&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">q</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">suggestions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">autocompleteService</span><span class="p">.</span><span class="nx">suggest</span><span class="p">(</span><span class="nx">q</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Uses a Trie or prefix-based index of popular queries</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">suggestions</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Index a page (internal API for the crawler)</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/index&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">internalAuth</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">content</span><span class="p">,</span><span class="w"> </span><span class="nx">title</span><span class="p">,</span><span class="w"> </span><span class="nx">links</span><span class="p">,</span><span class="w"> </span><span class="nx">metadata</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">indexingPipeline</span><span class="p">.</span><span class="nx">index</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">url</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">content</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">title</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">links</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">metadata</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">indexedAt</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">indexed</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 5: Database Schema / Data Structures</h2>
+<h3>The Inverted Index</h3>
+<p>The inverted index is the core data structure. It maps every word to the list of documents containing it.</p>
+<div class="highlight"><pre><span></span><code>Forward Index (what a page contains):
+  doc_1: [&quot;the&quot;, &quot;cat&quot;, &quot;sat&quot;, &quot;on&quot;, &quot;the&quot;, &quot;mat&quot;]
+  doc_2: [&quot;the&quot;, &quot;dog&quot;, &quot;sat&quot;, &quot;on&quot;, &quot;the&quot;, &quot;log&quot;]
+
+Inverted Index (which pages contain a word):
+  &quot;cat&quot;  -&gt; [(doc_1, pos:1, tf:1)]
+  &quot;sat&quot;  -&gt; [(doc_1, pos:2, tf:1), (doc_2, pos:2, tf:1)]
+  &quot;dog&quot;  -&gt; [(doc_2, pos:1, tf:1)]
+  &quot;mat&quot;  -&gt; [(doc_1, pos:5, tf:1)]
+  &quot;log&quot;  -&gt; [(doc_2, pos:5, tf:1)]
+  &quot;the&quot;  -&gt; [(doc_1, pos:0, tf:2), (doc_2, pos:0, tf:2)]
+  &quot;on&quot;   -&gt; [(doc_1, pos:3, tf:1), (doc_2, pos:3, tf:1)]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">InvertedIndex</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span><span class="w">       </span><span class="c1">// term -&gt; PostingList</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">documents</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span><span class="w">   </span><span class="c1">// docId -&gt; document metadata</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">docCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">addDocument</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">content</span><span class="p">,</span><span class="w"> </span><span class="nx">metadata</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">terms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">tokenize</span><span class="p">(</span><span class="nx">content</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">termFreqs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+
+<span class="w">    </span><span class="nx">terms</span><span class="p">.</span><span class="nx">forEach</span><span class="p">((</span><span class="nx">term</span><span class="p">,</span><span class="w"> </span><span class="nx">position</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">termFreqs</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">term</span><span class="p">))</span><span class="w"> </span><span class="nx">termFreqs</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">term</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">freq</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">positions</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">});</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">entry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">termFreqs</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">term</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">entry</span><span class="p">.</span><span class="nx">freq</span><span class="o">++</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">entry</span><span class="p">.</span><span class="nx">positions</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">position</span><span class="p">);</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">term</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">freq</span><span class="p">,</span><span class="w"> </span><span class="nx">positions</span><span class="w"> </span><span class="p">}]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">termFreqs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">this</span><span class="p">.</span><span class="nx">index</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">term</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">this</span><span class="p">.</span><span class="nx">index</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">term</span><span class="p">,</span><span class="w"> </span><span class="p">[]);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">index</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">term</span><span class="p">).</span><span class="nx">push</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">docId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">termFrequency</span><span class="o">:</span><span class="w"> </span><span class="nx">freq</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">positions</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">documents</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="p">...</span><span class="nx">metadata</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">totalTerms</span><span class="o">:</span><span class="w"> </span><span class="nx">terms</span><span class="p">.</span><span class="nx">length</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">docCount</span><span class="o">++</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">search</span><span class="p">(</span><span class="nx">query</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">10</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">queryTerms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">tokenize</span><span class="p">(</span><span class="nx">query</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">scores</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">term</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">queryTerms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">postings</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">index</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">term</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">idf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">docCount</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="p">(</span><span class="nx">postings</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">));</span>
+
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">posting</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">postings</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">doc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">documents</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">posting</span><span class="p">.</span><span class="nx">docId</span><span class="p">);</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">tf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">posting</span><span class="p">.</span><span class="nx">termFrequency</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">doc</span><span class="p">.</span><span class="nx">totalTerms</span><span class="p">;</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">tfidf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tf</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">idf</span><span class="p">;</span>
+
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">current</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">scores</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">posting</span><span class="p">.</span><span class="nx">docId</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">        </span><span class="nx">scores</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">posting</span><span class="p">.</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">current</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">tfidf</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">[...</span><span class="nx">scores</span><span class="p">.</span><span class="nx">entries</span><span class="p">()]</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">sort</span><span class="p">((</span><span class="nx">a</span><span class="p">,</span><span class="w"> </span><span class="nx">b</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">b</span><span class="p">[</span><span class="mf">1</span><span class="p">]</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">a</span><span class="p">[</span><span class="mf">1</span><span class="p">])</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">map</span><span class="p">(([</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">score</span><span class="p">])</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">        </span><span class="nx">docId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">score</span><span class="p">,</span>
+<span class="w">        </span><span class="p">...</span><span class="k">this</span><span class="p">.</span><span class="nx">documents</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">docId</span><span class="p">),</span>
+<span class="w">      </span><span class="p">}));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">tokenize</span><span class="p">(</span><span class="nx">text</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">text</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">toLowerCase</span><span class="p">()</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">replace</span><span class="p">(</span><span class="sr">/[^a-z0-9\s]/g</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="sr">/\s+/</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">t</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">t</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="nx">STOP_WORDS</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">t</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Document Metadata (PostgreSQL)</h3>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">pages</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">url</span><span class="w">             </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="k">domain</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">title</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">1000</span><span class="p">),</span>
+<span class="w">  </span><span class="n">content_hash</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">),</span><span class="w">            </span><span class="c1">-- SHA-256 of content</span>
+<span class="w">  </span><span class="n">page_rank</span><span class="w">       </span><span class="nb">FLOAT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="k">language</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">5</span><span class="p">),</span>
+<span class="w">  </span><span class="n">last_crawled_at</span><span class="w"> </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">last_modified</span><span class="w">   </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">),</span><span class="w">            </span><span class="c1">-- indexed, removed, error</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_pages_domain</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">pages</span><span class="p">(</span><span class="k">domain</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_pages_crawled</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">pages</span><span class="p">(</span><span class="n">last_crawled_at</span><span class="p">);</span>
+
+<span class="c1">-- URL frontier for the crawler</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">url_frontier</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">url</span><span class="w">           </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="k">domain</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">priority</span><span class="w">      </span><span class="nb">SMALLINT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span><span class="w">       </span><span class="c1">-- 1 (highest) to 10 (lowest)</span>
+<span class="w">  </span><span class="n">scheduled_at</span><span class="w">  </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">last_crawled</span><span class="w">  </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">crawl_count</span><span class="w">   </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">status</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;pending&#39;</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_frontier_schedule</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">url_frontier</span><span class="p">(</span><span class="n">priority</span><span class="p">,</span><span class="w"> </span><span class="n">scheduled_at</span><span class="p">)</span>
+<span class="w">  </span><span class="k">WHERE</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;pending&#39;</span><span class="p">;</span>
+</code></pre></div>
+
+<h2>Step 6: Deep Dive -- PageRank and Ranking</h2>
+<h3>PageRank Algorithm</h3>
+<p>PageRank treats the web as a graph where pages are nodes and hyperlinks are edges. A page's rank is proportional to the number and quality of pages linking to it.</p>
+<div class="highlight"><pre><span></span><code><span class="kd">function</span><span class="w"> </span><span class="nx">computePageRank</span><span class="p">(</span><span class="nx">graph</span><span class="p">,</span><span class="w"> </span><span class="nx">damping</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.85</span><span class="p">,</span><span class="w"> </span><span class="nx">iterations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">20</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">N</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">graph</span><span class="p">.</span><span class="nx">nodeCount</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">ranks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// Initialize all ranks equally</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">graph</span><span class="p">.</span><span class="nx">nodes</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">ranks</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">node</span><span class="p">,</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">N</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">iterations</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">newRanks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">graph</span><span class="p">.</span><span class="nx">nodes</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">let</span><span class="w"> </span><span class="nx">incomingRank</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">inLink</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">graph</span><span class="p">.</span><span class="nx">incomingLinks</span><span class="p">(</span><span class="nx">node</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">outDegree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">graph</span><span class="p">.</span><span class="nx">outgoingLinks</span><span class="p">(</span><span class="nx">inLink</span><span class="p">).</span><span class="nx">length</span><span class="p">;</span>
+<span class="w">        </span><span class="nx">incomingRank</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">ranks</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">inLink</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">outDegree</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="nx">newRanks</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">node</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="mf">1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">damping</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">N</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">damping</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">incomingRank</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Update ranks</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">node</span><span class="p">,</span><span class="w"> </span><span class="nx">rank</span><span class="p">]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">newRanks</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">ranks</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">node</span><span class="p">,</span><span class="w"> </span><span class="nx">rank</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">ranks</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Multi-Signal Ranking</h3>
+<p>Modern search engines combine many signals:</p>
+<div class="highlight"><pre><span></span><code>Final Score = w1 * TF-IDF
+            + w2 * PageRank
+            + w3 * FreshnessScore
+            + w4 * ClickThroughRate
+            + w5 * DomainAuthority
+            + w6 * QueryTermProximity
+            + w7 * ExactMatchBonus
+</code></pre></div>
+
+<h2>Step 7: Scaling Strategies</h2>
+<ol>
+<li><strong>Index sharding</strong>: Partition the index across hundreds of machines by document ID. Each shard holds a fraction of all documents.</li>
+<li><strong>Query fan-out</strong>: A query is sent to ALL shards in parallel. Each shard returns its top K results. The coordinator merges and re-ranks.</li>
+<li><strong>Index replication</strong>: Each shard is replicated 3+ times for availability. Queries are load-balanced across replicas.</li>
+<li><strong>Tiered indexing</strong>: Hot tier (recent, popular pages) on fast SSDs. Cold tier (old, rarely accessed pages) on cheaper storage.</li>
+<li><strong>Caching</strong>: Cache popular queries (the top 1000 queries account for a large percentage of traffic). Cache at multiple levels: result cache, posting list cache, document cache.</li>
+<li><strong>Incremental indexing</strong>: Instead of rebuilding the entire index, apply delta updates from the crawl stream.</li>
+</ol>
+<div class="highlight"><pre><span></span><code>Query Fan-Out Pattern:
+
+                    Query: &quot;distributed systems&quot;
+                              │
+                    ┌─────────┴──────────┐
+                    │  Query Coordinator  │
+                    └──┬──┬──┬──┬──┬──┬──┘
+                       │  │  │  │  │  │
+            ┌──────────┘  │  │  │  │  └──────────┐
+            ▼             ▼  ▼  ▼  ▼             ▼
+         Shard 1    Shard 2 ... Shard 50    Shard 100
+         Top 10     Top 10      Top 10      Top 10
+            │             │  │  │  │             │
+            └──────────┐  │  │  │  │  ┌──────────┘
+                    ┌──▼──▼──▼──▼──▼──▼──┐
+                    │  Merge &amp; Re-Rank    │
+                    │  Return Top 10      │
+                    └─────────────────────┘
+</code></pre></div>
+
+<h2>Step 8: Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Index partitioning</td>
+<td>By document</td>
+<td>By term</td>
+<td>By document (simpler, more balanced)</td>
+</tr>
+<tr>
+<td>Ranking</td>
+<td>Pure TF-IDF</td>
+<td>ML-based (learning to rank)</td>
+<td>ML-based for quality, TF-IDF as baseline</td>
+</tr>
+<tr>
+<td>Freshness</td>
+<td>Batch re-index daily</td>
+<td>Streaming updates</td>
+<td>Streaming for breaking news + daily batch for full crawl</td>
+</tr>
+<tr>
+<td>Crawl politeness</td>
+<td>Aggressive (max coverage)</td>
+<td>Polite (respect robots.txt, rate limit)</td>
+<td>Polite (mandatory for ethical and legal reasons)</td>
+</tr>
+<tr>
+<td>Index format</td>
+<td>Mutable (update in place)</td>
+<td>Immutable segments (merge)</td>
+<td>Immutable segments (simpler, better for caching)</td>
+</tr>
+<tr>
+<td>Autocomplete</td>
+<td>Trie in memory</td>
+<td>Elasticsearch prefix query</td>
+<td>Trie for speed at scale, ES for simplicity</td>
+</tr>
+</tbody>
+</table>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Mini Search Engine</div>
+                    <div class="exercise-desc"><p>Implement an in-memory inverted index in Node.js. Index 100 text documents (use Wikipedia excerpts or Lorem Ipsum). Implement TF-IDF scoring. Expose a search API that returns the top 10 results with scores and snippets highlighting matching terms.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Tokenize by splitting on whitespace, lowercasing, and removing stop words. For snippets, find the sentence containing the most query terms.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement PageRank</div>
+                    <div class="exercise-desc"><p>Build a simple web graph with 20 nodes and random edges. Implement the PageRank algorithm and verify that well-connected hub nodes get higher scores. Combine PageRank with TF-IDF to create a composite ranking score.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use an adjacency list for the graph. Run 20-50 iterations of PageRank until convergence (delta &lt; 0.0001). Normalize TF-IDF and PageRank scores before combining.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Query Fan-Out Simulation</div>
+                    <div class="exercise-desc"><p>Simulate a query coordinator that fans out to 10 index shards (each a separate in-memory inverted index). Each shard returns its top 5 results. Implement a merge function that re-ranks all 50 results and returns the global top 10. Measure fan-out latency.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Create 10 InvertedIndex instances, each with a different subset of documents. Use Promise.all to query them in parallel. The merge function sorts by score descending.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Search latency spikes during index updates</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Updating the inverted index in-place while serving queries causes lock contention and cache invalidation.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use an immutable segment-based approach. Build new index segments offline, then atomically swap them into the serving path. Old segments are garbage collected after all in-flight queries complete. This is how Lucene/Elasticsearch work.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Stale results for rapidly changing pages (e.g., news sites)</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The batch crawl and index pipeline has a multi-hour delay between crawling a page and it appearing in search results.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement a real-time indexing pipeline: high-priority URLs (news sites, social media) are crawled every few minutes via a streaming pipeline (Kafka). Updates are applied to a small real-time index that is merged with the main index at query time.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Crawler overloading target websites</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> No rate limiting per domain. The crawler sends hundreds of concurrent requests to the same domain.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement per-domain rate limiting in the URL frontier. Respect robots.txt crawl-delay directives. Use a domain-based queue where each domain has a minimum interval between requests (e.g., 1 request per second per domain).
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="http://infolab.stanford.edu/~backrub/google.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag paper">paper</div>
+                    <div class="resource-title">The Anatomy of a Large-Scale Search Engine (Google, 1998)</div>
+                    
+                    <div class="resource-note">The original Google paper by Brin and Page</div>
+                    
+                </a>
+                
+                <a href="https://www.elastic.co/guide/en/elasticsearch/reference/current/index.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Elasticsearch: The Definitive Guide</div>
+                    
+                    <div class="resource-note">Understand how a production-grade inverted index works</div>
+                    
+                </a>
+                
+                <a href="https://nlp.stanford.edu/IR-book/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Introduction to Information Retrieval</div>
+                    
+                    <div class="resource-note">Free online textbook covering TF-IDF, inverted indexes, and ranking algorithms</div>
+                    
+                </a>
+                
+                <a href="https://www.google.com/search/howsearchworks/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">How Google Search Works</div>
+                    
+                    <div class="resource-note">Google's own explanation of crawling, indexing, and ranking</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.2.3-js.html" class="btn">&larr; Design a Key-Value Store (Redis/DynamoDB)</a>
+            
+            
+            <a href="/backend-learning/lesson/9.2.5-js.html" class="btn">Design a Distributed Cache (Memcached) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

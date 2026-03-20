@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Graceful Degradation and Health Checks - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-7-js.html">Security & Reliability</a> &rsaquo;
+            Error Handling & Resilience
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">7.6.2</span>
+                <span>~2h</span>
+            </div>
+            <h1>Graceful Degradation and Health Checks</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of graceful degradation like a restaurant during a power outage. The kitchen gas stove still works, so they can serve hot food, but the blender is down so no smoothies. They tell customers 'limited menu tonight' rather than closing entirely. Health checks are like the health inspector: liveness checks that the building exists, and readiness checks that the kitchen is clean and stocked.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Graceful Degradation and Health Checks</h1>
+<h2>The Difference Between Crashing and Degrading</h2>
+<p>When a dependency fails, your application has two choices: crash entirely or continue serving requests at reduced functionality. <strong>Graceful degradation</strong> is the art of designing your system so that partial failures lead to partial -- not total -- outages.</p>
+<p>Health checks are the mechanism that lets load balancers, orchestrators (Kubernetes), and monitoring systems know whether your application can handle traffic and, importantly, <em>how well</em> it can handle traffic.</p>
+<h2>Graceful Degradation Strategies</h2>
+<h3>Strategy 1: Feature Flags and Fallbacks</h3>
+<p>When a non-critical service fails, disable the feature instead of failing the entire request.</p>
+<div class="highlight"><pre><span></span><code>┌────────────────────────────────────────────────────────┐
+│               Product Page Request                      │
+│                                                        │
+│  ┌──────────┐  ┌───────────────┐  ┌─────────────────┐ │
+│  │ Product  │  │ Recommendation│  │  Review Service  │ │
+│  │ Service  │  │   Service     │  │                  │ │
+│  │ (CORE)   │  │ (NON-CRITICAL)│  │ (NON-CRITICAL)   │ │
+│  └────┬─────┘  └───────┬───────┘  └────────┬─────────┘ │
+│       │                │                    │           │
+│    Product          Fails!              Slow (3s)      │
+│    data             ┌───────┐           ┌─────────┐    │
+│    returned         │Return │           │ Return  │    │
+│                     │empty  │           │ cached  │    │
+│                     │array  │           │ reviews │    │
+│                     └───────┘           └─────────┘    │
+│                                                        │
+│  Result: Page loads with product data, no recs,        │
+│  and slightly stale reviews. User is unblocked.        │
+└────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">CircuitBreaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;opossum&#39;</span><span class="p">);</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">ProductPageService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">productService</span><span class="p">,</span><span class="w"> </span><span class="nx">recommendationService</span><span class="p">,</span><span class="w"> </span><span class="nx">reviewService</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">productService</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">productService</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Non-critical services get circuit breakers with fallbacks</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">recBreaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">CircuitBreaker</span><span class="p">(</span>
+<span class="w">      </span><span class="p">(</span><span class="nx">productId</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">recommendationService</span><span class="p">.</span><span class="nx">getRecommendations</span><span class="p">(</span><span class="nx">productId</span><span class="p">),</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">2000</span><span class="p">,</span><span class="w"> </span><span class="nx">errorThresholdPercentage</span><span class="o">:</span><span class="w"> </span><span class="mf">50</span><span class="p">,</span><span class="w"> </span><span class="nx">resetTimeout</span><span class="o">:</span><span class="w"> </span><span class="mf">15000</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">recBreaker</span><span class="p">.</span><span class="nx">fallback</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">[]);</span><span class="w">  </span><span class="c1">// Return empty array</span>
+
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">reviewBreaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">CircuitBreaker</span><span class="p">(</span>
+<span class="w">      </span><span class="p">(</span><span class="nx">productId</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">reviewService</span><span class="p">.</span><span class="nx">getReviews</span><span class="p">(</span><span class="nx">productId</span><span class="p">),</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">3000</span><span class="p">,</span><span class="w"> </span><span class="nx">errorThresholdPercentage</span><span class="o">:</span><span class="w"> </span><span class="mf">50</span><span class="p">,</span><span class="w"> </span><span class="nx">resetTimeout</span><span class="o">:</span><span class="w"> </span><span class="mf">15000</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">reviewBreaker</span><span class="p">.</span><span class="nx">fallback</span><span class="p">((</span><span class="nx">productId</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">getCachedReviews</span><span class="p">(</span><span class="nx">productId</span><span class="p">)</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getProductPage</span><span class="p">(</span><span class="nx">productId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Core data -- if this fails, the whole request fails</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">product</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">productService</span><span class="p">.</span><span class="nx">getProduct</span><span class="p">(</span><span class="nx">productId</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Non-critical data -- fetched concurrently with fallbacks</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">recommendations</span><span class="p">,</span><span class="w"> </span><span class="nx">reviews</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">allSettled</span><span class="p">([</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">recBreaker</span><span class="p">.</span><span class="nx">fire</span><span class="p">(</span><span class="nx">productId</span><span class="p">),</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">reviewBreaker</span><span class="p">.</span><span class="nx">fire</span><span class="p">(</span><span class="nx">productId</span><span class="p">),</span>
+<span class="w">    </span><span class="p">]);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">product</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">recommendations</span><span class="o">:</span>
+<span class="w">        </span><span class="nx">recommendations</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;fulfilled&#39;</span>
+<span class="w">          </span><span class="o">?</span><span class="w"> </span><span class="nx">recommendations</span><span class="p">.</span><span class="nx">value</span>
+<span class="w">          </span><span class="o">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">      </span><span class="nx">reviews</span><span class="o">:</span>
+<span class="w">        </span><span class="nx">reviews</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;fulfilled&#39;</span>
+<span class="w">          </span><span class="o">?</span><span class="w"> </span><span class="nx">reviews</span><span class="p">.</span><span class="nx">value</span>
+<span class="w">          </span><span class="o">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">      </span><span class="nx">_degraded</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">recommendations</span><span class="o">:</span><span class="w"> </span><span class="nx">recommendations</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;rejected&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">reviews</span><span class="o">:</span><span class="w"> </span><span class="nx">reviews</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;rejected&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getCachedReviews</span><span class="p">(</span><span class="nx">productId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Return from local cache</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">cached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">cache</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`reviews:</span><span class="si">${</span><span class="nx">productId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">cached</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Strategy 2: Load Shedding</h3>
+<p>When your system is overloaded, it is better to reject some requests cleanly than to serve all of them poorly:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">LoadShedder</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">({</span><span class="w"> </span><span class="nx">maxConcurrent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span><span class="w"> </span><span class="nx">maxQueueSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">50</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">maxConcurrent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">maxConcurrent</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">maxQueueSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">maxQueueSize</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">activeRequests</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">queuedRequests</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">middleware</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">activeRequests</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">maxConcurrent</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">queuedRequests</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">maxQueueSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="c1">// Shed load: reject with 503</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">503</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">            </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Service overloaded&#39;</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">retryAfter</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span>
+<span class="w">          </span><span class="p">});</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">this</span><span class="p">.</span><span class="nx">queuedRequests</span><span class="o">++</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">activeRequests</span><span class="o">++</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">res</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;finish&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">this</span><span class="p">.</span><span class="nx">activeRequests</span><span class="o">--</span><span class="p">;</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">      </span><span class="nx">next</span><span class="p">();</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">shedder</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">LoadShedder</span><span class="p">({</span><span class="w"> </span><span class="nx">maxConcurrent</span><span class="o">:</span><span class="w"> </span><span class="mf">200</span><span class="p">,</span><span class="w"> </span><span class="nx">maxQueueSize</span><span class="o">:</span><span class="w"> </span><span class="mf">100</span><span class="w"> </span><span class="p">});</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">shedder</span><span class="p">.</span><span class="nx">middleware</span><span class="p">());</span>
+</code></pre></div>
+
+<h3>Strategy 3: Reduced Functionality Mode</h3>
+<p>Switch entire subsystems to a degraded mode:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">degradedFeatures</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">setDegraded</span><span class="p">(</span><span class="nx">feature</span><span class="p">,</span><span class="w"> </span><span class="nx">isDegraded</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">degradedFeatures</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">feature</span><span class="p">,</span><span class="w"> </span><span class="nx">isDegraded</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">isDegraded</span><span class="p">(</span><span class="nx">feature</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">degradedFeatures</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">feature</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Middleware to auto-degrade based on circuit breaker state</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">autoDegradation</span><span class="p">(</span><span class="nx">breakerMap</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">feature</span><span class="p">,</span><span class="w"> </span><span class="nx">breaker</span><span class="p">]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">breakerMap</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;open&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">setDegraded</span><span class="p">(</span><span class="nx">feature</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">));</span>
+<span class="w">    </span><span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">setDegraded</span><span class="p">(</span><span class="nx">feature</span><span class="p">,</span><span class="w"> </span><span class="kc">false</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage in route</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/search&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">isDegraded</span><span class="p">(</span><span class="s1">&#39;search-service&#39;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Return cached/popular results instead of live search</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">popular</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getCachedPopularResults</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">results</span><span class="o">:</span><span class="w"> </span><span class="nx">popular</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">_notice</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Showing popular results. Full search temporarily unavailable.&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">searchService</span><span class="p">.</span><span class="nx">search</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">q</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Health Checks</h2>
+<h3>Why Health Checks Matter</h3>
+<p>Health checks serve three purposes:</p>
+<ol>
+<li><strong>Liveness</strong> -- Is the process running and not deadlocked?</li>
+<li><strong>Readiness</strong> -- Can the application handle traffic? (database connected, caches warm, etc.)</li>
+<li><strong>Startup</strong> -- Has the application finished initializing?</li>
+</ol>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────────────┐
+│                  Kubernetes / Load Balancer               │
+│                                                         │
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐  │
+│  │  Liveness   │  │  Readiness   │  │   Startup      │  │
+│  │  Probe      │  │  Probe       │  │   Probe        │  │
+│  │             │  │              │  │                │  │
+│  │ GET /healthz│  │ GET /readyz  │  │ GET /startupz  │  │
+│  │             │  │              │  │                │  │
+│  │ Fail =&gt;     │  │ Fail =&gt;      │  │ Fail =&gt;        │  │
+│  │ Restart pod │  │ Remove from  │  │ Keep waiting   │  │
+│  │             │  │ load balancer│  │ (not ready yet)│  │
+│  └─────────────┘  └──────────────┘  └────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>Health Checks with @godaddy/terminus</h3>
+<p>Terminus is the standard library for graceful shutdown and health checks in Node.js HTTP servers:</p>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>install<span class="w"> </span>@godaddy/terminus
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">http</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;http&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">createTerminus</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;@godaddy/terminus&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;@prisma/client&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;ioredis&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+
+<span class="c1">// Your Express routes</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;ok&#39;</span><span class="w"> </span><span class="p">}));</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">createServer</span><span class="p">(</span><span class="nx">app</span><span class="p">);</span>
+
+<span class="c1">// Health check function: checks all dependencies</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">onHealthCheck</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">checks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{};</span>
+
+<span class="w">  </span><span class="c1">// Check database connectivity</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`SELECT 1`</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">checks</span><span class="p">.</span><span class="nx">database</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;healthy&#39;</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">checks</span><span class="p">.</span><span class="nx">database</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;unhealthy&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Database health check failed&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Check Redis connectivity</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">ping</span><span class="p">();</span>
+<span class="w">    </span><span class="nx">checks</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;healthy&#39;</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">checks</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;unhealthy&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Redis health check failed&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Check disk space (simplified)</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">freemem</span><span class="p">,</span><span class="w"> </span><span class="nx">totalmem</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;os&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">memUsagePercent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">((</span><span class="nx">totalmem</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">freemem</span><span class="p">())</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">totalmem</span><span class="p">())</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">100</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">checks</span><span class="p">.</span><span class="nx">memory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="nx">memUsagePercent</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">90</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;healthy&#39;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;warning&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">usagePercent</span><span class="o">:</span><span class="w"> </span><span class="nx">memUsagePercent</span><span class="p">.</span><span class="nx">toFixed</span><span class="p">(</span><span class="mf">1</span><span class="p">),</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">checks</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Graceful shutdown: clean up resources</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">onSignal</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Server is shutting down...&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$disconnect</span><span class="p">();</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">quit</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Cleanup complete.&#39;</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="c1">// Before shutdown: stop accepting new requests</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">beforeShutdown</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Wait for load balancer to deregister this instance</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Waiting for load balancer deregistration...&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">resolve</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">setTimeout</span><span class="p">(</span><span class="nx">resolve</span><span class="p">,</span><span class="w"> </span><span class="mf">5000</span><span class="p">));</span>
+<span class="p">}</span>
+
+<span class="nx">createTerminus</span><span class="p">(</span><span class="nx">server</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">healthChecks</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="s1">&#39;/healthz&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">onHealthCheck</span><span class="p">,</span><span class="w">      </span><span class="c1">// Liveness probe</span>
+<span class="w">    </span><span class="s1">&#39;/readyz&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">onHealthCheck</span><span class="p">,</span><span class="w">       </span><span class="c1">// Readiness probe</span>
+<span class="w">    </span><span class="nx">verbatim</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w">                 </span><span class="c1">// Return the checks object as JSON</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">onSignal</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">beforeShutdown</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">30000</span><span class="p">,</span><span class="w">                   </span><span class="c1">// Force shutdown after 30s</span>
+<span class="w">  </span><span class="nx">logger</span><span class="o">:</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="nx">server</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="mf">3000</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Server listening on port 3000&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Custom Health Check Endpoints (Without Terminus)</h3>
+<p>If you prefer building health checks manually:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="c1">// Simple liveness check</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/healthz&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">200</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;alive&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">()</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Detailed readiness check</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/readyz&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;ready&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">(),</span>
+<span class="w">    </span><span class="nx">checks</span><span class="o">:</span><span class="w"> </span><span class="p">{},</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">isReady</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Check database</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`SELECT 1`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">latency</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">start</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">results</span><span class="p">.</span><span class="nx">checks</span><span class="p">.</span><span class="nx">database</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;up&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">latencyMs</span><span class="o">:</span><span class="w"> </span><span class="nx">latency</span><span class="p">,</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">latency</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">1000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">results</span><span class="p">.</span><span class="nx">checks</span><span class="p">.</span><span class="nx">database</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;degraded&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">results</span><span class="p">.</span><span class="nx">checks</span><span class="p">.</span><span class="nx">database</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;down&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="nx">isReady</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Check Redis</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">ping</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">latency</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">start</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">results</span><span class="p">.</span><span class="nx">checks</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;up&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">latencyMs</span><span class="o">:</span><span class="w"> </span><span class="nx">latency</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">results</span><span class="p">.</span><span class="nx">checks</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;down&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="nx">isReady</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Check external API</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">axios</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;https://api.payment.com/health&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">2000</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="nx">results</span><span class="p">.</span><span class="nx">checks</span><span class="p">.</span><span class="nx">paymentApi</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;up&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">latencyMs</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">start</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">results</span><span class="p">.</span><span class="nx">checks</span><span class="p">.</span><span class="nx">paymentApi</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;down&#39;</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="c1">// Not marking isReady = false because payment is non-critical</span>
+<span class="w">    </span><span class="c1">// for readiness (we have a circuit breaker + fallback)</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Check circuit breaker states</span>
+<span class="w">  </span><span class="nx">results</span><span class="p">.</span><span class="nx">checks</span><span class="p">.</span><span class="nx">circuitBreakers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">userService</span><span class="o">:</span><span class="w"> </span><span class="nx">userBreaker</span><span class="p">.</span><span class="nx">opened</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;open&#39;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;closed&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">paymentService</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentBreaker</span><span class="p">.</span><span class="nx">opened</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;open&#39;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;closed&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="nx">results</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">isReady</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;ready&#39;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;not_ready&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="nx">isReady</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mf">200</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mf">503</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">results</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Deep vs Shallow Health Checks</h3>
+<p>A shallow health check just confirms the process is running. A deep health check verifies all dependencies:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Shallow: for liveness probes (should NEVER call external services)</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/healthz&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">200</span><span class="p">).</span><span class="nx">send</span><span class="p">(</span><span class="s1">&#39;OK&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Deep: for readiness probes (checks dependencies)</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/readyz&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// ...check database, Redis, external APIs</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<p><strong>Important</strong>: Liveness probes should be shallow. If your liveness probe depends on an external database and that database goes down, Kubernetes will restart your pod -- which solves nothing since the database is still down. This creates a restart loop.</p>
+<div class="highlight"><pre><span></span><code>                 WRONG                           RIGHT
+         ┌───────────────────┐          ┌───────────────────┐
+         │   Liveness Probe   │          │   Liveness Probe   │
+         │   checks DB ────X  │          │   returns 200 OK   │
+         │                    │          │   (no ext. deps)   │
+         │   DB down =&gt;       │          │                    │
+         │   probe fails =&gt;   │          │   Readiness Probe  │
+         │   pod restarts =&gt;  │          │   checks DB ────X  │
+         │   DB still down =&gt; │          │                    │
+         │   probe fails =&gt;   │          │   DB down =&gt;       │
+         │   restart loop!    │          │   pod removed from │
+         │                    │          │   load balancer     │
+         └───────────────────┘          │   (no restarts)    │
+                                        └───────────────────┘
+</code></pre></div>
+
+<h2>Graceful Shutdown</h2>
+<p>When your application receives a termination signal (SIGTERM from Kubernetes, Ctrl+C in development), it should:</p>
+<ol>
+<li>Stop accepting new connections</li>
+<li>Finish processing in-flight requests</li>
+<li>Close database connections and other resources</li>
+<li>Exit cleanly</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="mf">3000</span><span class="p">);</span>
+
+<span class="kd">let</span><span class="w"> </span><span class="nx">isShuttingDown</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+
+<span class="c1">// Middleware to reject new requests during shutdown</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">((</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">isShuttingDown</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="s1">&#39;Connection&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;close&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">503</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Server is shutting down&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="nx">next</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">gracefulShutdown</span><span class="p">(</span><span class="nx">signal</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Received </span><span class="si">${</span><span class="nx">signal</span><span class="si">}</span><span class="sb">. Starting graceful shutdown...`</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">isShuttingDown</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Give load balancer time to remove this instance</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">resolve</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">setTimeout</span><span class="p">(</span><span class="nx">resolve</span><span class="p">,</span><span class="w"> </span><span class="mf">5000</span><span class="p">));</span>
+
+<span class="w">  </span><span class="c1">// Stop accepting new connections</span>
+<span class="w">  </span><span class="nx">server</span><span class="p">.</span><span class="nx">close</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;HTTP server closed.&#39;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Close database connections</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$disconnect</span><span class="p">();</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Database disconnected.&#39;</span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// Close Redis</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">quit</span><span class="p">();</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Redis disconnected.&#39;</span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// Close message queue connections</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">messageQueue</span><span class="p">.</span><span class="nx">close</span><span class="p">();</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Message queue disconnected.&#39;</span><span class="p">);</span>
+
+<span class="w">      </span><span class="nx">process</span><span class="p">.</span><span class="nx">exit</span><span class="p">(</span><span class="mf">0</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Error during shutdown:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">process</span><span class="p">.</span><span class="nx">exit</span><span class="p">(</span><span class="mf">1</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Force shutdown after timeout</span>
+<span class="w">  </span><span class="nx">setTimeout</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Forced shutdown after timeout&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">process</span><span class="p">.</span><span class="nx">exit</span><span class="p">(</span><span class="mf">1</span><span class="p">);</span>
+<span class="w">  </span><span class="p">},</span><span class="w"> </span><span class="mf">30000</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="nx">process</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;SIGTERM&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">gracefulShutdown</span><span class="p">(</span><span class="s1">&#39;SIGTERM&#39;</span><span class="p">));</span>
+<span class="nx">process</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;SIGINT&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">gracefulShutdown</span><span class="p">(</span><span class="s1">&#39;SIGINT&#39;</span><span class="p">));</span>
+</code></pre></div>
+
+<h3>Shutdown with Terminus (Recommended)</h3>
+<p>Terminus handles all the shutdown orchestration for you:</p>
+<div class="highlight"><pre><span></span><code><span class="nx">createTerminus</span><span class="p">(</span><span class="nx">server</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">signals</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;SIGTERM&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;SIGINT&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">healthChecks</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="s1">&#39;/healthz&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">onHealthCheck</span><span class="p">,</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">onSignal</span><span class="o">:</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Cleanup: close DB, Redis, queues</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$disconnect</span><span class="p">();</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">quit</span><span class="p">();</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">beforeShutdown</span><span class="o">:</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Give LB time to deregister (important in Kubernetes)</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">resolve</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">setTimeout</span><span class="p">(</span><span class="nx">resolve</span><span class="p">,</span><span class="w"> </span><span class="mf">5000</span><span class="p">));</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">onShutdown</span><span class="o">:</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Shutdown complete&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">30000</span><span class="p">,</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Dependency Health Monitoring</h2>
+<p>Track the health of each dependency and use it to make degradation decisions:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">DependencyMonitor</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">dependencies</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">register</span><span class="p">(</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">checkFn</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">critical</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">intervalMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">10000</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">dep</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">name</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">checkFn</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">critical</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;unknown&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">lastCheck</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">lastError</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">consecutiveFailures</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">dependencies</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">dep</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Periodic health checking</span>
+<span class="w">    </span><span class="nx">setInterval</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">checkFn</span><span class="p">();</span>
+<span class="w">        </span><span class="nx">dep</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;healthy&#39;</span><span class="p">;</span>
+<span class="w">        </span><span class="nx">dep</span><span class="p">.</span><span class="nx">latencyMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">start</span><span class="p">;</span>
+<span class="w">        </span><span class="nx">dep</span><span class="p">.</span><span class="nx">consecutiveFailures</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">        </span><span class="nx">dep</span><span class="p">.</span><span class="nx">lastError</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">dep</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;unhealthy&#39;</span><span class="p">;</span>
+<span class="w">        </span><span class="nx">dep</span><span class="p">.</span><span class="nx">consecutiveFailures</span><span class="o">++</span><span class="p">;</span>
+<span class="w">        </span><span class="nx">dep</span><span class="p">.</span><span class="nx">lastError</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="nx">dep</span><span class="p">.</span><span class="nx">lastCheck</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">();</span>
+<span class="w">    </span><span class="p">},</span><span class="w"> </span><span class="nx">intervalMs</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">isSystemHealthy</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">dep</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">dependencies</span><span class="p">.</span><span class="nx">values</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">dep</span><span class="p">.</span><span class="nx">critical</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">dep</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;unhealthy&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">getReport</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">report</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{};</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">dep</span><span class="p">]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">dependencies</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">report</span><span class="p">[</span><span class="nx">name</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="nx">dep</span><span class="p">.</span><span class="nx">status</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">critical</span><span class="o">:</span><span class="w"> </span><span class="nx">dep</span><span class="p">.</span><span class="nx">critical</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">lastCheck</span><span class="o">:</span><span class="w"> </span><span class="nx">dep</span><span class="p">.</span><span class="nx">lastCheck</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">consecutiveFailures</span><span class="o">:</span><span class="w"> </span><span class="nx">dep</span><span class="p">.</span><span class="nx">consecutiveFailures</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">latencyMs</span><span class="o">:</span><span class="w"> </span><span class="nx">dep</span><span class="p">.</span><span class="nx">latencyMs</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">lastError</span><span class="o">:</span><span class="w"> </span><span class="nx">dep</span><span class="p">.</span><span class="nx">lastError</span><span class="p">,</span>
+<span class="w">      </span><span class="p">};</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">report</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Setup</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">monitor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">DependencyMonitor</span><span class="p">();</span>
+
+<span class="nx">monitor</span><span class="p">.</span><span class="nx">register</span><span class="p">(</span><span class="s1">&#39;postgres&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`SELECT 1`</span><span class="p">;</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">critical</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">intervalMs</span><span class="o">:</span><span class="w"> </span><span class="mf">5000</span><span class="w"> </span><span class="p">});</span>
+
+<span class="nx">monitor</span><span class="p">.</span><span class="nx">register</span><span class="p">(</span><span class="s1">&#39;redis&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">ping</span><span class="p">();</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">critical</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">intervalMs</span><span class="o">:</span><span class="w"> </span><span class="mf">5000</span><span class="w"> </span><span class="p">});</span>
+
+<span class="nx">monitor</span><span class="p">.</span><span class="nx">register</span><span class="p">(</span><span class="s1">&#39;email-service&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">axios</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;https://email-service.internal/healthz&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">2000</span><span class="w"> </span><span class="p">});</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">critical</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nx">intervalMs</span><span class="o">:</span><span class="w"> </span><span class="mf">30000</span><span class="w"> </span><span class="p">});</span>
+
+<span class="c1">// Use in health endpoint</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/readyz&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">isHealthy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">monitor</span><span class="p">.</span><span class="nx">isSystemHealthy</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="nx">isHealthy</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mf">200</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mf">503</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="nx">isHealthy</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;ready&#39;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;not_ready&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">dependencies</span><span class="o">:</span><span class="w"> </span><span class="nx">monitor</span><span class="p">.</span><span class="nx">getReport</span><span class="p">(),</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Health Check Response Format</h2>
+<p>A standard health check response should include:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ready&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-18T12:00:00.000Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;uptime&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">86400</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2.4.1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;checks&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;database&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;up&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;latencyMs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;redis&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;up&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;latencyMs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;payment-service&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;degraded&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;latencyMs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2100</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;circuitBreaker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;open&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Purpose</th>
+<th>Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Graceful Degradation</td>
+<td>Partial failure, not total outage</td>
+<td>Circuit breaker fallbacks, feature flags</td>
+</tr>
+<tr>
+<td>Load Shedding</td>
+<td>Protect under overload</td>
+<td>Reject excess requests with 503</td>
+</tr>
+<tr>
+<td>Liveness Probe</td>
+<td>Is the process alive?</td>
+<td>Shallow check, no external deps</td>
+</tr>
+<tr>
+<td>Readiness Probe</td>
+<td>Can it handle traffic?</td>
+<td>Deep check with dependency verification</td>
+</tr>
+<tr>
+<td>Graceful Shutdown</td>
+<td>Clean exit on termination</td>
+<td>Drain connections, close resources</td>
+</tr>
+<tr>
+<td>Dependency Monitoring</td>
+<td>Track upstream health</td>
+<td>Periodic checks, circuit breaker state</td>
+</tr>
+</tbody>
+</table>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Product Page with Graceful Degradation</div>
+                    <div class="exercise-desc"><p>Build an Express API endpoint for /products/:id that aggregates data from three sources: a product database (critical), a recommendation engine (non-critical), and a review service (non-critical). Use opossum circuit breakers with fallbacks for non-critical services. If the recommendation service is down, return an empty list. If the review service is down, return cached reviews. Include a _degraded field in the response indicating which services are degraded.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Promise.allSettled() to fetch non-critical data concurrently. Wrap each external call in its own circuit breaker with a fallback function. Check each settled promise's status to populate the _degraded field.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Terminus Health Check Integration</div>
+                    <div class="exercise-desc"><p>Create a complete Express application with @godaddy/terminus. Implement separate liveness (/healthz) and readiness (/readyz) endpoints. The liveness endpoint should return 200 with no external checks. The readiness endpoint should verify Prisma database connectivity and Redis connectivity, returning detailed status for each. Implement proper graceful shutdown that disconnects both.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Pass separate functions to terminus healthChecks object. The liveness function just resolves. The readiness function runs prisma.$queryRaw and redis.ping() in parallel with Promise.all. Remember to implement onSignal for cleanup.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Load Shedding Middleware</div>
+                    <div class="exercise-desc"><p>Implement an Express middleware that tracks active in-flight requests. When the count exceeds a configurable threshold (e.g., 200), reject new requests with HTTP 503 and a Retry-After header. Add a priority system: requests with an X-Priority: high header bypass the limit (up to a separate, higher cap). Write tests that verify shedding behavior.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Increment a counter on request entry and decrement on the 'finish' event of the response. Check the counter in the middleware before calling next(). For priority, maintain two counters: one for normal traffic and one for high-priority.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Liveness probe depends on the database and causes restart loops</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The liveness health check queries the database. When the database goes down, the liveness probe fails, Kubernetes restarts the pod, the new pod also cannot reach the database, the probe fails again, and the pod enters CrashLoopBackOff.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Separate liveness from readiness. Liveness probes should only verify the process is running (return 200 with no external calls). Readiness probes check dependencies. When the database is down, the readiness probe fails and the pod is removed from the load balancer, but it is not restarted. Once the database recovers, the readiness probe passes and the pod is added back.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Graceful shutdown is interrupted, leaving database connections open</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The SIGTERM handler does not wait for in-flight requests to complete before closing connections, or there is no forced shutdown timeout so the process hangs indefinitely waiting for a stuck connection.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use @godaddy/terminus or implement a two-phase shutdown: first stop accepting new connections (server.close()), then wait for in-flight requests to drain, then close database and Redis connections. Always set a maximum timeout (e.g., 30 seconds) and force process.exit(1) if cleanup has not finished.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Health check endpoint exposes sensitive internal information</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The health check returns detailed error messages, stack traces, or internal service URLs that could aid an attacker.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Return detailed health information only for internal health check paths (e.g., behind a VPC or protected by auth). Public-facing health endpoints should return minimal information: just the status code (200 or 503) and a simple status string. Use different endpoints for different audiences: /healthz (public, minimal) and /internal/health (detailed, internal only).
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://github.com/godaddy/terminus" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag github">github</div>
+                    <div class="resource-title">@godaddy/terminus Documentation</div>
+                    
+                    <div class="resource-note">The standard Node.js library for graceful shutdown and health checks</div>
+                    
+                </a>
+                
+                <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Kubernetes Health Checks Best Practices</div>
+                    
+                    <div class="resource-note">Official Kubernetes docs on configuring liveness, readiness, and startup probes</div>
+                    
+                </a>
+                
+                <a href="https://blog.risingstack.com/graceful-shutdown-node-js-kubernetes/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Graceful Shutdown in Node.js</div>
+                    
+                    <div class="resource-note">Practical guide to implementing graceful shutdown with Kubernetes</div>
+                    
+                </a>
+                
+                <a href="https://datatracker.ietf.org/doc/html/draft-inadarei-api-health-check" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag specification">specification</div>
+                    <div class="resource-title">Health Check Response Format for HTTP APIs (RFC draft)</div>
+                    
+                    <div class="resource-note">Proposed standard for health check response format in HTTP APIs</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/7.6.1-js.html" class="btn">&larr; Circuit Breakers and Retry Patterns</a>
+            
+            
+            <a href="/backend-learning/lesson/7.6.3-js.html" class="btn">Chaos Engineering Principles &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-7-js.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

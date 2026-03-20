@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenID Connect and Identity Providers - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-py.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-py.html">Security & Reliability</a> &rsaquo;
+            Authentication & Authorization
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.2.2</span>
+                <span>~2h</span>
+            </div>
+            <h1>OpenID Connect and Identity Providers</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of OAuth 2.0 as a hotel key card: it gets you into specific rooms (resources), but it does not say who you are. OpenID Connect is like also receiving a passport at check-in — a tamper-proof document (the ID token) that proves your identity. The hotel (your application) can look at the passport to know who checked in, and use the key card to open the right doors.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>OpenID Connect and Identity Providers</h1>
+<p>OAuth 2.0 solved the authorization problem — allowing third-party applications to access resources on behalf of a user — but it deliberately left out one critical piece: <strong>identity</strong>. OAuth 2.0 tells you what someone is allowed to do, but not <em>who they are</em>. OpenID Connect (OIDC) is a thin identity layer built on top of OAuth 2.0 that fills this gap, providing a standardized way to authenticate users and retrieve their profile information.</p>
+<p>In this lesson, we will explore how OIDC extends OAuth 2.0, understand the structure and purpose of ID tokens, integrate with real identity providers, and implement robust token validation in Python.</p>
+<h2>How OIDC Extends OAuth 2.0</h2>
+<p>OpenID Connect is not a replacement for OAuth 2.0 — it is an extension. Every OIDC flow is a valid OAuth 2.0 flow with additional conventions layered on top. The key additions are:</p>
+<ol>
+<li><strong>The <code>openid</code> scope</strong>: When a client includes <code>openid</code> in its authorization request, it signals that this is an OIDC authentication request, not just an authorization request.</li>
+<li><strong>The ID Token</strong>: A new token type (a signed JWT) that contains claims about the authenticated user.</li>
+<li><strong>The UserInfo Endpoint</strong>: A standardized API endpoint that returns profile information about the authenticated user.</li>
+<li><strong>Discovery</strong>: A well-known endpoint that allows clients to automatically discover provider configuration.</li>
+</ol>
+<p>Here is a simplified comparison:</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>OAuth 2.0</th>
+<th>OIDC</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Purpose</td>
+<td>Authorization</td>
+<td>Authentication + Authorization</td>
+</tr>
+<tr>
+<td>Token types</td>
+<td>Access token, Refresh token</td>
+<td>Access token, Refresh token, <strong>ID token</strong></td>
+</tr>
+<tr>
+<td>User identity</td>
+<td>Not standardized</td>
+<td>Standardized via ID token and UserInfo</td>
+</tr>
+<tr>
+<td>Discovery</td>
+<td>Not standardized</td>
+<td><code>.well-known/openid-configuration</code></td>
+</tr>
+<tr>
+<td>Scopes</td>
+<td>Application-defined</td>
+<td><code>openid</code>, <code>profile</code>, <code>email</code>, <code>address</code>, <code>phone</code></td>
+</tr>
+</tbody>
+</table>
+<h2>OIDC Flows</h2>
+<p>OIDC defines three flows, corresponding to OAuth 2.0 response types:</p>
+<ul>
+<li><strong>Authorization Code Flow</strong> (<code>response_type=code</code>): The most common and most secure flow for server-side applications. The client receives an authorization code and exchanges it for tokens at the token endpoint.</li>
+<li><strong>Implicit Flow</strong> (<code>response_type=id_token token</code>): Tokens are returned directly in the URL fragment. This flow is now discouraged due to security concerns.</li>
+<li><strong>Hybrid Flow</strong> (<code>response_type=code id_token</code>): Combines elements of both. The client gets an ID token immediately and an authorization code to exchange for an access token.</li>
+</ul>
+<p>For backend applications, the <strong>Authorization Code Flow</strong> is almost always the correct choice.</p>
+<h2>ID Tokens vs Access Tokens</h2>
+<p>This distinction is fundamental and frequently misunderstood:</p>
+<p><strong>ID Token</strong>: A JWT intended for the <em>client application</em>. It contains claims about the user's identity — who they are, when they authenticated, and how. The client consumes this token to establish a session. An ID token should <strong>never</strong> be sent to an API as a bearer token.</p>
+<p><strong>Access Token</strong>: A token intended for the <em>resource server</em> (API). It represents the user's authorization to access specific resources. Access tokens may or may not be JWTs — the format is opaque to the client.</p>
+<div class="highlight"><pre><span></span><code>ID Token:    Client &lt;--- Identity Provider (&quot;Here is who the user is&quot;)
+Access Token: Client ---&gt; Resource Server  (&quot;I am allowed to access this&quot;)
+</code></pre></div>
+
+<p>A common mistake is using the ID token as an access token, or vice versa. They serve different purposes and have different audiences.</p>
+<h2>JWT Structure and Claims</h2>
+<p>ID tokens are always JWTs (JSON Web Tokens). A JWT consists of three base64url-encoded parts separated by dots:</p>
+<div class="highlight"><pre><span></span><code>header.payload.signature
+</code></pre></div>
+
+<h3>Header</h3>
+<p>The header specifies the signing algorithm and, optionally, a key ID:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;alg&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;RS256&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;typ&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;JWT&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;kid&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;abc123&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Payload (Claims)</h3>
+<p>The payload contains claims — assertions about the user and the authentication event. OIDC defines several standard claims:</p>
+<table>
+<thead>
+<tr>
+<th>Claim</th>
+<th>Name</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iss</code></td>
+<td>Issuer</td>
+<td>The URL of the identity provider that issued the token</td>
+</tr>
+<tr>
+<td><code>sub</code></td>
+<td>Subject</td>
+<td>A unique identifier for the user (stable across sessions)</td>
+</tr>
+<tr>
+<td><code>aud</code></td>
+<td>Audience</td>
+<td>The client ID of the application the token was issued for</td>
+</tr>
+<tr>
+<td><code>exp</code></td>
+<td>Expiration</td>
+<td>Unix timestamp after which the token is invalid</td>
+</tr>
+<tr>
+<td><code>iat</code></td>
+<td>Issued At</td>
+<td>Unix timestamp when the token was issued</td>
+</tr>
+<tr>
+<td><code>nonce</code></td>
+<td>Nonce</td>
+<td>A random value tied to the authentication request to prevent replay attacks</td>
+</tr>
+<tr>
+<td><code>auth_time</code></td>
+<td>Auth Time</td>
+<td>When the user last actively authenticated</td>
+</tr>
+<tr>
+<td><code>azp</code></td>
+<td>Authorized Party</td>
+<td>The client ID of the party the token was issued to (used when <code>aud</code> contains multiple values)</td>
+</tr>
+</tbody>
+</table>
+<p>A typical ID token payload looks like this:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;iss&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://accounts.google.com&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;sub&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;110248495921238986420&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;aud&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;your-client-id.apps.googleusercontent.com&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;exp&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1679012345</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;iat&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1679008745</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;nonce&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;abc123random&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;email&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user@example.com&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;email_verified&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Jane Doe&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;picture&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://lh3.googleusercontent.com/a/photo.jpg&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Signature</h3>
+<p>The signature ensures the token has not been tampered with. For <code>RS256</code>, the identity provider signs the header and payload with its private key, and the client verifies the signature using the provider's public key (obtained from the JWKS endpoint).</p>
+<h2>The OIDC Discovery Endpoint</h2>
+<p>One of OIDC's most powerful features is automatic discovery. Every OIDC provider publishes a JSON document at a well-known URL:</p>
+<div class="highlight"><pre><span></span><code>https://{issuer}/.well-known/openid-configuration
+</code></pre></div>
+
+<p>This document contains everything a client needs to interact with the provider:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">fetch_oidc_config</span><span class="p">(</span><span class="n">issuer_url</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Fetch the OIDC discovery document for a given issuer.&quot;&quot;&quot;</span>
+    <span class="n">discovery_url</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">issuer_url</span><span class="o">.</span><span class="n">rstrip</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">)</span><span class="si">}</span><span class="s2">/.well-known/openid-configuration&quot;</span>
+    <span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">discovery_url</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+    <span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+
+<span class="c1"># Example: Google&#39;s OIDC configuration</span>
+<span class="n">config</span> <span class="o">=</span> <span class="n">fetch_oidc_config</span><span class="p">(</span><span class="s2">&quot;https://accounts.google.com&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Authorization endpoint: </span><span class="si">{</span><span class="n">config</span><span class="p">[</span><span class="s1">&#39;authorization_endpoint&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Token endpoint: </span><span class="si">{</span><span class="n">config</span><span class="p">[</span><span class="s1">&#39;token_endpoint&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;UserInfo endpoint: </span><span class="si">{</span><span class="n">config</span><span class="p">[</span><span class="s1">&#39;userinfo_endpoint&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;JWKS URI: </span><span class="si">{</span><span class="n">config</span><span class="p">[</span><span class="s1">&#39;jwks_uri&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Supported scopes: </span><span class="si">{</span><span class="n">config</span><span class="p">[</span><span class="s1">&#39;scopes_supported&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Key fields in the discovery document include:</p>
+<ul>
+<li><code>authorization_endpoint</code>: Where to send the user for authentication</li>
+<li><code>token_endpoint</code>: Where to exchange the authorization code for tokens</li>
+<li><code>userinfo_endpoint</code>: Where to fetch user profile information</li>
+<li><code>jwks_uri</code>: Where to fetch the provider's public keys for token verification</li>
+<li><code>scopes_supported</code>: What scopes the provider supports</li>
+<li><code>response_types_supported</code>: What response types are available</li>
+<li><code>id_token_signing_alg_values_supported</code>: What signing algorithms the provider uses</li>
+</ul>
+<p>This means you can write provider-agnostic code — just point it at an issuer URL and let discovery handle the rest.</p>
+<h2>The UserInfo Endpoint</h2>
+<p>The UserInfo endpoint returns claims about the authenticated user. You call it with a valid access token (not the ID token):</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">fetch_user_info</span><span class="p">(</span><span class="n">userinfo_endpoint</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">access_token</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Fetch user profile information from the UserInfo endpoint.&quot;&quot;&quot;</span>
+    <span class="n">headers</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;Authorization&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Bearer </span><span class="si">{</span><span class="n">access_token</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">}</span>
+    <span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">userinfo_endpoint</span><span class="p">,</span> <span class="n">headers</span><span class="o">=</span><span class="n">headers</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+    <span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+
+<span class="c1"># Usage</span>
+<span class="n">user_info</span> <span class="o">=</span> <span class="n">fetch_user_info</span><span class="p">(</span>
+    <span class="n">config</span><span class="p">[</span><span class="s2">&quot;userinfo_endpoint&quot;</span><span class="p">],</span>
+    <span class="n">access_token</span><span class="o">=</span><span class="s2">&quot;eyJhbGciOiJSUzI1NiIs...&quot;</span>
+<span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;User: </span><span class="si">{</span><span class="n">user_info</span><span class="p">[</span><span class="s1">&#39;name&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> (</span><span class="si">{</span><span class="n">user_info</span><span class="p">[</span><span class="s1">&#39;email&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">)&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>The claims returned depend on the scopes requested during authorization:</p>
+<ul>
+<li><code>openid</code>: Returns <code>sub</code> only</li>
+<li><code>profile</code>: Adds <code>name</code>, <code>family_name</code>, <code>given_name</code>, <code>picture</code>, etc.</li>
+<li><code>email</code>: Adds <code>email</code> and <code>email_verified</code></li>
+<li><code>address</code>: Adds structured address information</li>
+<li><code>phone</code>: Adds <code>phone_number</code> and <code>phone_number_verified</code></li>
+</ul>
+<h2>Token Validation</h2>
+<p>Validating an ID token properly is critical for security. Here is a comprehensive validation function using the <code>PyJWT</code> library:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">jwt</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">jwt</span><span class="w"> </span><span class="kn">import</span> <span class="n">PyJWKClient</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Optional</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OIDCTokenValidator</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">issuer_url</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">client_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">issuer_url</span> <span class="o">=</span> <span class="n">issuer_url</span><span class="o">.</span><span class="n">rstrip</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">client_id</span> <span class="o">=</span> <span class="n">client_id</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_config</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_jwk_client</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">config</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_config</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">discovery_url</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">issuer_url</span><span class="si">}</span><span class="s2">/.well-known/openid-configuration&quot;</span>
+            <span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">discovery_url</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+            <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_config</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_config</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">jwk_client</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PyJWKClient</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_jwk_client</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_jwk_client</span> <span class="o">=</span> <span class="n">PyJWKClient</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="p">[</span><span class="s2">&quot;jwks_uri&quot;</span><span class="p">],</span>
+                <span class="n">cache_keys</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+                <span class="n">lifespan</span><span class="o">=</span><span class="mi">3600</span>  <span class="c1"># Cache keys for 1 hour</span>
+            <span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_jwk_client</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">validate_id_token</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">id_token</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+        <span class="n">nonce</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Validate an OIDC ID token and return the decoded claims.</span>
+
+<span class="sd">        Performs the following checks:</span>
+<span class="sd">        1. Verifies the signature using the provider&#39;s public keys</span>
+<span class="sd">        2. Validates the issuer (iss) matches the expected provider</span>
+<span class="sd">        3. Validates the audience (aud) matches our client ID</span>
+<span class="sd">        4. Checks the token has not expired (exp)</span>
+<span class="sd">        5. Optionally verifies the nonce to prevent replay attacks</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Fetch the signing key based on the token&#39;s &#39;kid&#39; header</span>
+        <span class="n">signing_key</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">jwk_client</span><span class="o">.</span><span class="n">get_signing_key_from_jwt</span><span class="p">(</span><span class="n">id_token</span><span class="p">)</span>
+
+        <span class="c1"># Decode and validate the token</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">claims</span> <span class="o">=</span> <span class="n">jwt</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span>
+                <span class="n">id_token</span><span class="p">,</span>
+                <span class="n">signing_key</span><span class="o">.</span><span class="n">key</span><span class="p">,</span>
+                <span class="n">algorithms</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;RS256&quot;</span><span class="p">,</span> <span class="s2">&quot;RS384&quot;</span><span class="p">,</span> <span class="s2">&quot;RS512&quot;</span><span class="p">],</span>
+                <span class="n">issuer</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">issuer_url</span><span class="p">,</span>
+                <span class="n">audience</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">client_id</span><span class="p">,</span>
+                <span class="n">options</span><span class="o">=</span><span class="p">{</span>
+                    <span class="s2">&quot;verify_exp&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+                    <span class="s2">&quot;verify_iss&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+                    <span class="s2">&quot;verify_aud&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+                    <span class="s2">&quot;require&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;iss&quot;</span><span class="p">,</span> <span class="s2">&quot;sub&quot;</span><span class="p">,</span> <span class="s2">&quot;aud&quot;</span><span class="p">,</span> <span class="s2">&quot;exp&quot;</span><span class="p">,</span> <span class="s2">&quot;iat&quot;</span><span class="p">]</span>
+                <span class="p">}</span>
+            <span class="p">)</span>
+        <span class="k">except</span> <span class="n">jwt</span><span class="o">.</span><span class="n">ExpiredSignatureError</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;ID token has expired&quot;</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">jwt</span><span class="o">.</span><span class="n">InvalidIssuerError</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Invalid issuer. Expected </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">issuer_url</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">jwt</span><span class="o">.</span><span class="n">InvalidAudienceError</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Invalid audience. Expected </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">client_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">jwt</span><span class="o">.</span><span class="n">InvalidTokenError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Invalid token: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+        <span class="c1"># Verify nonce if provided</span>
+        <span class="k">if</span> <span class="n">nonce</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">token_nonce</span> <span class="o">=</span> <span class="n">claims</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;nonce&quot;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">token_nonce</span> <span class="o">!=</span> <span class="n">nonce</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="s2">&quot;Nonce mismatch: possible replay attack&quot;</span>
+                <span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">claims</span>
+</code></pre></div>
+
+<p>Usage:</p>
+<div class="highlight"><pre><span></span><code><span class="n">validator</span> <span class="o">=</span> <span class="n">OIDCTokenValidator</span><span class="p">(</span>
+    <span class="n">issuer_url</span><span class="o">=</span><span class="s2">&quot;https://accounts.google.com&quot;</span><span class="p">,</span>
+    <span class="n">client_id</span><span class="o">=</span><span class="s2">&quot;your-client-id.apps.googleusercontent.com&quot;</span>
+<span class="p">)</span>
+
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">claims</span> <span class="o">=</span> <span class="n">validator</span><span class="o">.</span><span class="n">validate_id_token</span><span class="p">(</span>
+        <span class="n">id_token</span><span class="o">=</span><span class="n">raw_id_token</span><span class="p">,</span>
+        <span class="n">nonce</span><span class="o">=</span><span class="n">session_nonce</span>  <span class="c1"># The nonce you stored when initiating the flow</span>
+    <span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Authenticated user: </span><span class="si">{</span><span class="n">claims</span><span class="p">[</span><span class="s1">&#39;sub&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Email: </span><span class="si">{</span><span class="n">claims</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;email&#39;</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Authentication failed: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2>Full Integration Example with Flask</h2>
+<p>Here is a complete example integrating OIDC with a Flask application using the Authorization Code Flow:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">secrets</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">flask</span><span class="w"> </span><span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">redirect</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">session</span><span class="p">,</span> <span class="n">url_for</span><span class="p">,</span> <span class="n">jsonify</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">requests</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">http_requests</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">urllib.parse</span><span class="w"> </span><span class="kn">import</span> <span class="n">urlencode</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="n">app</span><span class="o">.</span><span class="n">secret_key</span> <span class="o">=</span> <span class="n">secrets</span><span class="o">.</span><span class="n">token_hex</span><span class="p">(</span><span class="mi">32</span><span class="p">)</span>
+
+<span class="c1"># Configuration — works with any OIDC provider</span>
+<span class="n">OIDC_ISSUER</span> <span class="o">=</span> <span class="s2">&quot;https://accounts.google.com&quot;</span>
+<span class="n">CLIENT_ID</span> <span class="o">=</span> <span class="s2">&quot;your-client-id.apps.googleusercontent.com&quot;</span>
+<span class="n">CLIENT_SECRET</span> <span class="o">=</span> <span class="s2">&quot;your-client-secret&quot;</span>
+<span class="n">REDIRECT_URI</span> <span class="o">=</span> <span class="s2">&quot;http://localhost:5000/callback&quot;</span>
+
+<span class="c1"># Initialize the validator</span>
+<span class="n">validator</span> <span class="o">=</span> <span class="n">OIDCTokenValidator</span><span class="p">(</span>
+    <span class="n">issuer_url</span><span class="o">=</span><span class="n">OIDC_ISSUER</span><span class="p">,</span>
+    <span class="n">client_id</span><span class="o">=</span><span class="n">CLIENT_ID</span>
+<span class="p">)</span>
+
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s2">&quot;/login&quot;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">login</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Initiate the OIDC Authorization Code Flow.&quot;&quot;&quot;</span>
+    <span class="c1"># Generate a nonce and state for security</span>
+    <span class="n">nonce</span> <span class="o">=</span> <span class="n">secrets</span><span class="o">.</span><span class="n">token_urlsafe</span><span class="p">(</span><span class="mi">32</span><span class="p">)</span>
+    <span class="n">state</span> <span class="o">=</span> <span class="n">secrets</span><span class="o">.</span><span class="n">token_urlsafe</span><span class="p">(</span><span class="mi">32</span><span class="p">)</span>
+
+    <span class="c1"># Store in session for later verification</span>
+    <span class="n">session</span><span class="p">[</span><span class="s2">&quot;oidc_nonce&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">nonce</span>
+    <span class="n">session</span><span class="p">[</span><span class="s2">&quot;oidc_state&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">state</span>
+
+    <span class="c1"># Build the authorization URL</span>
+    <span class="n">config</span> <span class="o">=</span> <span class="n">validator</span><span class="o">.</span><span class="n">config</span>
+    <span class="n">params</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">&quot;client_id&quot;</span><span class="p">:</span> <span class="n">CLIENT_ID</span><span class="p">,</span>
+        <span class="s2">&quot;response_type&quot;</span><span class="p">:</span> <span class="s2">&quot;code&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;scope&quot;</span><span class="p">:</span> <span class="s2">&quot;openid profile email&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;redirect_uri&quot;</span><span class="p">:</span> <span class="n">REDIRECT_URI</span><span class="p">,</span>
+        <span class="s2">&quot;state&quot;</span><span class="p">:</span> <span class="n">state</span><span class="p">,</span>
+        <span class="s2">&quot;nonce&quot;</span><span class="p">:</span> <span class="n">nonce</span><span class="p">,</span>
+    <span class="p">}</span>
+    <span class="n">auth_url</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">config</span><span class="p">[</span><span class="s1">&#39;authorization_endpoint&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">?</span><span class="si">{</span><span class="n">urlencode</span><span class="p">(</span><span class="n">params</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="n">auth_url</span><span class="p">)</span>
+
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s2">&quot;/callback&quot;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">callback</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Handle the OIDC callback after user authentication.&quot;&quot;&quot;</span>
+    <span class="c1"># Verify state to prevent CSRF</span>
+    <span class="k">if</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;state&quot;</span><span class="p">)</span> <span class="o">!=</span> <span class="n">session</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;oidc_state&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">):</span>
+        <span class="k">return</span> <span class="s2">&quot;State mismatch — possible CSRF attack&quot;</span><span class="p">,</span> <span class="mi">403</span>
+
+    <span class="c1"># Check for errors from the provider</span>
+    <span class="k">if</span> <span class="s2">&quot;error&quot;</span> <span class="ow">in</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="p">:</span>
+        <span class="n">error</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="p">[</span><span class="s2">&quot;error&quot;</span><span class="p">]</span>
+        <span class="n">desc</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;error_description&quot;</span><span class="p">,</span> <span class="s2">&quot;Unknown error&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;Authentication error: </span><span class="si">{</span><span class="n">error</span><span class="si">}</span><span class="s2"> — </span><span class="si">{</span><span class="n">desc</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="mi">400</span>
+
+    <span class="c1"># Exchange the authorization code for tokens</span>
+    <span class="n">code</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="p">[</span><span class="s2">&quot;code&quot;</span><span class="p">]</span>
+    <span class="n">config</span> <span class="o">=</span> <span class="n">validator</span><span class="o">.</span><span class="n">config</span>
+
+    <span class="n">token_response</span> <span class="o">=</span> <span class="n">http_requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+        <span class="n">config</span><span class="p">[</span><span class="s2">&quot;token_endpoint&quot;</span><span class="p">],</span>
+        <span class="n">data</span><span class="o">=</span><span class="p">{</span>
+            <span class="s2">&quot;grant_type&quot;</span><span class="p">:</span> <span class="s2">&quot;authorization_code&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;code&quot;</span><span class="p">:</span> <span class="n">code</span><span class="p">,</span>
+            <span class="s2">&quot;redirect_uri&quot;</span><span class="p">:</span> <span class="n">REDIRECT_URI</span><span class="p">,</span>
+            <span class="s2">&quot;client_id&quot;</span><span class="p">:</span> <span class="n">CLIENT_ID</span><span class="p">,</span>
+            <span class="s2">&quot;client_secret&quot;</span><span class="p">:</span> <span class="n">CLIENT_SECRET</span><span class="p">,</span>
+        <span class="p">},</span>
+        <span class="n">timeout</span><span class="o">=</span><span class="mi">10</span>
+    <span class="p">)</span>
+    <span class="n">token_response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+    <span class="n">tokens</span> <span class="o">=</span> <span class="n">token_response</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+
+    <span class="c1"># Validate the ID token</span>
+    <span class="n">nonce</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;oidc_nonce&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">claims</span> <span class="o">=</span> <span class="n">validator</span><span class="o">.</span><span class="n">validate_id_token</span><span class="p">(</span>
+            <span class="n">tokens</span><span class="p">[</span><span class="s2">&quot;id_token&quot;</span><span class="p">],</span>
+            <span class="n">nonce</span><span class="o">=</span><span class="n">nonce</span>
+        <span class="p">)</span>
+    <span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;Token validation failed: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="mi">401</span>
+
+    <span class="c1"># Create a session for the user</span>
+    <span class="n">session</span><span class="p">[</span><span class="s2">&quot;user&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">&quot;sub&quot;</span><span class="p">:</span> <span class="n">claims</span><span class="p">[</span><span class="s2">&quot;sub&quot;</span><span class="p">],</span>
+        <span class="s2">&quot;email&quot;</span><span class="p">:</span> <span class="n">claims</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;email&quot;</span><span class="p">),</span>
+        <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="n">claims</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;name&quot;</span><span class="p">),</span>
+    <span class="p">}</span>
+    <span class="n">session</span><span class="p">[</span><span class="s2">&quot;access_token&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">tokens</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;access_token&quot;</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="n">url_for</span><span class="p">(</span><span class="s2">&quot;profile&quot;</span><span class="p">))</span>
+
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s2">&quot;/profile&quot;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">profile</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Display the authenticated user&#39;s profile.&quot;&quot;&quot;</span>
+    <span class="n">user</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;user&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">user</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="n">url_for</span><span class="p">(</span><span class="s2">&quot;login&quot;</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">jsonify</span><span class="p">(</span><span class="n">user</span><span class="p">)</span>
+
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s2">&quot;/logout&quot;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">logout</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Log the user out by clearing the session.&quot;&quot;&quot;</span>
+    <span class="n">session</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+    <span class="c1"># Optionally redirect to the provider&#39;s end_session_endpoint</span>
+    <span class="n">config</span> <span class="o">=</span> <span class="n">validator</span><span class="o">.</span><span class="n">config</span>
+    <span class="k">if</span> <span class="s2">&quot;end_session_endpoint&quot;</span> <span class="ow">in</span> <span class="n">config</span><span class="p">:</span>
+        <span class="n">params</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;post_logout_redirect_uri&quot;</span><span class="p">:</span> <span class="s2">&quot;http://localhost:5000/&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;client_id&quot;</span><span class="p">:</span> <span class="n">CLIENT_ID</span><span class="p">,</span>
+        <span class="p">}</span>
+        <span class="n">logout_url</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">config</span><span class="p">[</span><span class="s1">&#39;end_session_endpoint&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">?</span><span class="si">{</span><span class="n">urlencode</span><span class="p">(</span><span class="n">params</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="n">logout_url</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="s2">&quot;/&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2>Integrating with Different Providers</h2>
+<p>Because OIDC is standardized, switching providers is largely a configuration change.</p>
+<h3>Google</h3>
+<div class="highlight"><pre><span></span><code><span class="n">OIDC_ISSUER</span> <span class="o">=</span> <span class="s2">&quot;https://accounts.google.com&quot;</span>
+<span class="c1"># Discovery: https://accounts.google.com/.well-known/openid-configuration</span>
+</code></pre></div>
+
+<h3>Auth0</h3>
+<div class="highlight"><pre><span></span><code><span class="n">OIDC_ISSUER</span> <span class="o">=</span> <span class="s2">&quot;https://your-tenant.auth0.com&quot;</span>
+<span class="c1"># Discovery: https://your-tenant.auth0.com/.well-known/openid-configuration</span>
+</code></pre></div>
+
+<h3>Keycloak</h3>
+<div class="highlight"><pre><span></span><code><span class="n">OIDC_ISSUER</span> <span class="o">=</span> <span class="s2">&quot;https://keycloak.example.com/realms/your-realm&quot;</span>
+<span class="c1"># Discovery: https://keycloak.example.com/realms/your-realm/.well-known/openid-configuration</span>
+</code></pre></div>
+
+<p>The only things that change are the issuer URL, client ID, and client secret. The rest of the code remains identical. This is the power of the OIDC standard.</p>
+<h2>Session Management</h2>
+<p>Once a user is authenticated, you need to manage their session. There are several approaches:</p>
+<h3>Server-Side Sessions</h3>
+<p>Store session data on the server (in memory, Redis, or a database) and use a session cookie to identify the user:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">redis</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">secrets</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">functools</span><span class="w"> </span><span class="kn">import</span> <span class="n">wraps</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">flask</span><span class="w"> </span><span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">g</span><span class="p">,</span> <span class="n">make_response</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="n">redis_client</span> <span class="o">=</span> <span class="n">redis</span><span class="o">.</span><span class="n">Redis</span><span class="p">(</span><span class="n">host</span><span class="o">=</span><span class="s2">&quot;localhost&quot;</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">6379</span><span class="p">,</span> <span class="n">db</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+<span class="n">SESSION_TTL</span> <span class="o">=</span> <span class="mi">3600</span>  <span class="c1"># 1 hour</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">create_session</span><span class="p">(</span><span class="n">user_claims</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Create a server-side session and return the session ID.&quot;&quot;&quot;</span>
+    <span class="n">session_id</span> <span class="o">=</span> <span class="n">secrets</span><span class="o">.</span><span class="n">token_urlsafe</span><span class="p">(</span><span class="mi">32</span><span class="p">)</span>
+    <span class="n">session_data</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">&quot;sub&quot;</span><span class="p">:</span> <span class="n">user_claims</span><span class="p">[</span><span class="s2">&quot;sub&quot;</span><span class="p">],</span>
+        <span class="s2">&quot;email&quot;</span><span class="p">:</span> <span class="n">user_claims</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;email&quot;</span><span class="p">),</span>
+        <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="n">user_claims</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;name&quot;</span><span class="p">),</span>
+        <span class="s2">&quot;authenticated_at&quot;</span><span class="p">:</span> <span class="n">user_claims</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;auth_time&quot;</span><span class="p">),</span>
+    <span class="p">}</span>
+    <span class="n">redis_client</span><span class="o">.</span><span class="n">setex</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">&quot;session:</span><span class="si">{</span><span class="n">session_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="n">SESSION_TTL</span><span class="p">,</span>
+        <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">session_data</span><span class="p">)</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">session_id</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">require_auth</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Decorator that enforces authentication on a route.&quot;&quot;&quot;</span>
+    <span class="nd">@wraps</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">decorated</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="n">session_id</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">cookies</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;session_id&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">session_id</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="s2">&quot;Not authenticated&quot;</span><span class="p">},</span> <span class="mi">401</span>
+
+        <span class="n">session_data</span> <span class="o">=</span> <span class="n">redis_client</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;session:</span><span class="si">{</span><span class="n">session_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">session_data</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="s2">&quot;Session expired&quot;</span><span class="p">},</span> <span class="mi">401</span>
+
+        <span class="n">g</span><span class="o">.</span><span class="n">user</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">session_data</span><span class="p">)</span>
+
+        <span class="c1"># Extend the session TTL on each request (sliding window)</span>
+        <span class="n">redis_client</span><span class="o">.</span><span class="n">expire</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;session:</span><span class="si">{</span><span class="n">session_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">SESSION_TTL</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">f</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">decorated</span>
+
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s2">&quot;/protected&quot;</span><span class="p">)</span>
+<span class="nd">@require_auth</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">protected</span><span class="p">():</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;message&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Hello, </span><span class="si">{</span><span class="n">g</span><span class="o">.</span><span class="n">user</span><span class="p">[</span><span class="s1">&#39;name&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<h3>Token-Based Sessions</h3>
+<p>For stateless APIs, you might issue your own short-lived JWT after OIDC authentication:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">jwt</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">datetime</span>
+
+<span class="n">APP_SECRET</span> <span class="o">=</span> <span class="n">secrets</span><span class="o">.</span><span class="n">token_hex</span><span class="p">(</span><span class="mi">32</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">create_app_token</span><span class="p">(</span><span class="n">user_claims</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Issue an application-specific JWT after OIDC authentication.&quot;&quot;&quot;</span>
+    <span class="n">now</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">utcnow</span><span class="p">()</span>
+    <span class="n">payload</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">&quot;sub&quot;</span><span class="p">:</span> <span class="n">user_claims</span><span class="p">[</span><span class="s2">&quot;sub&quot;</span><span class="p">],</span>
+        <span class="s2">&quot;email&quot;</span><span class="p">:</span> <span class="n">user_claims</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;email&quot;</span><span class="p">),</span>
+        <span class="s2">&quot;iat&quot;</span><span class="p">:</span> <span class="n">now</span><span class="p">,</span>
+        <span class="s2">&quot;exp&quot;</span><span class="p">:</span> <span class="n">now</span> <span class="o">+</span> <span class="n">datetime</span><span class="o">.</span><span class="n">timedelta</span><span class="p">(</span><span class="n">hours</span><span class="o">=</span><span class="mi">1</span><span class="p">),</span>
+        <span class="s2">&quot;iss&quot;</span><span class="p">:</span> <span class="s2">&quot;my-application&quot;</span><span class="p">,</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">jwt</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span> <span class="n">APP_SECRET</span><span class="p">,</span> <span class="n">algorithm</span><span class="o">=</span><span class="s2">&quot;HS256&quot;</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">verify_app_token</span><span class="p">(</span><span class="n">token</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Verify an application-issued JWT.&quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="n">jwt</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span>
+        <span class="n">token</span><span class="p">,</span>
+        <span class="n">APP_SECRET</span><span class="p">,</span>
+        <span class="n">algorithms</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;HS256&quot;</span><span class="p">],</span>
+        <span class="n">issuer</span><span class="o">=</span><span class="s2">&quot;my-application&quot;</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<h2>Security Considerations</h2>
+<p>When implementing OIDC, pay close attention to these security requirements:</p>
+<p><strong>Always validate the <code>state</code> parameter</strong>: This prevents CSRF attacks. Generate a random value before the authentication request, store it in the session, and verify it matches when the callback is invoked.</p>
+<p><strong>Always validate the <code>nonce</code></strong>: This prevents token replay attacks. The nonce binds a specific ID token to a specific authentication request.</p>
+<p><strong>Validate all standard claims</strong>: Do not skip any validation step. Verify issuer, audience, expiration, and signature on every token.</p>
+<p><strong>Use HTTPS everywhere</strong>: Tokens are bearer credentials. Transmitting them over HTTP exposes them to interception.</p>
+<p><strong>Never expose tokens to the frontend unnecessarily</strong>: Keep tokens server-side when possible. If you must send them to a browser, use <code>httpOnly</code> and <code>secure</code> cookie flags.</p>
+<p><strong>Handle key rotation</strong>: Identity providers rotate their signing keys periodically. Use the <code>kid</code> (Key ID) header claim to select the correct key, and cache keys with a reasonable TTL so your application picks up rotations.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Example: Handling key rotation gracefully</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">claims</span> <span class="o">=</span> <span class="n">validator</span><span class="o">.</span><span class="n">validate_id_token</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+<span class="k">except</span> <span class="n">jwt</span><span class="o">.</span><span class="n">exceptions</span><span class="o">.</span><span class="n">PyJWKClientError</span><span class="p">:</span>
+    <span class="c1"># Key not found — provider may have rotated keys</span>
+    <span class="c1"># Clear the cache and retry once</span>
+    <span class="n">validator</span><span class="o">.</span><span class="n">_jwk_client</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">claims</span> <span class="o">=</span> <span class="n">validator</span><span class="o">.</span><span class="n">validate_id_token</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+</code></pre></div>
+
+<h2>Summary</h2>
+<p>OpenID Connect provides a standardized, interoperable identity layer on top of OAuth 2.0. By understanding the distinction between ID tokens and access tokens, properly validating JWTs, leveraging the discovery endpoint for provider-agnostic integration, and implementing secure session management, you can build authentication systems that are both robust and portable across identity providers. The protocol's design means that switching from Google to Auth0 to Keycloak — or supporting all three simultaneously — requires only configuration changes, not code changes.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Explore a Live Discovery Endpoint</div>
+                    <div class="exercise-desc"><p>Write a Python script that fetches the OIDC discovery document from Google (https://accounts.google.com/.well-known/openid-configuration) and prints out all supported scopes, response types, and the JWKS URI. Then fetch the JWKS URI and print the number of public keys currently available and their key IDs (kid values).</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the <code>requests</code> library to fetch both URLs. The JWKS response has a 'keys' array — each key object has a 'kid' field. Use json() to parse responses.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Decode and Inspect a JWT Without Verification</div>
+                    <div class="exercise-desc"><p>Generate a sample JWT at jwt.io or use PyJWT to create one. Write a function that takes a raw JWT string, splits it on '.', base64url-decodes the header and payload (without verifying the signature), and returns them as Python dictionaries. Use this to inspect tokens during development. Add a warning comment explaining why unverified decoding should never be used for authentication decisions.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use base64.urlsafe_b64decode. Remember that base64 requires padding — append '=' characters until the length is a multiple of 4 before decoding.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build a Multi-Provider OIDC Client</div>
+                    <div class="exercise-desc"><p>Create a class called <code>MultiProviderOIDC</code> that accepts a dictionary mapping provider names to issuer URLs. It should lazily fetch and cache discovery documents, and provide a method <code>get_authorization_url(provider_name, client_id, redirect_uri, scopes)</code> that returns a complete authorization URL for the specified provider. Include state and nonce generation. Test it with at least two providers (Google and a mock Keycloak issuer URL).</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Store discovered configurations in a dict keyed by provider name. Use urllib.parse.urlencode to build query strings. Generate state and nonce with secrets.token_urlsafe() and return them alongside the URL so the caller can store them in the session.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Token Refresh with OIDC</div>
+                    <div class="exercise-desc"><p>Extend the Flask callback example from the lesson to store the refresh token alongside the access token. Implement a '/refresh' endpoint that uses the refresh token to obtain new access and ID tokens from the token endpoint. Validate the new ID token before updating the session. Handle the case where the refresh token has been revoked.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>The refresh token grant uses grant_type=refresh_token. Send it to the token endpoint with the client credentials. The response contains new access and ID tokens. Always validate the new ID token before trusting it.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">ID token validation fails with 'Invalid audience' even though the correct client ID is configured.</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Some providers include multiple values in the 'aud' claim (e.g., when the token is issued for both a web and mobile client). The PyJWT library's audience validation may behave unexpectedly if the 'aud' claim is an array and your client_id is only one of the entries. Additionally, trailing slashes or case differences in the client ID can cause mismatches.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Ensure you are passing the exact client_id string that the provider expects. If the provider returns an array for 'aud', PyJWT handles this correctly as long as your client_id is one of the values. Also check the 'azp' (authorized party) claim — if present, it should match your client_id. Debug by decoding the token without verification first to inspect the actual 'aud' value.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <h1>Debug: inspect the raw claims before validation</h1>
+<p>import jwt as pyjwt
+unverified = pyjwt.decode(id_token, options={"verify_signature": False})
+print(f"aud claim: {unverified['aud']}")
+print(f"aud type: {type(unverified['aud'])}")
+print(f"Expected client_id: {CLIENT_ID}")</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Token signature verification fails intermittently with 'Unable to find a signing key that matches kid'.</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> jwt.exceptions.PyJWKClientError: Unable to find a signing key that matches: 'new-kid-after-rotation'
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Identity providers rotate their signing keys periodically. If your application caches the JWKS (JSON Web Key Set) indefinitely, it will eventually hold stale keys that do not match the 'kid' in newly issued tokens.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement a cache-with-retry strategy. Cache the JWKS for a reasonable period (e.g., 1 hour), but if signature verification fails due to an unknown kid, clear the cache and refetch the JWKS once before failing permanently. PyJWT's PyJWKClient supports a lifespan parameter for this purpose.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>from jwt import PyJWKClient</p>
+<h1>Configure caching with automatic refresh</h1>
+<p>jwk_client = PyJWKClient(
+    jwks_uri,
+    cache_keys=True,
+    lifespan=3600  # Refetch keys after 1 hour
+)</p>
+<h1>On kid mismatch, force a refresh</h1>
+<p>try:
+    key = jwk_client.get_signing_key_from_jwt(token)
+except Exception:
+    jwk_client = PyJWKClient(jwks_uri, cache_keys=True, lifespan=3600)
+    key = jwk_client.get_signing_key_from_jwt(token)</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">After a successful OIDC login, the user's session is lost on the next request or the callback fails with a 'state mismatch' error.</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The session cookie is not being persisted between requests. This commonly happens when: (1) the Flask secret_key is regenerated on each restart (e.g., using secrets.token_hex() at module level without persisting it), (2) the cookie's SameSite attribute prevents it from being sent on the redirect back from the provider, or (3) the application is behind a reverse proxy and the Secure flag prevents the cookie from being sent over the proxy's HTTP connection.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Set a stable secret_key from an environment variable. Configure session cookies with appropriate SameSite and Secure settings. If behind a reverse proxy, ensure the proxy forwards the correct protocol headers and configure Flask to trust them.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>import os
+from flask import Flask</p>
+<p>app = Flask(<strong>name</strong>)</p>
+<h1>Use a stable secret key from the environment</h1>
+<p>app.secret_key = os.environ["FLASK_SECRET_KEY"]</p>
+<h1>Configure session cookies</h1>
+<p>app.config.update(
+    SESSION_COOKIE_SECURE=True,      # Only send over HTTPS
+    SESSION_COOKIE_HTTPONLY=True,     # Not accessible via JavaScript
+    SESSION_COOKIE_SAMESITE="Lax",   # Allow redirects from IdP
+)</p>
+<h1>If behind a reverse proxy:</h1>
+<p>from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://openid.net/specs/openid-connect-core-1_0.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">OpenID Connect Core 1.0 Specification</div>
+                    
+                    <div class="resource-note">The official specification. Dense but essential reading — particularly Sections 2 (ID Token) and 3 (Authentication).</div>
+                    
+                </a>
+                
+                <a href="https://jwt.io/introduction" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag tutorial">tutorial</div>
+                    <div class="resource-title">JWT.io — JSON Web Token Debugger and Introduction</div>
+                    
+                    <div class="resource-note">Interactive tool for decoding and inspecting JWTs. Excellent for debugging token issues during development.</div>
+                    
+                </a>
+                
+                <a href="https://auth0.com/docs/authenticate/protocols/openid-connect-protocol" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">Auth0 — OpenID Connect Protocol Overview</div>
+                    
+                    <div class="resource-note">A well-written, practical guide to OIDC concepts with clear diagrams showing the various flows.</div>
+                    
+                </a>
+                
+                <a href="https://developer.okta.com/blog/2019/10/21/illustrated-guide-to-oauth-and-oidc" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">The Illustrated Guide to OAuth and OpenID Connect</div>
+                    
+                    <div class="resource-note">A visually engaging explanation of how OAuth 2.0 and OIDC work together, with helpful analogies.</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/8.2.1-py.html" class="btn">&larr; OAuth2 Flows: Authorization Code, Client Credentials, PKCE</a>
+            
+            
+            <a href="/backend-learning/lesson/8.2.3-py.html" class="btn">RBAC and ABAC: Role and Attribute-Based Access Control &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-py.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

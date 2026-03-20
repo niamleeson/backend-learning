@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hashing: bcrypt, argon2, and Password Storage - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-py.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-py.html">Security & Reliability</a> &rsaquo;
+            Cryptography Basics
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.3.1</span>
+                <span>~2h</span>
+            </div>
+            <h1>Hashing: bcrypt, argon2, and Password Storage</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of password hashing like a bank vault door. A regular hash (SHA-256) is like a screen door — it technically blocks the path, but anyone with a little force (GPU power) blows right through. An adaptive hash like bcrypt or argon2 is like a massive vault door with a time-lock mechanism: even if you know exactly how the lock works, each attempt to try a combination takes a minimum amount of time, making it infeasible to try millions of combinations.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Hashing: bcrypt, argon2, and Password Storage</h1>
+<p>Password storage is one of the most critical responsibilities of any backend system. A single breach exposing poorly hashed passwords can compromise millions of users — not just on your platform, but across every service where they reused that password. In this lesson, we will explore why naive hashing fails, how modern adaptive hashing algorithms work, and how to implement robust password storage in Python.</p>
+<h2>Why Plain Hashing Fails for Passwords</h2>
+<p>You might think that running passwords through SHA-256 before storing them is sufficient. After all, cryptographic hash functions are one-way — you cannot reverse them to recover the original input. However, this reasoning has a fatal flaw: <strong>passwords have low entropy</strong>.</p>
+<p>Most human-chosen passwords come from a relatively small space. Common passwords like <code>password123</code>, <code>qwerty</code>, and <code>letmein</code> appear in virtually every breach. Even passwords that seem complex often follow predictable patterns (a capital letter, lowercase letters, a number, a special character at the end).</p>
+<p>An attacker who obtains your database of SHA-256 hashes can simply hash every candidate password and compare:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">hashlib</span>
+
+<span class="c1"># An attacker&#39;s approach against plain SHA-256</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">crack_sha256</span><span class="p">(</span><span class="n">target_hash</span><span class="p">,</span> <span class="n">wordlist_path</span><span class="p">):</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">wordlist_path</span><span class="p">,</span> <span class="s1">&#39;r&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">f</span><span class="p">:</span>
+            <span class="n">candidate</span> <span class="o">=</span> <span class="n">word</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+            <span class="n">candidate_hash</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">(</span><span class="n">candidate</span><span class="o">.</span><span class="n">encode</span><span class="p">())</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()</span>
+            <span class="k">if</span> <span class="n">candidate_hash</span> <span class="o">==</span> <span class="n">target_hash</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">candidate</span>
+    <span class="k">return</span> <span class="kc">None</span>
+
+<span class="c1"># SHA-256 of &#39;password123&#39;</span>
+<span class="n">target</span> <span class="o">=</span> <span class="s1">&#39;ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f&#39;</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">crack_sha256</span><span class="p">(</span><span class="n">target</span><span class="p">,</span> <span class="s1">&#39;/usr/share/wordlists/rockyou.txt&#39;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Cracked: </span><span class="si">{</span><span class="n">result</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>  <span class="c1"># Cracked: password123</span>
+</code></pre></div>
+
+<p>Modern GPUs can compute <strong>billions</strong> of SHA-256 hashes per second. A single NVIDIA RTX 4090 can test over 20 billion MD5 hashes per second. At that rate, the entire <code>rockyou.txt</code> wordlist (14 million passwords) can be checked in under a millisecond.</p>
+<h2>Rainbow Tables and Precomputation Attacks</h2>
+<p>Rainbow tables take this attack further by <strong>precomputing</strong> hash values for enormous dictionaries. An attacker builds a lookup table mapping hashes back to their plaintext inputs:</p>
+<div class="highlight"><pre><span></span><code>e10adc3949ba59abbe56e057f20f883e -&gt; 123456
+5f4dcc3b5aa765d61d8327deb882cf99 -&gt; password
+25d55ad283aa400af464c76d713c07ad -&gt; 12345678
+</code></pre></div>
+
+<p>Once built, cracking any hash becomes a simple table lookup — an O(1) operation. Rainbow tables for MD5 and SHA-1 covering all alphanumeric passwords up to 8-9 characters are freely available online.</p>
+<h2>Salting: The First Line of Defense</h2>
+<p>A <strong>salt</strong> is a random value appended (or prepended) to the password before hashing:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">hashlib</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">hash_with_salt</span><span class="p">(</span><span class="n">password</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+    <span class="n">salt</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">urandom</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span>  <span class="c1"># 16 bytes of cryptographic randomness</span>
+    <span class="n">salted</span> <span class="o">=</span> <span class="n">salt</span> <span class="o">+</span> <span class="n">password</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span>
+    <span class="n">hashed</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">(</span><span class="n">salted</span><span class="p">)</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">salt</span><span class="o">.</span><span class="n">hex</span><span class="p">(),</span> <span class="n">hashed</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">verify_with_salt</span><span class="p">(</span><span class="n">password</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">salt_hex</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">expected_hash</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+    <span class="n">salt</span> <span class="o">=</span> <span class="nb">bytes</span><span class="o">.</span><span class="n">fromhex</span><span class="p">(</span><span class="n">salt_hex</span><span class="p">)</span>
+    <span class="n">salted</span> <span class="o">=</span> <span class="n">salt</span> <span class="o">+</span> <span class="n">password</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">(</span><span class="n">salted</span><span class="p">)</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()</span> <span class="o">==</span> <span class="n">expected_hash</span>
+
+<span class="n">salt</span><span class="p">,</span> <span class="n">hashed</span> <span class="o">=</span> <span class="n">hash_with_salt</span><span class="p">(</span><span class="s1">&#39;password123&#39;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Salt: </span><span class="si">{</span><span class="n">salt</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Hash: </span><span class="si">{</span><span class="n">hashed</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Verify: </span><span class="si">{</span><span class="n">verify_with_salt</span><span class="p">(</span><span class="s1">&#39;password123&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">salt</span><span class="p">,</span><span class="w"> </span><span class="n">hashed</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Salting defeats rainbow tables because each user gets a unique salt. Even if two users have the same password, their hashes will differ. The attacker must now brute-force each hash individually.</p>
+<p>However, <strong>salting alone is not enough</strong>. A salted SHA-256 hash is still computed in nanoseconds. An attacker targeting a single high-value account can still try billions of candidates per second.</p>
+<h2>Adaptive Hashing: Intentional Slowness</h2>
+<p>The key insight behind password hashing algorithms is that <strong>speed is the enemy</strong>. Unlike general-purpose hashing (where speed is a feature), password hashing must be deliberately slow so that brute-force attacks become impractical.</p>
+<p>Adaptive hashing algorithms achieve this through a configurable <strong>work factor</strong> (also called cost factor) that controls how expensive the computation is. As hardware gets faster, you increase the work factor to maintain the same wall-clock time per hash.</p>
+<h3>bcrypt</h3>
+<p>bcrypt, designed in 1999 by Niels Provos and David Mazieres, was the first widely adopted adaptive password hashing function. It is based on the Blowfish cipher and has these properties:</p>
+<ul>
+<li><strong>Built-in salt</strong>: 128-bit random salt is generated and embedded in the output.</li>
+<li><strong>Configurable cost</strong>: The work factor is a power of 2. Cost 12 means 2^12 = 4,096 iterations of the internal key expansion.</li>
+<li><strong>Fixed output</strong>: The hash is always 60 characters in the Modular Crypt Format.</li>
+<li><strong>Maximum input length</strong>: bcrypt truncates passwords at 72 bytes. This is an important limitation.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">bcrypt</span>
+
+<span class="c1"># Hashing a password with bcrypt</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">hash_password_bcrypt</span><span class="p">(</span><span class="n">password</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">rounds</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">12</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Hash a password using bcrypt with the specified cost factor.&quot;&quot;&quot;</span>
+    <span class="n">salt</span> <span class="o">=</span> <span class="n">bcrypt</span><span class="o">.</span><span class="n">gensalt</span><span class="p">(</span><span class="n">rounds</span><span class="o">=</span><span class="n">rounds</span><span class="p">)</span>
+    <span class="n">hashed</span> <span class="o">=</span> <span class="n">bcrypt</span><span class="o">.</span><span class="n">hashpw</span><span class="p">(</span><span class="n">password</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">),</span> <span class="n">salt</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">hashed</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">verify_password_bcrypt</span><span class="p">(</span><span class="n">password</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">hashed</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Verify a password against a bcrypt hash.&quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="n">bcrypt</span><span class="o">.</span><span class="n">checkpw</span><span class="p">(</span>
+        <span class="n">password</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">),</span>
+        <span class="n">hashed</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">)</span>
+    <span class="p">)</span>
+
+<span class="c1"># Usage</span>
+<span class="n">hashed</span> <span class="o">=</span> <span class="n">hash_password_bcrypt</span><span class="p">(</span><span class="s1">&#39;my_secure_password&#39;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Hash: </span><span class="si">{</span><span class="n">hashed</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="c1"># Output: $2b$12$LJ3m4ys3Lg2VBe5E8IPVR.eTONBkBmGxqFC0krJTOxbMYBNaMVWmu</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Valid: </span><span class="si">{</span><span class="n">verify_password_bcrypt</span><span class="p">(</span><span class="s1">&#39;my_secure_password&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">hashed</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Invalid: </span><span class="si">{</span><span class="n">verify_password_bcrypt</span><span class="p">(</span><span class="s1">&#39;wrong_password&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">hashed</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>The output format <code>$2b$12$...</code> encodes the algorithm version (<code>2b</code>), cost factor (<code>12</code>), and the salt+hash together. This self-describing format is a best practice — you can always determine how to verify a hash by inspecting it.</p>
+<h3>scrypt</h3>
+<p>scrypt (2009, Colin Percival) was designed to be <strong>memory-hard</strong> in addition to CPU-hard. While bcrypt's cost is primarily computational, scrypt forces the attacker to use large amounts of RAM, making GPU and ASIC attacks more expensive:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">hashlib</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">hash_password_scrypt</span><span class="p">(</span><span class="n">password</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+    <span class="n">salt</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">urandom</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span>
+    <span class="n">hashed</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">scrypt</span><span class="p">(</span>
+        <span class="n">password</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">),</span>
+        <span class="n">salt</span><span class="o">=</span><span class="n">salt</span><span class="p">,</span>
+        <span class="n">n</span><span class="o">=</span><span class="mi">2</span><span class="o">**</span><span class="mi">14</span><span class="p">,</span>   <span class="c1"># CPU/memory cost (must be power of 2)</span>
+        <span class="n">r</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span>       <span class="c1"># Block size</span>
+        <span class="n">p</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>       <span class="c1"># Parallelism</span>
+        <span class="n">dklen</span><span class="o">=</span><span class="mi">32</span>   <span class="c1"># Output length</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">salt</span><span class="o">.</span><span class="n">hex</span><span class="p">()</span><span class="si">}</span><span class="s2">$</span><span class="si">{</span><span class="n">hashed</span><span class="o">.</span><span class="n">hex</span><span class="p">()</span><span class="si">}</span><span class="s2">&quot;</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">verify_password_scrypt</span><span class="p">(</span><span class="n">password</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">stored</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+    <span class="n">salt_hex</span><span class="p">,</span> <span class="n">hash_hex</span> <span class="o">=</span> <span class="n">stored</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;$&#39;</span><span class="p">)</span>
+    <span class="n">salt</span> <span class="o">=</span> <span class="nb">bytes</span><span class="o">.</span><span class="n">fromhex</span><span class="p">(</span><span class="n">salt_hex</span><span class="p">)</span>
+    <span class="n">expected</span> <span class="o">=</span> <span class="nb">bytes</span><span class="o">.</span><span class="n">fromhex</span><span class="p">(</span><span class="n">hash_hex</span><span class="p">)</span>
+    <span class="n">hashed</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">scrypt</span><span class="p">(</span>
+        <span class="n">password</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">),</span>
+        <span class="n">salt</span><span class="o">=</span><span class="n">salt</span><span class="p">,</span>
+        <span class="n">n</span><span class="o">=</span><span class="mi">2</span><span class="o">**</span><span class="mi">14</span><span class="p">,</span> <span class="n">r</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">p</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">dklen</span><span class="o">=</span><span class="mi">32</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">hashed</span> <span class="o">==</span> <span class="n">expected</span>
+</code></pre></div>
+
+<h3>argon2: The Modern Standard</h3>
+<p>Argon2 won the Password Hashing Competition (PHC) in 2015 and is the recommended algorithm for new applications. It comes in three variants:</p>
+<ul>
+<li><strong>Argon2d</strong>: Data-dependent memory access. Maximum resistance to GPU cracking, but vulnerable to side-channel attacks.</li>
+<li><strong>Argon2i</strong>: Data-independent memory access. Resistant to side-channel attacks. Good for password hashing.</li>
+<li><strong>Argon2id</strong>: A hybrid — uses Argon2i for the first pass and Argon2d for subsequent passes. <strong>This is the recommended variant.</strong></li>
+</ul>
+<p>Argon2 has three tunable parameters:
+- <strong>Time cost</strong> (<code>t</code>): Number of iterations.
+- <strong>Memory cost</strong> (<code>m</code>): Memory usage in kibibytes.
+- <strong>Parallelism</strong> (<code>p</code>): Number of threads.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">argon2</span><span class="w"> </span><span class="kn">import</span> <span class="n">PasswordHasher</span><span class="p">,</span> <span class="n">exceptions</span>
+
+<span class="c1"># Create a hasher with tuned parameters</span>
+<span class="n">ph</span> <span class="o">=</span> <span class="n">PasswordHasher</span><span class="p">(</span>
+    <span class="n">time_cost</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>         <span class="c1"># 3 iterations</span>
+    <span class="n">memory_cost</span><span class="o">=</span><span class="mi">65536</span><span class="p">,</span>   <span class="c1"># 64 MB</span>
+    <span class="n">parallelism</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>       <span class="c1"># 4 threads</span>
+    <span class="n">hash_len</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span>         <span class="c1"># 32-byte output</span>
+    <span class="n">salt_len</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span>         <span class="c1"># 16-byte salt</span>
+    <span class="nb">type</span><span class="o">=</span><span class="n">argon2</span><span class="o">.</span><span class="n">Type</span><span class="o">.</span><span class="n">ID</span>  <span class="c1"># Argon2id variant</span>
+<span class="p">)</span>
+
+<span class="c1"># Hash a password</span>
+<span class="n">hashed</span> <span class="o">=</span> <span class="n">ph</span><span class="o">.</span><span class="n">hash</span><span class="p">(</span><span class="s1">&#39;my_secure_password&#39;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Hash: </span><span class="si">{</span><span class="n">hashed</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="c1"># Output: $argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$...</span>
+
+<span class="c1"># Verify a password</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">ph</span><span class="o">.</span><span class="n">verify</span><span class="p">(</span><span class="n">hashed</span><span class="p">,</span> <span class="s1">&#39;my_secure_password&#39;</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Password is correct&quot;</span><span class="p">)</span>
+<span class="k">except</span> <span class="n">exceptions</span><span class="o">.</span><span class="n">VerifyMismatchError</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Password is incorrect&quot;</span><span class="p">)</span>
+
+<span class="c1"># Check if rehashing is needed (parameters changed)</span>
+<span class="k">if</span> <span class="n">ph</span><span class="o">.</span><span class="n">check_needs_rehash</span><span class="p">(</span><span class="n">hashed</span><span class="p">):</span>
+    <span class="n">new_hash</span> <span class="o">=</span> <span class="n">ph</span><span class="o">.</span><span class="n">hash</span><span class="p">(</span><span class="s1">&#39;my_secure_password&#39;</span><span class="p">)</span>
+    <span class="c1"># Update the stored hash in your database</span>
+</code></pre></div>
+
+<p>The <code>check_needs_rehash</code> method is particularly valuable — it tells you if a hash was created with older, weaker parameters so you can transparently upgrade on the next successful login.</p>
+<h2>Work Factor Tuning</h2>
+<p>Choosing the right work factor is a balance between security and user experience. The goal is to make each hash take <strong>250ms to 1 second</strong> on your production hardware. Here is how to benchmark:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">bcrypt</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">argon2</span><span class="w"> </span><span class="kn">import</span> <span class="n">PasswordHasher</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">benchmark_bcrypt</span><span class="p">():</span>
+    <span class="n">password</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">&#39;benchmark_password_123&#39;</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;bcrypt benchmarks:&quot;</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">rounds</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">16</span><span class="p">):</span>
+        <span class="n">start</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+        <span class="n">bcrypt</span><span class="o">.</span><span class="n">hashpw</span><span class="p">(</span><span class="n">password</span><span class="p">,</span> <span class="n">bcrypt</span><span class="o">.</span><span class="n">gensalt</span><span class="p">(</span><span class="n">rounds</span><span class="o">=</span><span class="n">rounds</span><span class="p">))</span>
+        <span class="n">elapsed</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span> <span class="o">-</span> <span class="n">start</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  rounds=</span><span class="si">{</span><span class="n">rounds</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">elapsed</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">s&quot;</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">benchmark_argon2</span><span class="p">():</span>
+    <span class="n">password</span> <span class="o">=</span> <span class="s1">&#39;benchmark_password_123&#39;</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">argon2id benchmarks:&quot;</span><span class="p">)</span>
+    <span class="n">configs</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="p">{</span><span class="s1">&#39;time_cost&#39;</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span> <span class="s1">&#39;memory_cost&#39;</span><span class="p">:</span> <span class="mi">32768</span><span class="p">,</span> <span class="s1">&#39;parallelism&#39;</span><span class="p">:</span> <span class="mi">2</span><span class="p">},</span>
+        <span class="p">{</span><span class="s1">&#39;time_cost&#39;</span><span class="p">:</span> <span class="mi">3</span><span class="p">,</span> <span class="s1">&#39;memory_cost&#39;</span><span class="p">:</span> <span class="mi">65536</span><span class="p">,</span> <span class="s1">&#39;parallelism&#39;</span><span class="p">:</span> <span class="mi">4</span><span class="p">},</span>
+        <span class="p">{</span><span class="s1">&#39;time_cost&#39;</span><span class="p">:</span> <span class="mi">4</span><span class="p">,</span> <span class="s1">&#39;memory_cost&#39;</span><span class="p">:</span> <span class="mi">131072</span><span class="p">,</span> <span class="s1">&#39;parallelism&#39;</span><span class="p">:</span> <span class="mi">4</span><span class="p">},</span>
+        <span class="p">{</span><span class="s1">&#39;time_cost&#39;</span><span class="p">:</span> <span class="mi">5</span><span class="p">,</span> <span class="s1">&#39;memory_cost&#39;</span><span class="p">:</span> <span class="mi">262144</span><span class="p">,</span> <span class="s1">&#39;parallelism&#39;</span><span class="p">:</span> <span class="mi">8</span><span class="p">},</span>
+    <span class="p">]</span>
+    <span class="k">for</span> <span class="n">cfg</span> <span class="ow">in</span> <span class="n">configs</span><span class="p">:</span>
+        <span class="n">ph</span> <span class="o">=</span> <span class="n">PasswordHasher</span><span class="p">(</span><span class="o">**</span><span class="n">cfg</span><span class="p">)</span>
+        <span class="n">start</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+        <span class="n">ph</span><span class="o">.</span><span class="n">hash</span><span class="p">(</span><span class="n">password</span><span class="p">)</span>
+        <span class="n">elapsed</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span> <span class="o">-</span> <span class="n">start</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  t=</span><span class="si">{</span><span class="n">cfg</span><span class="p">[</span><span class="s1">&#39;time_cost&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">, m=</span><span class="si">{</span><span class="n">cfg</span><span class="p">[</span><span class="s1">&#39;memory_cost&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">KB, &quot;</span>
+              <span class="sa">f</span><span class="s2">&quot;p=</span><span class="si">{</span><span class="n">cfg</span><span class="p">[</span><span class="s1">&#39;parallelism&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">elapsed</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">s&quot;</span><span class="p">)</span>
+
+<span class="n">benchmark_bcrypt</span><span class="p">()</span>
+<span class="n">benchmark_argon2</span><span class="p">()</span>
+</code></pre></div>
+
+<p>As a starting point for 2025-era hardware:
+- <strong>bcrypt</strong>: cost factor 12-14
+- <strong>argon2id</strong>: time_cost=3, memory_cost=65536 (64MB), parallelism=4</p>
+<p>Re-benchmark annually and increase parameters as hardware improves.</p>
+<h2>Timing Attacks on Password Comparison</h2>
+<p>A subtle but real vulnerability arises when comparing hashes using standard string equality:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># VULNERABLE to timing attack</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">verify_naive</span><span class="p">(</span><span class="n">stored_hash</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">computed_hash</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+    <span class="k">return</span> <span class="n">stored_hash</span> <span class="o">==</span> <span class="n">computed_hash</span>  <span class="c1"># Short-circuits on first mismatch!</span>
+</code></pre></div>
+
+<p>Python's <code>==</code> operator for strings returns <code>False</code> as soon as it finds the first differing character. An attacker can measure response times to deduce hash values one character at a time.</p>
+<p>The fix is <strong>constant-time comparison</strong>:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">hmac</span>
+
+<span class="c1"># SAFE: constant-time comparison</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">verify_safe</span><span class="p">(</span><span class="n">stored_hash</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">computed_hash</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+    <span class="k">return</span> <span class="n">hmac</span><span class="o">.</span><span class="n">compare_digest</span><span class="p">(</span>
+        <span class="n">stored_hash</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">),</span>
+        <span class="n">computed_hash</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">)</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<p><code>hmac.compare_digest</code> always compares every byte regardless of where differences occur. The good news is that bcrypt and argon2-cffi both use constant-time comparison internally, so you are protected when using their built-in verify functions. But if you ever roll your own comparison logic, always use <code>hmac.compare_digest</code>.</p>
+<h2>Using passlib for a Unified Interface</h2>
+<p><code>passlib</code> is a comprehensive password hashing library that provides a unified interface across many algorithms and includes built-in best practices:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">passlib.context</span><span class="w"> </span><span class="kn">import</span> <span class="n">CryptContext</span>
+
+<span class="c1"># Define a context with preferred and deprecated schemes</span>
+<span class="n">pwd_context</span> <span class="o">=</span> <span class="n">CryptContext</span><span class="p">(</span>
+    <span class="n">schemes</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;argon2&#39;</span><span class="p">,</span> <span class="s1">&#39;bcrypt&#39;</span><span class="p">],</span>
+    <span class="n">default</span><span class="o">=</span><span class="s1">&#39;argon2&#39;</span><span class="p">,</span>
+    <span class="n">argon2__time_cost</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+    <span class="n">argon2__memory_cost</span><span class="o">=</span><span class="mi">65536</span><span class="p">,</span>
+    <span class="n">argon2__parallelism</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+    <span class="n">bcrypt__rounds</span><span class="o">=</span><span class="mi">12</span><span class="p">,</span>
+    <span class="n">deprecated</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;bcrypt&#39;</span><span class="p">],</span>  <span class="c1"># Mark bcrypt as needing upgrade</span>
+<span class="p">)</span>
+
+<span class="c1"># Hash a new password (uses argon2 by default)</span>
+<span class="n">hashed</span> <span class="o">=</span> <span class="n">pwd_context</span><span class="o">.</span><span class="n">hash</span><span class="p">(</span><span class="s1">&#39;my_password&#39;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">hashed</span><span class="p">)</span>  <span class="c1"># $argon2id$v=19$m=65536,t=3,p=4$...</span>
+
+<span class="c1"># Verify — works with both argon2 and bcrypt hashes</span>
+<span class="n">valid</span> <span class="o">=</span> <span class="n">pwd_context</span><span class="o">.</span><span class="n">verify</span><span class="p">(</span><span class="s1">&#39;my_password&#39;</span><span class="p">,</span> <span class="n">hashed</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Valid: </span><span class="si">{</span><span class="n">valid</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="c1"># Check if the hash needs upgrading</span>
+<span class="n">valid</span><span class="p">,</span> <span class="n">new_hash</span> <span class="o">=</span> <span class="n">pwd_context</span><span class="o">.</span><span class="n">verify_and_update</span><span class="p">(</span><span class="s1">&#39;my_password&#39;</span><span class="p">,</span> <span class="n">hashed</span><span class="p">)</span>
+<span class="k">if</span> <span class="n">new_hash</span><span class="p">:</span>
+    <span class="c1"># The hash was using a deprecated scheme or outdated parameters.</span>
+    <span class="c1"># Save new_hash to the database.</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Upgraded hash: </span><span class="si">{</span><span class="n">new_hash</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<p>This pattern is especially powerful for <strong>migration</strong> — the deprecated list combined with <code>verify_and_update</code> lets you transparently upgrade users from old algorithms to new ones at login time.</p>
+<h2>Password Storage Best Practices</h2>
+<p>Here is a complete, production-ready password service class:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">secrets</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">hmac</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">argon2</span><span class="w"> </span><span class="kn">import</span> <span class="n">PasswordHasher</span><span class="p">,</span> <span class="n">exceptions</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">argon2</span><span class="w"> </span><span class="kn">import</span> <span class="n">Type</span> <span class="k">as</span> <span class="n">Argon2Type</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">PasswordService</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Production-grade password hashing service.&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_hasher</span> <span class="o">=</span> <span class="n">PasswordHasher</span><span class="p">(</span>
+            <span class="n">time_cost</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+            <span class="n">memory_cost</span><span class="o">=</span><span class="mi">65536</span><span class="p">,</span>
+            <span class="n">parallelism</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+            <span class="n">hash_len</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span>
+            <span class="n">salt_len</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span>
+            <span class="nb">type</span><span class="o">=</span><span class="n">Argon2Type</span><span class="o">.</span><span class="n">ID</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="c1"># Pepper: a secret key stored outside the database</span>
+        <span class="c1"># Load from environment variable or secrets manager</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_pepper</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_load_pepper</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_load_pepper</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bytes</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Load pepper from secure configuration.&quot;&quot;&quot;</span>
+        <span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+        <span class="n">pepper</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;PASSWORD_PEPPER&#39;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">pepper</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s1">&#39;PASSWORD_PEPPER environment variable not set&#39;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">pepper</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_apply_pepper</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">password</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Apply HMAC-based pepper to password before hashing.&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="n">hmac</span><span class="o">.</span><span class="n">new</span><span class="p">(</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_pepper</span><span class="p">,</span>
+            <span class="n">password</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">),</span>
+            <span class="s1">&#39;sha256&#39;</span>
+        <span class="p">)</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">hash_password</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">password</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Hash a password for storage.&quot;&quot;&quot;</span>
+        <span class="n">peppered</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_apply_pepper</span><span class="p">(</span><span class="n">password</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_hasher</span><span class="o">.</span><span class="n">hash</span><span class="p">(</span><span class="n">peppered</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">verify_password</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">password</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">hash_str</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Verify a password against a stored hash.&quot;&quot;&quot;</span>
+        <span class="n">peppered</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_apply_pepper</span><span class="p">(</span><span class="n">password</span><span class="p">)</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_hasher</span><span class="o">.</span><span class="n">verify</span><span class="p">(</span><span class="n">hash_str</span><span class="p">,</span> <span class="n">peppered</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">True</span>
+        <span class="k">except</span> <span class="n">exceptions</span><span class="o">.</span><span class="n">VerifyMismatchError</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="k">except</span> <span class="n">exceptions</span><span class="o">.</span><span class="n">InvalidHashError</span><span class="p">:</span>
+            <span class="c1"># Corrupted hash in database</span>
+            <span class="k">return</span> <span class="kc">False</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">needs_rehash</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">hash_str</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Check if hash needs upgrading to current parameters.&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_hasher</span><span class="o">.</span><span class="n">check_needs_rehash</span><span class="p">(</span><span class="n">hash_str</span><span class="p">)</span>
+</code></pre></div>
+
+<p>Key points from this implementation:</p>
+<ol>
+<li>
+<p><strong>Pepper</strong>: An additional secret applied via HMAC before hashing. Unlike the salt (stored with the hash), the pepper is stored separately (environment variable, HSM, or secrets manager). If the database is stolen but the pepper is not, the hashes are even harder to crack.</p>
+</li>
+<li>
+<p><strong>HMAC for peppering</strong>: We use HMAC-SHA256 rather than simple concatenation to avoid length-extension attacks and to produce uniform-length input to argon2 (which avoids the 72-byte bcrypt truncation issue if you later switch algorithms).</p>
+</li>
+<li>
+<p><strong>Rehash detection</strong>: On every successful login, check <code>needs_rehash</code> and transparently upgrade.</p>
+</li>
+</ol>
+<h2>Migrating from Weak Hashes</h2>
+<p>If you inherit a system using unsalted MD5 or SHA-1, you need a migration strategy. The safest approach is <strong>hash wrapping</strong> — apply the new algorithm on top of the old hash without requiring users to log in:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">hashlib</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">argon2</span><span class="w"> </span><span class="kn">import</span> <span class="n">PasswordHasher</span>
+
+<span class="n">ph</span> <span class="o">=</span> <span class="n">PasswordHasher</span><span class="p">(</span><span class="n">time_cost</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">memory_cost</span><span class="o">=</span><span class="mi">65536</span><span class="p">,</span> <span class="n">parallelism</span><span class="o">=</span><span class="mi">4</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">migrate_md5_hash</span><span class="p">(</span><span class="n">old_md5_hex</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Wrap an existing MD5 hash with argon2id.</span>
+<span class="sd">    The stored value becomes argon2id(md5(password)).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="n">ph</span><span class="o">.</span><span class="n">hash</span><span class="p">(</span><span class="n">old_md5_hex</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">verify_migrated</span><span class="p">(</span><span class="n">password</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">wrapped_hash</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Verify against a wrapped hash:</span>
+<span class="sd">    Compute md5(password), then verify with argon2.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">md5_hex</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">md5</span><span class="p">(</span><span class="n">password</span><span class="o">.</span><span class="n">encode</span><span class="p">())</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">ph</span><span class="o">.</span><span class="n">verify</span><span class="p">(</span><span class="n">wrapped_hash</span><span class="p">,</span> <span class="n">md5_hex</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">True</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+
+<span class="c1"># Step 1: Batch migration (no user action needed)</span>
+<span class="c1"># For each row: new_hash = migrate_md5_hash(old_md5_hash)</span>
+
+<span class="c1"># Step 2: On successful login, re-hash with pure argon2</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">login_and_upgrade</span><span class="p">(</span><span class="n">password</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">stored_hash</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">is_wrapped</span><span class="p">:</span> <span class="nb">bool</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">is_wrapped</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">verify_migrated</span><span class="p">(</span><span class="n">password</span><span class="p">,</span> <span class="n">stored_hash</span><span class="p">):</span>
+            <span class="c1"># Upgrade to pure argon2id</span>
+            <span class="n">new_hash</span> <span class="o">=</span> <span class="n">ph</span><span class="o">.</span><span class="n">hash</span><span class="p">(</span><span class="n">password</span><span class="p">)</span>
+            <span class="c1"># UPDATE users SET password_hash = new_hash, is_wrapped = FALSE</span>
+            <span class="k">return</span> <span class="kc">True</span><span class="p">,</span> <span class="n">new_hash</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">ph</span><span class="o">.</span><span class="n">verify</span><span class="p">(</span><span class="n">stored_hash</span><span class="p">,</span> <span class="n">password</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">True</span><span class="p">,</span> <span class="kc">None</span>
+        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+            <span class="k">pass</span>
+    <span class="k">return</span> <span class="kc">False</span><span class="p">,</span> <span class="kc">None</span>
+</code></pre></div>
+
+<p>This two-phase approach provides immediate protection (wrapping) while gradually migrating to pure hashes as users log in. For accounts that never log in again, you still have argon2id protecting the weak MD5 hash.</p>
+<h2>Database Schema Considerations</h2>
+<p>Store enough metadata to support algorithm evolution:</p>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">email</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">password_hash</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- Generous length for future algorithms</span>
+<span class="w">    </span><span class="n">hash_scheme</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;argon2id&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">hash_version</span><span class="w"> </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w">          </span><span class="c1">-- Your internal versioning</span>
+<span class="w">    </span><span class="n">password_changed_at</span><span class="w"> </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w"> </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<p>Using <code>VARCHAR(512)</code> for the hash field gives room for any algorithm. Argon2id hashes are typically around 97 characters, but future algorithms may be longer. The <code>hash_scheme</code> and <code>hash_version</code> columns make migration logic explicit and queryable — you can easily find users still on old schemes.</p>
+<h2>Summary of Algorithm Recommendations</h2>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Recommended Algorithm</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>New application</td>
+<td>Argon2id</td>
+<td>PHC winner, memory-hard, modern</td>
+</tr>
+<tr>
+<td>Legacy system upgrade</td>
+<td>bcrypt (then argon2id)</td>
+<td>Widely supported, well-understood</td>
+</tr>
+<tr>
+<td>High-security / compliance</td>
+<td>Argon2id with pepper</td>
+<td>Add HSM-backed pepper for defense in depth</td>
+</tr>
+<tr>
+<td>Constrained environment</td>
+<td>bcrypt</td>
+<td>Lower memory requirements than argon2</td>
+</tr>
+</tbody>
+</table>
+<p>Never use MD5, SHA-1, SHA-256, or any general-purpose hash function for passwords, even with a salt. They are too fast. Always use an adaptive, purpose-built password hashing algorithm with a work factor tuned to your hardware.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Benchmark and Choose Work Factors</div>
+                    <div class="exercise-desc"><p>Write a Python script that benchmarks bcrypt (rounds 10-15) and argon2id (with varying time_cost and memory_cost) on your machine. Find the parameters that result in approximately 300ms per hash for each algorithm. Document your findings and explain which you would choose for a web application serving 1,000 logins per second.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use time.perf_counter() for accurate timing. Remember that login endpoints need to handle concurrent requests — if each hash takes 300ms and you have limited CPU cores, you may need to account for thread/process pool sizing. Consider that argon2's parallelism parameter interacts with your application's concurrency model.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build a Migration Service</div>
+                    <div class="exercise-desc"><p>You have inherited a database with passwords stored as unsalted SHA-1 hashes. Build a PasswordMigrationService class that: (1) can wrap all existing SHA-1 hashes with argon2id in a batch operation, (2) correctly verifies passwords against both wrapped and pure argon2id hashes, (3) transparently upgrades wrapped hashes to pure argon2id on successful login, and (4) tracks migration progress with a 'hash_version' field.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use an integer version field: version 0 = raw SHA-1, version 1 = argon2id(sha1(password)), version 2 = argon2id(password). Your verify method should branch on the version. The batch migration converts version 0 to version 1 without needing the plaintext password.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement a Pepper Rotation Strategy</div>
+                    <div class="exercise-desc"><p>Design and implement a system that supports pepper rotation. The system should: maintain a list of pepper versions (pepper_v1, pepper_v2, etc.), store which pepper version was used alongside each hash, verify passwords by trying the stored pepper version, and re-hash with the latest pepper on successful login. Write tests demonstrating that passwords hashed with an old pepper still verify correctly after rotation.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Store the pepper version as part of your hash metadata (e.g., in the database or encoded in a custom prefix). Keep old peppers available in your configuration even after rotating to a new one. The re-hash on login pattern is the same as algorithm migration — just applied to the pepper instead.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Timing Attack Demonstration</div>
+                    <div class="exercise-desc"><p>Write two password verification functions: one using naive string comparison (==) and one using hmac.compare_digest. Then write a timing harness that measures the average verification time when the first character matches vs. when no characters match. Run enough iterations (10,000+) to show a statistically significant timing difference with the naive approach and no significant difference with the safe approach.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use time.perf_counter_ns() for nanosecond precision. Compare a hash that matches the first N characters against one that matches 0 characters. You may need to average over many thousands of iterations and use statistical analysis (e.g., compute mean and standard deviation) to see the difference clearly. The effect is small but measurable.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">bcrypt silently truncates long passwords</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Users with very long passwords (e.g., generated by password managers) can authenticate with a truncated version of their password. Security audit flags that different passwords produce identical hashes.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> bcrypt has a maximum input length of 72 bytes. Any password longer than 72 bytes is truncated before hashing. This means two passwords that share the same first 72 bytes but differ afterward will produce identical hashes.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Pre-hash the password with SHA-256 (or HMAC-SHA-256 with a pepper) before passing it to bcrypt. This produces a fixed-length 64-character hex string that is always under the 72-byte limit while preserving the entropy of longer passwords.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>import hashlib
+import bcrypt</p>
+<p>def hash_password_safe(password: str) -&gt; str:
+    # Pre-hash to handle arbitrary length passwords
+    pre_hashed = hashlib.sha256(password.encode('utf-8')).hexdigest()
+    return bcrypt.hashpw(
+        pre_hashed.encode('utf-8'),
+        bcrypt.gensalt(rounds=12)
+    ).decode('utf-8')</p>
+<h1>Without pre-hashing, these would produce the same hash:</h1>
+<p>long_pw_a = 'a' * 72 + 'DIFFERENT_SUFFIX_A'
+long_pw_b = 'a' * 72 + 'DIFFERENT_SUFFIX_B'</p>
+<p>hash_a = hash_password_safe(long_pw_a)
+hash_b = hash_password_safe(long_pw_b)
+assert not bcrypt.checkpw(
+    hashlib.sha256(long_pw_b.encode()).hexdigest().encode(),
+    hash_a.encode()
+)  # Correctly distinguishes the two passwords</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Login endpoint becomes a DoS vector due to expensive hashing</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Adaptive hashing is intentionally slow. An attacker can send thousands of login requests with random passwords, forcing the server to spend significant CPU time on hashing. With argon2's memory cost, this can also exhaust RAM.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement rate limiting on the login endpoint (per IP and per account), use a CAPTCHA after failed attempts, and consider placing hash computation behind an async task queue or a dedicated authentication service with its own resource limits. Also set a maximum password length (e.g., 128 characters) to prevent attackers from submitting extremely long inputs.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>from fastapi import FastAPI, Request, HTTPException
+from slowapi import Limiter
+from slowapi.util import get_remote_address</p>
+<p>app = FastAPI()
+limiter = Limiter(key_func=get_remote_address)</p>
+<p>MAX_PASSWORD_LENGTH = 128</p>
+<p>@app.post('/login')
+@limiter.limit('10/minute')  # Max 10 attempts per IP per minute
+async def login(request: Request, email: str, password: str):
+    if len(password) &gt; MAX_PASSWORD_LENGTH:
+        raise HTTPException(400, 'Password too long')
+    # ... proceed with verification</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Hash verification fails after migrating between systems or languages</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Different bcrypt implementations use different version prefixes ($2a$, $2b$, $2y$). Some libraries only accept specific prefixes. Additionally, character encoding differences (UTF-8 vs. Latin-1) between the original hashing system and the new one cause different byte sequences for non-ASCII passwords.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Normalize all password inputs to UTF-8 with NFC Unicode normalization before hashing. For bcrypt prefix issues, replace the prefix string when loading hashes (e.g., $2y$ to $2b$). Test cross-platform compatibility thoroughly before migrating.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>import unicodedata</p>
+<p>def normalize_password(password: str) -&gt; bytes:
+    """Normalize password to NFC UTF-8 for consistent cross-platform hashing."""
+    normalized = unicodedata.normalize('NFC', password)
+    return normalized.encode('utf-8')</p>
+<p>def fix_bcrypt_prefix(hash_str: str) -&gt; str:
+    """Convert PHP-style $2y$ prefix to Python-compatible $2b$ prefix."""
+    if hash_str.startswith('$2y$'):
+        return '$2b$' + hash_str[4:]
+    return hash_str</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">OWASP Password Storage Cheat Sheet</div>
+                    
+                    <div class="resource-note">The definitive guide to password storage best practices, regularly updated with current algorithm recommendations and parameter guidance.</div>
+                    
+                </a>
+                
+                <a href="https://www.rfc-editor.org/rfc/rfc9106" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">The Argon2 RFC (RFC 9106)</div>
+                    
+                    <div class="resource-note">The official specification for Argon2, including detailed descriptions of Argon2d, Argon2i, and Argon2id variants and their security properties.</div>
+                    
+                </a>
+                
+                <a href="https://codahale.com/how-to-safely-store-a-password/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">How to Safely Store a Password (Codahale)</div>
+                    
+                    <div class="resource-note">A classic and widely-cited article that clearly explains why bcrypt matters. Still relevant as a conceptual foundation even though argon2 is now preferred.</div>
+                    
+                </a>
+                
+                <a href="https://passlib.readthedocs.io/en/stable/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">passlib Documentation</div>
+                    
+                    <div class="resource-note">Comprehensive documentation for the passlib library, including CryptContext configuration, algorithm migration patterns, and detailed parameter tuning guides.</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/8.3.2-py.html" class="btn">Encryption: Symmetric vs Asymmetric, TLS Handshake &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-py.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

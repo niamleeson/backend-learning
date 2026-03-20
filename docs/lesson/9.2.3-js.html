@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Key-Value Store (Redis/DynamoDB) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Storage & Data Systems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.2.3</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a Key-Value Store (Redis/DynamoDB)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a key-value store as a network of filing cabinets (nodes), each responsible for a range of alphabetical folders (partitions). When you store a document, a receptionist (coordinator) figures out which cabinets it belongs in (consistent hashing), makes three copies (replication factor), and files them in three different cabinets. When you retrieve it, the receptionist asks two cabinets and takes the most recent copy (quorum read). If a cabinet is locked (node down), someone else holds the document temporarily and files it later (hinted handoff).</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Key-Value Store (Redis/DynamoDB)</h1>
+<h2>Introduction</h2>
+<p>A key-value store is the simplest yet most fundamental distributed data system. It stores data as key-value pairs and supports <code>get(key)</code> and <code>put(key, value)</code> operations. Systems like Redis, DynamoDB, Memcached, and etcd power caching layers, session stores, configuration management, and more. Designing one from scratch tests your understanding of data partitioning, replication, consistency, failure detection, and storage engines.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li><strong>put(key, value)</strong>: Store a key-value pair</li>
+<li><strong>get(key)</strong>: Retrieve the value for a given key</li>
+<li><strong>delete(key)</strong>: Remove a key-value pair</li>
+<li><strong>TTL support</strong>: Keys can expire after a specified duration</li>
+<li><strong>Automatic data partitioning</strong>: Data distributed across multiple nodes</li>
+<li><strong>Tunable consistency</strong>: Choose between strong and eventual consistency per request</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li><strong>Latency</strong>: &lt; 10ms for get and put at p99</li>
+<li><strong>Throughput</strong>: 1M+ operations per second</li>
+<li><strong>Availability</strong>: 99.99% (partition-tolerant, favoring availability)</li>
+<li><strong>Scalability</strong>: Linear horizontal scaling by adding nodes</li>
+<li><strong>Durability</strong>: Configurable (in-memory for speed, WAL for durability)</li>
+</ul>
+<h2>Step 2: Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Data size:          100 TB total
+Avg key size:       32 bytes
+Avg value size:     1 KB
+Total pairs:        100 TB / 1 KB = ~100B key-value pairs
+Operations:         1M ops/sec (70% reads, 30% writes)
+Nodes:              100 TB / 1 TB per node = 100 nodes (with replication: 300)
+Replication factor: 3
+
+Per-node:
+  Storage:          ~1 TB
+  Ops:              ~10K ops/sec
+  Network:          ~10 MB/s per node
+</code></pre></div>
+
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────────────┐
+│                      Client                              │
+│         const value = await kvClient.get(&#39;user:123&#39;)     │
+└───────────────────────┬─────────────────────────────────┘
+                        │
+                        ▼
+┌───────────────────────────────────────────────────────────┐
+│                  Coordinator Node                         │
+│  (any node can be coordinator -- receives client request) │
+│                                                           │
+│  1. Hash the key to find partition                        │
+│  2. Look up responsible nodes in the ring                 │
+│  3. Forward request to replica nodes                      │
+│  4. Wait for quorum responses                             │
+│  5. Return result to client                               │
+└──────┬──────────────────────┬──────────────────┬─────────┘
+       │                      │                  │
+       ▼                      ▼                  ▼
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│   Node A     │   │   Node B     │   │   Node C     │
+│  (Replica 1) │   │  (Replica 2) │   │  (Replica 3) │
+│              │   │              │   │              │
+│ ┌──────────┐ │   │ ┌──────────┐ │   │ ┌──────────┐ │
+│ │MemTable  │ │   │ │MemTable  │ │   │ │MemTable  │ │
+│ │(in-memory)│ │   │ │(in-memory)│ │   │ │(in-memory)│ │
+│ └────┬─────┘ │   │ └────┬─────┘ │   │ └────┬─────┘ │
+│      │flush  │   │      │flush  │   │      │flush  │
+│ ┌────▼─────┐ │   │ ┌────▼─────┐ │   │ ┌────▼─────┐ │
+│ │SSTables  │ │   │ │SSTables  │ │   │ │SSTables  │ │
+│ │(on disk) │ │   │ │(on disk) │ │   │ │(on disk) │ │
+│ └──────────┘ │   │ └──────────┘ │   │ └──────────┘ │
+│ ┌──────────┐ │   │ ┌──────────┐ │   │ ┌──────────┐ │
+│ │   WAL    │ │   │ │   WAL    │ │   │ │   WAL    │ │
+│ │(durabil.)│ │   │ │(durabil.)│ │   │ │(durabil.)│ │
+│ └──────────┘ │   │ └──────────┘ │   │ └──────────┘ │
+└──────────────┘   └──────────────┘   └──────────────┘
+</code></pre></div>
+
+<h2>Step 4: API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// Put a key-value pair</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">put</span><span class="p">(</span><span class="s1">&#39;/api/v1/kv/:key&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="p">,</span><span class="w"> </span><span class="nx">consistency</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// consistency: &#39;one&#39; | &#39;quorum&#39; | &#39;all&#39;</span>
+
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">partition</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">consistentHash</span><span class="p">.</span><span class="nx">getPartition</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">replicas</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">partitionMap</span><span class="p">.</span><span class="nx">getReplicas</span><span class="p">(</span><span class="nx">partition</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">writeConsistency</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">consistency</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;quorum&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">requiredAcks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getRequiredAcks</span><span class="p">(</span><span class="nx">writeConsistency</span><span class="p">,</span><span class="w"> </span><span class="nx">replicas</span><span class="p">.</span><span class="nx">length</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">entry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="p">,</span><span class="w"> </span><span class="nx">ttl</span><span class="o">:</span><span class="w"> </span><span class="nx">ttl</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">    </span><span class="c1">// Write to replicas in parallel</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">allSettled</span><span class="p">(</span>
+<span class="w">      </span><span class="nx">replicas</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">node</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="nx">entry</span><span class="p">))</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">acks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;fulfilled&#39;</span><span class="p">).</span><span class="nx">length</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">acks</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">requiredAcks</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">success</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">acks</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">503</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Failed to achieve write quorum&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="c1">// Get a value by key</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/kv/:key&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">consistency</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">consistency</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;quorum&#39;</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">partition</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">consistentHash</span><span class="p">.</span><span class="nx">getPartition</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">replicas</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">partitionMap</span><span class="p">.</span><span class="nx">getReplicas</span><span class="p">(</span><span class="nx">partition</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">requiredReads</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getRequiredAcks</span><span class="p">(</span><span class="nx">consistency</span><span class="p">,</span><span class="w"> </span><span class="nx">replicas</span><span class="p">.</span><span class="nx">length</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">allSettled</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">replicas</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">node</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">read</span><span class="p">(</span><span class="nx">key</span><span class="p">))</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">responses</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">results</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;fulfilled&#39;</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">value</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">v</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">v</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">responses</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">requiredReads</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">503</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Failed to achieve read quorum&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Return the value with the highest timestamp (last-write-wins)</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">latest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">responses</span><span class="p">.</span><span class="nx">reduce</span><span class="p">((</span><span class="nx">a</span><span class="p">,</span><span class="w"> </span><span class="nx">b</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">timestamp</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">timestamp</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">a</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="nx">b</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Check TTL</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">latest</span><span class="p">.</span><span class="nx">ttl</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">latest</span><span class="p">.</span><span class="nx">timestamp</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">latest</span><span class="p">.</span><span class="nx">ttl</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Key expired&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nx">latest</span><span class="p">.</span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nx">latest</span><span class="p">.</span><span class="nx">timestamp</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Delete a key</span>
+<span class="nx">router</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="s1">&#39;/api/v1/kv/:key&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Use a tombstone (soft delete) to propagate deletion</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">partition</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">consistentHash</span><span class="p">.</span><span class="nx">getPartition</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">replicas</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">partitionMap</span><span class="p">.</span><span class="nx">getReplicas</span><span class="p">(</span><span class="nx">partition</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">tombstone</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span><span class="w"> </span><span class="nx">deleted</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">allSettled</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">replicas</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">node</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="nx">tombstone</span><span class="p">))</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">acks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;fulfilled&#39;</span><span class="p">).</span><span class="nx">length</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">deleted</span><span class="o">:</span><span class="w"> </span><span class="nx">acks</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">replicas</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">2</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">getRequiredAcks</span><span class="p">(</span><span class="nx">consistency</span><span class="p">,</span><span class="w"> </span><span class="nx">replicaCount</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">consistency</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;one&#39;</span><span class="o">:</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;all&#39;</span><span class="o">:</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">replicaCount</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;quorum&#39;</span><span class="o">:</span><span class="w"> </span><span class="k">default</span><span class="o">:</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">replicaCount</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">2</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 5: Database Schema / Storage Engine</h2>
+<p>A key-value store IS the database, so instead of a schema we design the storage engine.</p>
+<h3>LSM Tree (Log-Structured Merge Tree)</h3>
+<p>Used by LevelDB, RocksDB, Cassandra, and DynamoDB.</p>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">LSMStorage</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">dataDir</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">dataDir</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">dataDir</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">memTable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span><span class="w">       </span><span class="c1">// In-memory sorted map</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">memTableSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">maxMemTableSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">4</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="p">;</span><span class="w"> </span><span class="c1">// 4MB</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">wal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WriteAheadLog</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">dataDir</span><span class="si">}</span><span class="sb">/wal`</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">sstables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span><span class="w">              </span><span class="c1">// Sorted on-disk files</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">bloomFilters</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span><span class="w">          </span><span class="c1">// One per SSTable</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">put</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 1. Write to WAL first (durability)</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">wal</span><span class="p">.</span><span class="nx">append</span><span class="p">({</span><span class="w"> </span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// 2. Write to MemTable</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">memTable</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">memTableSize</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">key</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="nx">value</span><span class="o">?</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 3. Flush to SSTable if MemTable is full</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">memTableSize</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">maxMemTableSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">flushMemTable</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 1. Check MemTable first (most recent writes)</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">memTable</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">key</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">memTable</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 2. Check SSTables from newest to oldest</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">sstables</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">--</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Check bloom filter first to skip SSTables that definitely</span>
+<span class="w">      </span><span class="c1">// don&#39;t contain the key</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">this</span><span class="p">.</span><span class="nx">bloomFilters</span><span class="p">[</span><span class="nx">i</span><span class="p">].</span><span class="nx">mightContain</span><span class="p">(</span><span class="nx">key</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">sstables</span><span class="p">[</span><span class="nx">i</span><span class="p">].</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">result</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">flushMemTable</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Sort entries and write to disk as SSTable</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">entries</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[...</span><span class="k">this</span><span class="p">.</span><span class="nx">memTable</span><span class="p">.</span><span class="nx">entries</span><span class="p">()]</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">sort</span><span class="p">(([</span><span class="nx">a</span><span class="p">],</span><span class="w"> </span><span class="p">[</span><span class="nx">b</span><span class="p">])</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">localeCompare</span><span class="p">(</span><span class="nx">b</span><span class="p">));</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">sstable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">SSTable</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="k">this</span><span class="p">.</span><span class="nx">dataDir</span><span class="si">}</span><span class="sb">/sst_</span><span class="si">${</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">bloom</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">BloomFilter</span><span class="p">(</span><span class="nx">entries</span><span class="p">.</span><span class="nx">length</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">val</span><span class="p">]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">entries</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">sstable</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">val</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">bloom</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">sstables</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">sstable</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">bloomFilters</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">bloom</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Clear MemTable and WAL</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">memTable</span><span class="p">.</span><span class="nx">clear</span><span class="p">();</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">memTableSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">wal</span><span class="p">.</span><span class="nx">truncate</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Consistent Hashing for Partitioning</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">ConsistentHashRing</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">virtualNodes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">150</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">virtualNodes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">virtualNodes</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">ring</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span><span class="w">          </span><span class="c1">// hash -&gt; node</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">sortedHashes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span><span class="w">         </span><span class="c1">// sorted hash positions</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">addNode</span><span class="p">(</span><span class="nx">nodeId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">virtualNodes</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_hash</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">nodeId</span><span class="si">}</span><span class="sb">:vn</span><span class="si">${</span><span class="nx">i</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">ring</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">hash</span><span class="p">,</span><span class="w"> </span><span class="nx">nodeId</span><span class="p">);</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">sortedHashes</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">hash</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">sortedHashes</span><span class="p">.</span><span class="nx">sort</span><span class="p">((</span><span class="nx">a</span><span class="p">,</span><span class="w"> </span><span class="nx">b</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">a</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">b</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">removeNode</span><span class="p">(</span><span class="nx">nodeId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">virtualNodes</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_hash</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">nodeId</span><span class="si">}</span><span class="sb">:vn</span><span class="si">${</span><span class="nx">i</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">ring</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">hash</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">sortedHashes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">sortedHashes</span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">h</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">ring</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">h</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">getNode</span><span class="p">(</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_hash</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">nodeHash</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">sortedHashes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">hash</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">nodeHash</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">ring</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">nodeHash</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">ring</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">sortedHashes</span><span class="p">[</span><span class="mf">0</span><span class="p">]);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Get N replica nodes (walk clockwise on the ring)</span>
+<span class="w">  </span><span class="nx">getReplicas</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">3</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_hash</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">replicas</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Set</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">startIdx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">sortedHashes</span><span class="p">.</span><span class="nx">findIndex</span><span class="p">(</span><span class="nx">h</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">h</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">hash</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">startIdx</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="o">-</span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="nx">startIdx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">replicas</span><span class="p">.</span><span class="nx">size</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">count</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">sortedHashes</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">idx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">startIdx</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">i</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">sortedHashes</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">replicas</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">ring</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">sortedHashes</span><span class="p">[</span><span class="nx">idx</span><span class="p">]));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">[...</span><span class="nx">replicas</span><span class="p">];</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">_hash</span><span class="p">(</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">createHash</span><span class="p">(</span><span class="s1">&#39;md5&#39;</span><span class="p">).</span><span class="nx">update</span><span class="p">(</span><span class="nx">key</span><span class="p">).</span><span class="nx">digest</span><span class="p">().</span><span class="nx">readUInt32BE</span><span class="p">(</span><span class="mf">0</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 6: Deep Dive -- Replication and Consistency</h2>
+<h3>Quorum Reads and Writes</h3>
+<p>With N replicas, W write acknowledgments needed, and R read replicas queried:
+- <strong>Strong consistency</strong>: W + R &gt; N (e.g., N=3, W=2, R=2)
+- <strong>Eventual consistency</strong>: W=1, R=1 (fast but may read stale data)
+- <strong>Write-heavy</strong>: W=1, R=3 (fast writes, reads check all replicas)</p>
+<div class="highlight"><pre><span></span><code>N=3 replicas, W=2, R=2 (quorum):
+
+Write &quot;user:123&quot; = &quot;Alice&quot;:
+  Node A: ACK (1)    ✓
+  Node B: ACK (2)    ✓  → quorum reached, return success
+  Node C: timeout         → will catch up via anti-entropy
+
+Read &quot;user:123&quot;:
+  Node A: &quot;Alice&quot; (ts: 100)  ✓
+  Node B: &quot;Alice&quot; (ts: 100)  ✓  → quorum reached
+  Since W + R (2+2=4) &gt; N (3), guaranteed to read latest write
+</code></pre></div>
+
+<h3>Conflict Resolution</h3>
+<p>When replicas diverge, resolve conflicts using:
+- <strong>Last-Write-Wins (LWW)</strong>: Use timestamps; highest timestamp wins. Simple but can lose data.
+- <strong>Vector Clocks</strong>: Track causal history; detect true conflicts. Complex but accurate.</p>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">VectorClock</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">clocks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">clocks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">clocks</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">increment</span><span class="p">(</span><span class="nx">nodeId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">clocks</span><span class="p">[</span><span class="nx">nodeId</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">clocks</span><span class="p">[</span><span class="nx">nodeId</span><span class="p">]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">merge</span><span class="p">(</span><span class="nx">other</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">merged</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">VectorClock</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">clocks</span><span class="p">);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">node</span><span class="p">,</span><span class="w"> </span><span class="nx">ts</span><span class="p">]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nb">Object</span><span class="p">.</span><span class="nx">entries</span><span class="p">(</span><span class="nx">other</span><span class="p">.</span><span class="nx">clocks</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">merged</span><span class="p">.</span><span class="nx">clocks</span><span class="p">[</span><span class="nx">node</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">max</span><span class="p">(</span><span class="nx">merged</span><span class="p">.</span><span class="nx">clocks</span><span class="p">[</span><span class="nx">node</span><span class="p">]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">ts</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">merged</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">isConcurrentWith</span><span class="p">(</span><span class="nx">other</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">thisGreater</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nx">otherGreater</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">allNodes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Set</span><span class="p">([</span>
+<span class="w">      </span><span class="p">...</span><span class="nb">Object</span><span class="p">.</span><span class="nx">keys</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">clocks</span><span class="p">),</span>
+<span class="w">      </span><span class="p">...</span><span class="nb">Object</span><span class="p">.</span><span class="nx">keys</span><span class="p">(</span><span class="nx">other</span><span class="p">.</span><span class="nx">clocks</span><span class="p">),</span>
+<span class="w">    </span><span class="p">]);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">allNodes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">clocks</span><span class="p">[</span><span class="nx">node</span><span class="p">]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">other</span><span class="p">.</span><span class="nx">clocks</span><span class="p">[</span><span class="nx">node</span><span class="p">]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">a</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">b</span><span class="p">)</span><span class="w"> </span><span class="nx">thisGreater</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">b</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">a</span><span class="p">)</span><span class="w"> </span><span class="nx">otherGreater</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">thisGreater</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">otherGreater</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 7: Scaling Strategies</h2>
+<ol>
+<li><strong>Consistent hashing</strong>: Adding/removing nodes only remaps K/N keys (K total keys, N nodes)</li>
+<li><strong>Virtual nodes</strong>: Each physical node owns many positions on the ring for even distribution</li>
+<li><strong>Hinted handoff</strong>: When a replica is down, another node temporarily accepts writes and forwards them when the replica recovers</li>
+<li><strong>Anti-entropy (Merkle trees)</strong>: Replicas periodically compare Merkle trees of their data to find and repair inconsistencies</li>
+<li><strong>Compaction</strong>: Periodically merge SSTables to reduce read amplification</li>
+<li><strong>Bloom filters</strong>: Avoid unnecessary disk reads for keys that do not exist in an SSTable</li>
+</ol>
+<h2>Step 8: Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Storage engine</td>
+<td>LSM Tree</td>
+<td>B+ Tree</td>
+<td>LSM for write-heavy, B+ for read-heavy</td>
+</tr>
+<tr>
+<td>Consistency</td>
+<td>Strong (quorum)</td>
+<td>Eventual (single)</td>
+<td>Tunable per-request</td>
+</tr>
+<tr>
+<td>Conflict resolution</td>
+<td>LWW</td>
+<td>Vector clocks</td>
+<td>LWW for simplicity, vector clocks when data loss is unacceptable</td>
+</tr>
+<tr>
+<td>Partitioning</td>
+<td>Consistent hashing</td>
+<td>Range-based</td>
+<td>Consistent hashing (better load distribution)</td>
+</tr>
+<tr>
+<td>In-memory only</td>
+<td>Yes (Redis-like)</td>
+<td>Disk-backed (DynamoDB-like)</td>
+<td>Depends on data size and durability requirements</td>
+</tr>
+<tr>
+<td>Failure detection</td>
+<td>Heartbeat</td>
+<td>Gossip protocol</td>
+<td>Gossip for large clusters (O(log N) propagation)</td>
+</tr>
+</tbody>
+</table>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build an In-Memory Key-Value Store</div>
+                    <div class="exercise-desc"><p>Implement a single-node key-value store in Node.js with get, put, delete, and TTL support. Use a Map for storage and a separate data structure for TTL expiration. Expose it via an Express REST API. Benchmark it with autocannon to measure throughput.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>For TTL, use a min-heap (priority queue) sorted by expiration time. Run a setInterval that pops expired keys. Alternatively, check TTL lazily on read.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Consistent Hashing with Virtual Nodes</div>
+                    <div class="exercise-desc"><p>Build a consistent hash ring in Node.js. Add 5 physical nodes with 100 virtual nodes each. Hash 10,000 random keys and verify distribution is within 20% of perfect balance. Then remove one node and verify that only ~20% of keys are remapped.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use MD5 for hashing. Count keys per physical node before and after removal. Calculate standard deviation to measure balance.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Simulate Quorum Reads and Writes</div>
+                    <div class="exercise-desc"><p>Create a simulation of 3 replica nodes with configurable network delay and failure probability. Implement quorum writes (W=2) and reads (R=2). Inject a node failure and verify that the system still operates correctly. Test that W+R &gt; N guarantees reading the latest write.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Simulate nodes as objects with a <code>write(key, value)</code> and <code>read(key)</code> method that randomly delay or throw. Use Promise.allSettled to collect results.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build a Write-Ahead Log</div>
+                    <div class="exercise-desc"><p>Implement a simple WAL that appends key-value operations to a file. On startup, replay the WAL to reconstruct the in-memory state. Benchmark the performance difference between fsync on every write vs. batched fsync every 100ms.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>fs.appendFile</code> or <code>fs.createWriteStream</code> in append mode. For replay, read line by line with readline. Use <code>fs.fdatasync</code> for fsync.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Hot keys causing uneven load across nodes</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Certain keys (e.g., a viral post's like counter) receive millions of operations per second, overloading the nodes responsible for that key's partition.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement key splitting: append a random suffix (e.g., `key:0` through `key:9`) to spread the hot key across multiple nodes. On read, query all shards and aggregate. Alternatively, use a local cache on coordinator nodes for read-heavy hot keys.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Data inconsistency after network partition heals</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> During a network partition, both sides accepted writes for the same keys. When the partition heals, replicas have conflicting values.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use vector clocks to detect true conflicts. For last-write-wins, ensure all nodes use synchronized clocks (NTP with bounded drift). Run anti-entropy repair using Merkle tree comparison to identify and resolve divergent keys.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Read latency increasing as data grows</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Too many SSTables on disk. Each read must check multiple SSTables (read amplification). Bloom filters help but do not eliminate all unnecessary reads.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement tiered or leveled compaction to merge SSTables. Leveled compaction (LevelDB-style) bounds read amplification to O(log N). Monitor compaction throughput and ensure it keeps pace with write throughput.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://dataintensive.net/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Designing Data-Intensive Applications - Chapters 5 & 6</div>
+                    
+                    <div class="resource-note">Replication and Partitioning chapters are essential reading for this topic</div>
+                    
+                </a>
+                
+                <a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag paper">paper</div>
+                    <div class="resource-title">Amazon DynamoDB Paper</div>
+                    
+                    <div class="resource-note">The original Dynamo paper introducing consistent hashing, quorum, vector clocks, and anti-entropy</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/docs/reference/internals/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Internals Documentation</div>
+                    
+                    <div class="resource-note">How Redis implements its data structures and persistence</div>
+                    
+                </a>
+                
+                <a href="https://www.cs.umb.edu/~poneil/lsmtree.pdf" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag paper">paper</div>
+                    <div class="resource-title">LSM Tree Explained</div>
+                    
+                    <div class="resource-note">Original LSM-tree paper by O'Neil et al.</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.2.2-js.html" class="btn">&larr; Design a Video Streaming Platform (YouTube)</a>
+            
+            
+            <a href="/backend-learning/lesson/9.2.4-js.html" class="btn">Design a Search Engine (Google) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

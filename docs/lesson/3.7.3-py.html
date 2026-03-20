@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pub/Sub and Lua Scripting - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-py.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-3-py.html">Databases</a> &rsaquo;
+            Redis
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">3.7.3</span>
+                <span>~2h</span>
+            </div>
+            <h1>Pub/Sub and Lua Scripting</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Pub/Sub is like a radio broadcast: anyone tuned in hears the message. Lua scripting is like handing the server a recipe card to execute all steps without interruption.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h2>Pub/Sub and Lua Scripting in Redis</h2>
+<p>Pub/Sub enables real-time messaging between services. Lua scripting executes atomic multi-step operations server-side.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">redis</span><span class="o">,</span><span class="w"> </span><span class="nn">threading</span>
+
+<span class="n">r</span> <span class="o">=</span> <span class="n">redis</span><span class="o">.</span><span class="n">Redis</span><span class="p">(</span><span class="n">host</span><span class="o">=</span><span class="s1">&#39;localhost&#39;</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">6379</span><span class="p">,</span> <span class="n">decode_responses</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="c1"># Publisher</span>
+<span class="n">r</span><span class="o">.</span><span class="n">publish</span><span class="p">(</span><span class="s1">&#39;notifications&#39;</span><span class="p">,</span> <span class="s1">&#39;New order received&#39;</span><span class="p">)</span>
+
+<span class="c1"># Subscriber (runs in its own thread)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">subscribe_loop</span><span class="p">():</span>
+    <span class="n">pubsub</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="n">pubsub</span><span class="p">()</span>
+    <span class="n">pubsub</span><span class="o">.</span><span class="n">subscribe</span><span class="p">(</span><span class="s1">&#39;notifications&#39;</span><span class="p">,</span> <span class="s1">&#39;alerts&#39;</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">message</span> <span class="ow">in</span> <span class="n">pubsub</span><span class="o">.</span><span class="n">listen</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">message</span><span class="p">[</span><span class="s1">&#39;type&#39;</span><span class="p">]</span> <span class="o">==</span> <span class="s1">&#39;message&#39;</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[</span><span class="si">{</span><span class="n">message</span><span class="p">[</span><span class="s1">&#39;channel&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">] </span><span class="si">{</span><span class="n">message</span><span class="p">[</span><span class="s1">&#39;data&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="n">thread</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Thread</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">subscribe_loop</span><span class="p">,</span> <span class="n">daemon</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">thread</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+
+<span class="c1"># Lua scripting: atomic rate limiter</span>
+<span class="n">rate_limit_script</span> <span class="o">=</span> <span class="s2">&quot;&quot;&quot;</span>
+<span class="s2">local key = KEYS[1]</span>
+<span class="s2">local limit = tonumber(ARGV[1])</span>
+<span class="s2">local window = tonumber(ARGV[2])</span>
+<span class="s2">local current = tonumber(redis.call(&#39;GET&#39;, key) or &#39;0&#39;)</span>
+<span class="s2">if current &gt;= limit then</span>
+<span class="s2">    return 0</span>
+<span class="s2">end</span>
+<span class="s2">redis.call(&#39;INCR&#39;, key)</span>
+<span class="s2">if current == 0 then</span>
+<span class="s2">    redis.call(&#39;EXPIRE&#39;, key, window)</span>
+<span class="s2">end</span>
+<span class="s2">return 1</span>
+<span class="s2">&quot;&quot;&quot;</span>
+<span class="n">rate_limit</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="n">register_script</span><span class="p">(</span><span class="n">rate_limit_script</span><span class="p">)</span>
+<span class="n">allowed</span> <span class="o">=</span> <span class="n">rate_limit</span><span class="p">(</span><span class="n">keys</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;rate:user:42&#39;</span><span class="p">],</span> <span class="n">args</span><span class="o">=</span><span class="p">[</span><span class="mi">10</span><span class="p">,</span> <span class="mi">60</span><span class="p">])</span>
+</code></pre></div>
+
+<p><strong>Key Takeaways:</strong>
+- Pub/Sub is fire-and-forget; messages are lost if no subscriber is listening. Use Streams for persistence.
+- Lua scripts execute atomically on the server, avoiding race conditions in multi-step operations.
+- register_script() caches the script SHA for efficient repeated execution.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Chat Room with Pub/Sub</div>
+                    <div class="exercise-desc"><p>Build a simple chat system where users subscribe to a room channel and publish messages to it.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Each user runs pubsub.subscribe('room:general'). Publishing is r.publish('room:general', message).</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Atomic Token Bucket</div>
+                    <div class="exercise-desc"><p>Implement a token bucket rate limiter using a Lua script that atomically checks and decrements available tokens.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Lua script: GET tokens, if &gt; 0 DECR and return 1, else return 0. Use EXPIRE for refill window.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Subscriber misses messages published before it connected.</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Pub/Sub does not buffer messages; only active subscribers receive them.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use Redis Streams (XADD/XREAD) for durable message queues with consumer groups.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Lua script blocks all other Redis commands while running.</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Redis is single-threaded; Lua scripts hold the event loop.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Keep Lua scripts short and fast. Avoid unbounded loops or large data operations in scripts.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://redis.io/docs/interact/pubsub/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Pub/Sub Documentation</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/docs/interact/programmability/eval-intro/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Lua Scripting</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/3.7.2-py.html" class="btn">&larr; Caching Patterns: Cache-Aside, Write-Through, TTL</a>
+            
+            
+            <a href="/backend-learning/lesson/3.7.4-py.html" class="btn">Redis in Python: redis-py and Async Redis &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-3-py.html">&larr; Back to Databases</a>
+        </div>
+    </div>
+</body>
+</html>

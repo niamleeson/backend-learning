@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prometheus, Grafana, and Alerting - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-py.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-py.html">Security & Reliability</a> &rsaquo;
+            Logging & Monitoring
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.5.3</span>
+                <span>~3h</span>
+            </div>
+            <h1>Prometheus, Grafana, and Alerting</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of Prometheus like a health inspector who visits every restaurant (service) on a regular schedule, checks their kitchen (metrics endpoint), and writes down the readings. Grafana is the dashboard on the wall that shows all inspection results as charts, and Alertmanager is the phone system that calls the restaurant owner when the health score drops below acceptable levels.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Prometheus, Grafana, and Alerting</h1>
+<p>Monitoring is the nervous system of any production backend. Without it, you are flying blind — unable to detect degradation, diagnose incidents, or plan capacity. In this lesson, we dive deep into the modern observability stack built around <strong>Prometheus</strong> for metrics collection and storage, <strong>Grafana</strong> for visualization, and <strong>Alertmanager</strong> for notifications.</p>
+<h2>Prometheus Architecture</h2>
+<p>Prometheus is an open-source monitoring and alerting toolkit originally built at SoundCloud and now a graduated project of the Cloud Native Computing Foundation (CNCF). Its architecture is fundamentally different from traditional push-based monitoring systems.</p>
+<h3>The Pull Model</h3>
+<p>Prometheus uses a <strong>pull-based</strong> (scrape) model. Instead of applications pushing metrics to a central collector, Prometheus periodically scrapes HTTP endpoints exposed by your applications. This has several advantages:</p>
+<ul>
+<li><strong>Simpler application code</strong>: Your app just exposes an endpoint; it does not need to know where the monitoring server lives.</li>
+<li><strong>Easier debugging</strong>: You can manually curl the metrics endpoint to verify what is being exposed.</li>
+<li><strong>Central configuration</strong>: Prometheus decides what to scrape and how often, making it easy to manage from one place.</li>
+<li><strong>Health detection built-in</strong>: If a scrape fails, Prometheus knows the target may be down.</li>
+</ul>
+<p>A typical Prometheus deployment looks like this:</p>
+<div class="highlight"><pre><span></span><code>┌──────────────┐       scrape        ┌──────────────┐
+│  Prometheus   │ ──────────────────&gt; │  App /metrics│
+│  Server       │                     └──────────────┘
+│               │       scrape        ┌──────────────┐
+│  TSDB         │ ──────────────────&gt; │  App /metrics│
+│  (local disk) │                     └──────────────┘
+│               │       scrape        ┌──────────────┐
+│  Rule Engine  │ ──────────────────&gt; │  Node Exporter│
+└──────┬───────┘                     └──────────────┘
+       │
+       │ alerts
+       ▼
+┌──────────────┐      notify         ┌──────────────┐
+│ Alertmanager  │ ──────────────────&gt; │ Slack/PagerD │
+└──────────────┘                     └──────────────┘
+</code></pre></div>
+
+<h3>Time Series Database (TSDB)</h3>
+<p>Prometheus stores all data as <strong>time series</strong> — streams of timestamped values belonging to the same metric and set of labels. Each time series is uniquely identified by its metric name and a set of key-value label pairs:</p>
+<div class="highlight"><pre><span></span><code>http_requests_total{method=&quot;GET&quot;, endpoint=&quot;/api/users&quot;, status=&quot;200&quot;} 1234 1678901234
+</code></pre></div>
+
+<p>The TSDB is highly optimized for append-heavy workloads and compresses data efficiently. By default, data is retained for 15 days, but this is configurable.</p>
+<h2>Metric Types</h2>
+<p>Prometheus defines four core metric types. Understanding when to use each is critical.</p>
+<h3>Counter</h3>
+<p>A <strong>counter</strong> is a monotonically increasing value that only goes up (or resets to zero on restart). Use counters for things you count: requests served, errors occurred, bytes transferred.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">prometheus_client</span><span class="w"> </span><span class="kn">import</span> <span class="n">Counter</span>
+
+<span class="n">REQUEST_COUNT</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">(</span>
+    <span class="s1">&#39;http_requests_total&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;Total number of HTTP requests&#39;</span><span class="p">,</span>
+    <span class="p">[</span><span class="s1">&#39;method&#39;</span><span class="p">,</span> <span class="s1">&#39;endpoint&#39;</span><span class="p">,</span> <span class="s1">&#39;status&#39;</span><span class="p">]</span>
+<span class="p">)</span>
+
+<span class="c1"># Increment</span>
+<span class="n">REQUEST_COUNT</span><span class="o">.</span><span class="n">labels</span><span class="p">(</span><span class="n">method</span><span class="o">=</span><span class="s1">&#39;GET&#39;</span><span class="p">,</span> <span class="n">endpoint</span><span class="o">=</span><span class="s1">&#39;/api/users&#39;</span><span class="p">,</span> <span class="n">status</span><span class="o">=</span><span class="s1">&#39;200&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">inc</span><span class="p">()</span>
+</code></pre></div>
+
+<p>Never use a counter for something that can decrease (like current connections). The key insight: you almost always use <code>rate()</code> or <code>increase()</code> on counters in queries, not the raw value.</p>
+<h3>Gauge</h3>
+<p>A <strong>gauge</strong> is a value that can go up and down. Use gauges for current state: temperature, memory usage, active connections, queue depth.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">prometheus_client</span><span class="w"> </span><span class="kn">import</span> <span class="n">Gauge</span>
+
+<span class="n">ACTIVE_CONNECTIONS</span> <span class="o">=</span> <span class="n">Gauge</span><span class="p">(</span>
+    <span class="s1">&#39;active_connections&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;Number of currently active connections&#39;</span>
+<span class="p">)</span>
+
+<span class="n">ACTIVE_CONNECTIONS</span><span class="o">.</span><span class="n">inc</span><span class="p">()</span>   <span class="c1"># Connection opened</span>
+<span class="n">ACTIVE_CONNECTIONS</span><span class="o">.</span><span class="n">dec</span><span class="p">()</span>   <span class="c1"># Connection closed</span>
+<span class="n">ACTIVE_CONNECTIONS</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="mi">42</span><span class="p">)</span> <span class="c1"># Set to specific value</span>
+</code></pre></div>
+
+<h3>Histogram</h3>
+<p>A <strong>histogram</strong> samples observations (usually durations or sizes) and counts them in configurable buckets. It also provides a sum of all observed values and a count.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">prometheus_client</span><span class="w"> </span><span class="kn">import</span> <span class="n">Histogram</span>
+
+<span class="n">REQUEST_DURATION</span> <span class="o">=</span> <span class="n">Histogram</span><span class="p">(</span>
+    <span class="s1">&#39;http_request_duration_seconds&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;Request duration in seconds&#39;</span><span class="p">,</span>
+    <span class="p">[</span><span class="s1">&#39;method&#39;</span><span class="p">,</span> <span class="s1">&#39;endpoint&#39;</span><span class="p">],</span>
+    <span class="n">buckets</span><span class="o">=</span><span class="p">[</span><span class="mf">0.01</span><span class="p">,</span> <span class="mf">0.025</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.25</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">2.5</span><span class="p">,</span> <span class="mf">5.0</span><span class="p">,</span> <span class="mf">10.0</span><span class="p">]</span>
+<span class="p">)</span>
+
+<span class="c1"># Observe a duration</span>
+<span class="n">REQUEST_DURATION</span><span class="o">.</span><span class="n">labels</span><span class="p">(</span><span class="n">method</span><span class="o">=</span><span class="s1">&#39;GET&#39;</span><span class="p">,</span> <span class="n">endpoint</span><span class="o">=</span><span class="s1">&#39;/api/users&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">observe</span><span class="p">(</span><span class="mf">0.035</span><span class="p">)</span>
+
+<span class="c1"># Or use as a context manager / decorator</span>
+<span class="nd">@REQUEST_DURATION</span><span class="o">.</span><span class="n">labels</span><span class="p">(</span><span class="n">method</span><span class="o">=</span><span class="s1">&#39;GET&#39;</span><span class="p">,</span> <span class="n">endpoint</span><span class="o">=</span><span class="s1">&#39;/api/users&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_users</span><span class="p">():</span>
+    <span class="o">...</span>
+</code></pre></div>
+
+<p>Histograms are the workhorse for latency monitoring. They let you compute quantiles server-side using <code>histogram_quantile()</code>.</p>
+<h3>Summary</h3>
+<p>A <strong>summary</strong> is similar to a histogram but calculates quantiles on the client side. Summaries are less flexible because client-side quantiles cannot be aggregated across instances. In most cases, prefer histograms.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">prometheus_client</span><span class="w"> </span><span class="kn">import</span> <span class="n">Summary</span>
+
+<span class="n">REQUEST_LATENCY</span> <span class="o">=</span> <span class="n">Summary</span><span class="p">(</span>
+    <span class="s1">&#39;request_processing_seconds&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;Time spent processing request&#39;</span>
+<span class="p">)</span>
+
+<span class="nd">@REQUEST_LATENCY</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">process_request</span><span class="p">():</span>
+    <span class="o">...</span>
+</code></pre></div>
+
+<h2>Instrumenting a FastAPI Application</h2>
+<p>Let us build a complete monitoring setup for a FastAPI application. First, install the required packages:</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>fastapi<span class="w"> </span>uvicorn<span class="w"> </span>prometheus-client<span class="w"> </span>prometheus-fastapi-instrumentator
+</code></pre></div>
+
+<h3>Basic Setup with prometheus-fastapi-instrumentator</h3>
+<p>The fastest way to instrument FastAPI:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">fastapi</span><span class="w"> </span><span class="kn">import</span> <span class="n">FastAPI</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">prometheus_fastapi_instrumentator</span><span class="w"> </span><span class="kn">import</span> <span class="n">Instrumentator</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">FastAPI</span><span class="p">(</span><span class="n">title</span><span class="o">=</span><span class="s2">&quot;User Service&quot;</span><span class="p">)</span>
+
+<span class="c1"># This automatically instruments all routes</span>
+<span class="n">Instrumentator</span><span class="p">()</span><span class="o">.</span><span class="n">instrument</span><span class="p">(</span><span class="n">app</span><span class="p">)</span><span class="o">.</span><span class="n">expose</span><span class="p">(</span><span class="n">app</span><span class="p">,</span> <span class="n">endpoint</span><span class="o">=</span><span class="s2">&quot;/metrics&quot;</span><span class="p">)</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/api/users&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_users</span><span class="p">():</span>
+    <span class="k">return</span> <span class="p">[{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;Alice&quot;</span><span class="p">}]</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/api/users/</span><span class="si">{user_id}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_user</span><span class="p">(</span><span class="n">user_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="n">user_id</span><span class="p">,</span> <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;Alice&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<h3>Custom Metrics with Manual Instrumentation</h3>
+<p>For more control, instrument manually using middleware:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">fastapi</span><span class="w"> </span><span class="kn">import</span> <span class="n">FastAPI</span><span class="p">,</span> <span class="n">Request</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">prometheus_client</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">Counter</span><span class="p">,</span> <span class="n">Histogram</span><span class="p">,</span> <span class="n">Gauge</span><span class="p">,</span> <span class="n">generate_latest</span><span class="p">,</span> <span class="n">CONTENT_TYPE_LATEST</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">starlette.responses</span><span class="w"> </span><span class="kn">import</span> <span class="n">Response</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">FastAPI</span><span class="p">()</span>
+
+<span class="c1"># Define metrics</span>
+<span class="n">REQUEST_COUNT</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">(</span>
+    <span class="s1">&#39;http_requests_total&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;Total HTTP requests&#39;</span><span class="p">,</span>
+    <span class="p">[</span><span class="s1">&#39;method&#39;</span><span class="p">,</span> <span class="s1">&#39;endpoint&#39;</span><span class="p">,</span> <span class="s1">&#39;status&#39;</span><span class="p">]</span>
+<span class="p">)</span>
+
+<span class="n">REQUEST_DURATION</span> <span class="o">=</span> <span class="n">Histogram</span><span class="p">(</span>
+    <span class="s1">&#39;http_request_duration_seconds&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;HTTP request duration in seconds&#39;</span><span class="p">,</span>
+    <span class="p">[</span><span class="s1">&#39;method&#39;</span><span class="p">,</span> <span class="s1">&#39;endpoint&#39;</span><span class="p">],</span>
+    <span class="n">buckets</span><span class="o">=</span><span class="p">[</span><span class="mf">0.005</span><span class="p">,</span> <span class="mf">0.01</span><span class="p">,</span> <span class="mf">0.025</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.25</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">2.5</span><span class="p">,</span> <span class="mf">5.0</span><span class="p">]</span>
+<span class="p">)</span>
+
+<span class="n">IN_PROGRESS</span> <span class="o">=</span> <span class="n">Gauge</span><span class="p">(</span>
+    <span class="s1">&#39;http_requests_in_progress&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;Number of HTTP requests currently being processed&#39;</span><span class="p">,</span>
+    <span class="p">[</span><span class="s1">&#39;method&#39;</span><span class="p">]</span>
+<span class="p">)</span>
+
+<span class="n">DB_QUERY_DURATION</span> <span class="o">=</span> <span class="n">Histogram</span><span class="p">(</span>
+    <span class="s1">&#39;db_query_duration_seconds&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;Database query duration&#39;</span><span class="p">,</span>
+    <span class="p">[</span><span class="s1">&#39;query_type&#39;</span><span class="p">,</span> <span class="s1">&#39;table&#39;</span><span class="p">]</span>
+<span class="p">)</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">middleware</span><span class="p">(</span><span class="s2">&quot;http&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">metrics_middleware</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">Request</span><span class="p">,</span> <span class="n">call_next</span><span class="p">):</span>
+    <span class="n">method</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">method</span>
+    <span class="c1"># Normalize the path to avoid cardinality explosion</span>
+    <span class="n">path</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">url</span><span class="o">.</span><span class="n">path</span>
+
+    <span class="n">IN_PROGRESS</span><span class="o">.</span><span class="n">labels</span><span class="p">(</span><span class="n">method</span><span class="o">=</span><span class="n">method</span><span class="p">)</span><span class="o">.</span><span class="n">inc</span><span class="p">()</span>
+    <span class="n">start_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">response</span> <span class="o">=</span> <span class="k">await</span> <span class="n">call_next</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+        <span class="n">duration</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span> <span class="o">-</span> <span class="n">start_time</span>
+
+        <span class="n">REQUEST_COUNT</span><span class="o">.</span><span class="n">labels</span><span class="p">(</span>
+            <span class="n">method</span><span class="o">=</span><span class="n">method</span><span class="p">,</span>
+            <span class="n">endpoint</span><span class="o">=</span><span class="n">path</span><span class="p">,</span>
+            <span class="n">status</span><span class="o">=</span><span class="n">response</span><span class="o">.</span><span class="n">status_code</span>
+        <span class="p">)</span><span class="o">.</span><span class="n">inc</span><span class="p">()</span>
+        <span class="n">REQUEST_DURATION</span><span class="o">.</span><span class="n">labels</span><span class="p">(</span>
+            <span class="n">method</span><span class="o">=</span><span class="n">method</span><span class="p">,</span>
+            <span class="n">endpoint</span><span class="o">=</span><span class="n">path</span>
+        <span class="p">)</span><span class="o">.</span><span class="n">observe</span><span class="p">(</span><span class="n">duration</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">response</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="n">REQUEST_COUNT</span><span class="o">.</span><span class="n">labels</span><span class="p">(</span>
+            <span class="n">method</span><span class="o">=</span><span class="n">method</span><span class="p">,</span>
+            <span class="n">endpoint</span><span class="o">=</span><span class="n">path</span><span class="p">,</span>
+            <span class="n">status</span><span class="o">=</span><span class="mi">500</span>
+        <span class="p">)</span><span class="o">.</span><span class="n">inc</span><span class="p">()</span>
+        <span class="k">raise</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">IN_PROGRESS</span><span class="o">.</span><span class="n">labels</span><span class="p">(</span><span class="n">method</span><span class="o">=</span><span class="n">method</span><span class="p">)</span><span class="o">.</span><span class="n">dec</span><span class="p">()</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/metrics&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">metrics</span><span class="p">():</span>
+    <span class="k">return</span> <span class="n">Response</span><span class="p">(</span>
+        <span class="n">content</span><span class="o">=</span><span class="n">generate_latest</span><span class="p">(),</span>
+        <span class="n">media_type</span><span class="o">=</span><span class="n">CONTENT_TYPE_LATEST</span>
+    <span class="p">)</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/api/users/</span><span class="si">{user_id}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_user</span><span class="p">(</span><span class="n">user_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">):</span>
+    <span class="k">with</span> <span class="n">DB_QUERY_DURATION</span><span class="o">.</span><span class="n">labels</span><span class="p">(</span><span class="n">query_type</span><span class="o">=</span><span class="s1">&#39;select&#39;</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="s1">&#39;users&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">time</span><span class="p">():</span>
+        <span class="c1"># Simulate DB query</span>
+        <span class="n">user</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="n">user_id</span><span class="p">,</span> <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;Alice&quot;</span><span class="p">}</span>
+    <span class="k">return</span> <span class="n">user</span>
+</code></pre></div>
+
+<h3>The Exposition Format</h3>
+<p>When you curl <code>/metrics</code>, you see the Prometheus text exposition format:</p>
+<div class="highlight"><pre><span></span><code># HELP http_requests_total Total HTTP requests
+# TYPE http_requests_total counter
+http_requests_total{method=&quot;GET&quot;,endpoint=&quot;/api/users/1&quot;,status=&quot;200&quot;} 47.0
+http_requests_total{method=&quot;POST&quot;,endpoint=&quot;/api/users&quot;,status=&quot;201&quot;} 12.0
+# HELP http_request_duration_seconds HTTP request duration in seconds
+# TYPE http_request_duration_seconds histogram
+http_request_duration_seconds_bucket{method=&quot;GET&quot;,endpoint=&quot;/api/users/1&quot;,le=&quot;0.005&quot;} 10.0
+http_request_duration_seconds_bucket{method=&quot;GET&quot;,endpoint=&quot;/api/users/1&quot;,le=&quot;0.01&quot;} 35.0
+http_request_duration_seconds_bucket{method=&quot;GET&quot;,endpoint=&quot;/api/users/1&quot;,le=&quot;+Inf&quot;} 47.0
+http_request_duration_seconds_sum{method=&quot;GET&quot;,endpoint=&quot;/api/users/1&quot;} 0.892
+http_request_duration_seconds_count{method=&quot;GET&quot;,endpoint=&quot;/api/users/1&quot;} 47.0
+</code></pre></div>
+
+<h2>Prometheus Configuration</h2>
+<p>Configure Prometheus via <code>prometheus.yml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">global</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">scrape_interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">15s</span>
+<span class="w">  </span><span class="nt">evaluation_interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">15s</span>
+
+<span class="nt">rule_files</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;alert_rules.yml&quot;</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;recording_rules.yml&quot;</span>
+
+<span class="nt">alerting</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">alertmanagers</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">static_configs</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">targets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;alertmanager:9093&quot;</span><span class="p p-Indicator">]</span>
+
+<span class="nt">scrape_configs</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">job_name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;user-service&quot;</span>
+<span class="w">    </span><span class="nt">metrics_path</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/metrics</span>
+<span class="w">    </span><span class="nt">static_configs</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">targets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;app:8000&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">        </span><span class="nt">labels</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">environment</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;production&quot;</span>
+<span class="w">          </span><span class="nt">team</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;backend&quot;</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">job_name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;node-exporter&quot;</span>
+<span class="w">    </span><span class="nt">static_configs</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">targets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;node-exporter:9100&quot;</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<h2>PromQL: Querying Metrics</h2>
+<p>PromQL (Prometheus Query Language) is how you query and aggregate time series data. Mastering it is essential.</p>
+<h3>Basic Queries</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Raw counter value (rarely useful on its own)</span>
+<span class="nv">http_requests_total</span>
+
+<span class="c1"># Filter by labels</span>
+<span class="nv">http_requests_total</span><span class="p">{</span><span class="nl">method</span><span class="o">=</span><span class="p">&quot;</span><span class="s">GET</span><span class="p">&quot;,</span><span class="w"> </span><span class="nl">status</span><span class="o">=</span><span class="p">&quot;</span><span class="s">200</span><span class="p">&quot;}</span>
+
+<span class="c1"># Regex matching</span>
+<span class="nv">http_requests_total</span><span class="p">{</span><span class="nl">endpoint</span><span class="o">=~</span><span class="p">&quot;</span><span class="s">/api/users.*</span><span class="p">&quot;}</span>
+
+<span class="c1"># Negative matching</span>
+<span class="nv">http_requests_total</span><span class="p">{</span><span class="nl">status</span><span class="o">!~</span><span class="p">&quot;</span><span class="s">2..</span><span class="p">&quot;}</span>
+</code></pre></div>
+
+<h3>Rate and Increase</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Per-second rate over 5 minutes (most common counter query)</span>
+<span class="kr">rate</span><span class="o">(</span><span class="nv">http_requests_total</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">)</span>
+
+<span class="c1"># Total increase over the last hour</span>
+<span class="kr">increase</span><span class="o">(</span><span class="nv">http_requests_total</span><span class="p">[</span><span class="s">1h</span><span class="p">]</span><span class="o">)</span>
+
+<span class="c1"># Rate of errors for a specific endpoint</span>
+<span class="kr">rate</span><span class="o">(</span><span class="nv">http_requests_total</span><span class="p">{</span><span class="nl">status</span><span class="o">=~</span><span class="p">&quot;</span><span class="s">5..</span><span class="p">&quot;,</span><span class="w"> </span><span class="nl">endpoint</span><span class="o">=</span><span class="p">&quot;</span><span class="s">/api/users</span><span class="p">&quot;}[</span><span class="s">5m</span><span class="p">]</span><span class="o">)</span>
+</code></pre></div>
+
+<h3>Aggregation</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Total request rate across all endpoints</span>
+<span class="k">sum</span><span class="o">(</span><span class="kr">rate</span><span class="o">(</span><span class="nv">http_requests_total</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">))</span>
+
+<span class="c1"># Request rate grouped by status code</span>
+<span class="k">sum</span><span class="w"> </span><span class="k">by</span><span class="w"> </span><span class="o">(</span><span class="nv">status</span><span class="o">)</span><span class="w"> </span><span class="o">(</span><span class="kr">rate</span><span class="o">(</span><span class="nv">http_requests_total</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">))</span>
+
+<span class="c1"># Average request duration</span>
+<span class="kr">rate</span><span class="o">(</span><span class="nv">http_request_duration_seconds_sum</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="kr">rate</span><span class="o">(</span><span class="nv">http_request_duration_seconds_count</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">)</span>
+
+<span class="c1"># 95th percentile latency from histogram</span>
+<span class="kr">histogram_quantile</span><span class="o">(</span><span class="mf">0.95</span><span class="p">,</span><span class="w"> </span><span class="k">sum</span><span class="w"> </span><span class="k">by</span><span class="w"> </span><span class="o">(</span><span class="nv">le</span><span class="o">)</span><span class="w"> </span><span class="o">(</span><span class="kr">rate</span><span class="o">(</span><span class="nv">http_request_duration_seconds_bucket</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">)))</span>
+
+<span class="c1"># 99th percentile latency per endpoint</span>
+<span class="kr">histogram_quantile</span><span class="o">(</span><span class="mf">0.99</span><span class="p">,</span><span class="w"> </span><span class="k">sum</span><span class="w"> </span><span class="k">by</span><span class="w"> </span><span class="o">(</span><span class="nv">le</span><span class="p">,</span><span class="w"> </span><span class="nv">endpoint</span><span class="o">)</span><span class="w"> </span><span class="o">(</span><span class="kr">rate</span><span class="o">(</span><span class="nv">http_request_duration_seconds_bucket</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">)))</span>
+</code></pre></div>
+
+<h3>Error Rate</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Error rate as a percentage</span>
+<span class="k">sum</span><span class="o">(</span><span class="kr">rate</span><span class="o">(</span><span class="nv">http_requests_total</span><span class="p">{</span><span class="nl">status</span><span class="o">=~</span><span class="p">&quot;</span><span class="s">5..</span><span class="p">&quot;}[</span><span class="s">5m</span><span class="p">]</span><span class="o">))</span><span class="w"> </span><span class="o">/</span>
+<span class="k">sum</span><span class="o">(</span><span class="kr">rate</span><span class="o">(</span><span class="nv">http_requests_total</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">))</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">100</span>
+</code></pre></div>
+
+<h2>Recording Rules</h2>
+<p>Frequently used or expensive queries should be pre-computed as <strong>recording rules</strong>. These run at the evaluation interval and store the result as a new time series.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># recording_rules.yml</span>
+<span class="nt">groups</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http_recording_rules</span>
+<span class="w">    </span><span class="nt">interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">15s</span>
+<span class="w">    </span><span class="nt">rules</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">record</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">job:http_requests_total:rate5m</span>
+<span class="w">        </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sum by (job) (rate(http_requests_total[5m]))</span>
+
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">record</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">job:http_request_duration_seconds:p95</span>
+<span class="w">        </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">          </span><span class="no">histogram_quantile(0.95,</span>
+<span class="w">            </span><span class="no">sum by (job, le) (rate(http_request_duration_seconds_bucket[5m]))</span>
+<span class="w">          </span><span class="no">)</span>
+
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">record</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">job:http_errors:rate5m</span>
+<span class="w">        </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sum by (job) (rate(http_requests_total{status=~&quot;5..&quot;}[5m]))</span>
+
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">record</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">job:http_error_ratio:rate5m</span>
+<span class="w">        </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<span class="w">          </span><span class="no">job:http_errors:rate5m / job:http_requests_total:rate5m</span>
+</code></pre></div>
+
+<p>Recording rules follow the naming convention <code>level:metric:operations</code> (e.g., <code>job:http_requests_total:rate5m</code>).</p>
+<h2>Alert Rules and Alertmanager</h2>
+<h3>Defining Alert Rules</h3>
+<p>Alert rules are evaluated by Prometheus and fired to Alertmanager:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># alert_rules.yml</span>
+<span class="nt">groups</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http_alerts</span>
+<span class="w">    </span><span class="nt">rules</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">alert</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">HighErrorRate</span>
+<span class="w">        </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">job:http_error_ratio:rate5m &gt; 0.05</span>
+<span class="w">        </span><span class="nt">for</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5m</span>
+<span class="w">        </span><span class="nt">labels</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">severity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">critical</span>
+<span class="w">          </span><span class="nt">team</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backend</span>
+<span class="w">        </span><span class="nt">annotations</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">summary</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;High</span><span class="nv"> </span><span class="s">error</span><span class="nv"> </span><span class="s">rate</span><span class="nv"> </span><span class="s">detected&quot;</span>
+<span class="w">          </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Error</span><span class="nv"> </span><span class="s">rate</span><span class="nv"> </span><span class="s">is</span><span class="nv"> </span><span class="s">{{</span><span class="nv"> </span><span class="s">$value</span><span class="nv"> </span><span class="s">|</span><span class="nv"> </span><span class="s">humanizePercentage</span><span class="nv"> </span><span class="s">}}</span><span class="nv"> </span><span class="s">for</span><span class="nv"> </span><span class="s">{{</span><span class="nv"> </span><span class="s">$labels.job</span><span class="nv"> </span><span class="s">}}&quot;</span>
+
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">alert</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">HighLatency</span>
+<span class="w">        </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">job:http_request_duration_seconds:p95 &gt; 1.0</span>
+<span class="w">        </span><span class="nt">for</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10m</span>
+<span class="w">        </span><span class="nt">labels</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">severity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">warning</span>
+<span class="w">        </span><span class="nt">annotations</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">summary</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;High</span><span class="nv"> </span><span class="s">p95</span><span class="nv"> </span><span class="s">latency&quot;</span>
+<span class="w">          </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;p95</span><span class="nv"> </span><span class="s">latency</span><span class="nv"> </span><span class="s">is</span><span class="nv"> </span><span class="s">{{</span><span class="nv"> </span><span class="s">$value</span><span class="nv"> </span><span class="s">}}s</span><span class="nv"> </span><span class="s">for</span><span class="nv"> </span><span class="s">{{</span><span class="nv"> </span><span class="s">$labels.job</span><span class="nv"> </span><span class="s">}}&quot;</span>
+
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">alert</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ServiceDown</span>
+<span class="w">        </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">up == 0</span>
+<span class="w">        </span><span class="nt">for</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1m</span>
+<span class="w">        </span><span class="nt">labels</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">severity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">critical</span>
+<span class="w">        </span><span class="nt">annotations</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">summary</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Service</span><span class="nv"> </span><span class="s">{{</span><span class="nv"> </span><span class="s">$labels.job</span><span class="nv"> </span><span class="s">}}</span><span class="nv"> </span><span class="s">is</span><span class="nv"> </span><span class="s">down&quot;</span>
+</code></pre></div>
+
+<p>The <code>for</code> clause requires the condition to be true for the specified duration before the alert fires. This prevents flapping on transient spikes.</p>
+<h3>Alertmanager Configuration</h3>
+<p>Alertmanager handles deduplication, grouping, silencing, and routing of alerts:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># alertmanager.yml</span>
+<span class="nt">global</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">resolve_timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5m</span>
+<span class="w">  </span><span class="nt">slack_api_url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://hooks.slack.com/services/XXX/YYY/ZZZ&quot;</span>
+
+<span class="nt">route</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">receiver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;default-slack&quot;</span>
+<span class="w">  </span><span class="nt">group_by</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;alertname&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;job&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">  </span><span class="nt">group_wait</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30s</span>
+<span class="w">  </span><span class="nt">group_interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5m</span>
+<span class="w">  </span><span class="nt">repeat_interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4h</span>
+<span class="w">  </span><span class="nt">routes</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">match</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">severity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">critical</span>
+<span class="w">      </span><span class="nt">receiver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;pagerduty-critical&quot;</span>
+<span class="w">      </span><span class="nt">repeat_interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1h</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">match</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">severity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">warning</span>
+<span class="w">      </span><span class="nt">receiver</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;slack-warnings&quot;</span>
+
+<span class="nt">receivers</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;default-slack&quot;</span>
+<span class="w">    </span><span class="nt">slack_configs</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">channel</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#alerts&quot;</span>
+<span class="w">        </span><span class="nt">title</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{{</span><span class="nv"> </span><span class="s">.GroupLabels.alertname</span><span class="nv"> </span><span class="s">}}&quot;</span>
+<span class="w">        </span><span class="nt">text</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{{</span><span class="nv"> </span><span class="s">range</span><span class="nv"> </span><span class="s">.Alerts</span><span class="nv"> </span><span class="s">}}{{</span><span class="nv"> </span><span class="s">.Annotations.description</span><span class="nv"> </span><span class="s">}}\n{{</span><span class="nv"> </span><span class="s">end</span><span class="nv"> </span><span class="s">}}&quot;</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;pagerduty-critical&quot;</span>
+<span class="w">    </span><span class="nt">pagerduty_configs</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">service_key</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;your-pagerduty-key&quot;</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;slack-warnings&quot;</span>
+<span class="w">    </span><span class="nt">slack_configs</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">channel</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;#alerts-warnings&quot;</span>
+
+<span class="nt">inhibit_rules</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">source_match</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">severity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">critical</span>
+<span class="w">    </span><span class="nt">target_match</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">severity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">warning</span>
+<span class="w">    </span><span class="nt">equal</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;alertname&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;job&quot;</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<h2>Grafana Dashboard Creation</h2>
+<p>Grafana connects to Prometheus as a data source and provides rich visualization. Here is a dashboard definition for our FastAPI service. In practice, you would create this in the Grafana UI, but it can also be provisioned as JSON:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;dashboard&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;User Service Dashboard&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;panels&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Request Rate&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;timeseries&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;targets&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">          </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;expr&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sum by (status) (rate(http_requests_total{job=&#39;user-service&#39;}[5m]))&quot;</span><span class="p">,</span>
+<span class="w">            </span><span class="nt">&quot;legendFormat&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;{{status}}&quot;</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">]</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;p95 Latency&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;timeseries&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;targets&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">          </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;expr&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;histogram_quantile(0.95, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{job=&#39;user-service&#39;}[5m])))&quot;</span><span class="p">,</span>
+<span class="w">            </span><span class="nt">&quot;legendFormat&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;{{endpoint}}&quot;</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">]</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Error Rate %&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;stat&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;targets&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">          </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;expr&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sum(rate(http_requests_total{job=&#39;user-service&#39;, status=~&#39;5..&#39;}[5m])) / sum(rate(http_requests_total{job=&#39;user-service&#39;}[5m])) * 100&quot;</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">]</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">]</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Key Grafana tips:
+- Use <strong>variables</strong> (e.g., <code>$job</code>, <code>$instance</code>) so dashboards are reusable across services.
+- Set meaningful <strong>thresholds</strong> (green below 100ms, yellow below 500ms, red above).
+- Use <strong>annotations</strong> to mark deploys, incidents, and config changes on graphs.
+- Create a <strong>row per concern</strong>: request rate, latency, errors, saturation.</p>
+<h2>Label Best Practices and Cardinality</h2>
+<h3>Label Best Practices</h3>
+<p>Labels add dimensionality to your metrics but come at a cost. Every unique combination of label values creates a new time series.</p>
+<p><strong>Do:</strong>
+- Use labels for dimensions you will filter or group by: <code>method</code>, <code>endpoint</code>, <code>status</code>, <code>environment</code>.
+- Keep label values bounded and low-cardinality.
+- Normalize URL paths: <code>/api/users/123</code> should become <code>/api/users/{id}</code>.</p>
+<p><strong>Do not:</strong>
+- Use user IDs, request IDs, email addresses, or timestamps as label values.
+- Use unbounded label values.
+- Add labels you never query on.</p>
+<h3>The Cardinality Problem</h3>
+<p>Cardinality = (number of metrics) x (unique label value combinations). High cardinality is the number one way to kill a Prometheus server.</p>
+<p>Consider this innocent-looking metric:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># DANGEROUS: user_id is unbounded!</span>
+<span class="n">REQUEST_COUNT</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">(</span>
+    <span class="s1">&#39;http_requests_total&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;Total requests&#39;</span><span class="p">,</span>
+    <span class="p">[</span><span class="s1">&#39;method&#39;</span><span class="p">,</span> <span class="s1">&#39;endpoint&#39;</span><span class="p">,</span> <span class="s1">&#39;status&#39;</span><span class="p">,</span> <span class="s1">&#39;user_id&#39;</span><span class="p">]</span>  <span class="c1"># user_id will explode cardinality</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>With 3 methods x 10 endpoints x 5 status codes x 100,000 users = <strong>15 million time series</strong>. Prometheus will run out of memory and crash.</p>
+<p>The fix: remove <code>user_id</code> from metric labels. If you need per-user analytics, use logs or a different system (like ClickHouse or BigQuery).</p>
+<h2>RED and USE Methods</h2>
+<p>Two frameworks help you decide what to monitor.</p>
+<h3>RED Method (for request-driven services)</h3>
+<ul>
+<li><strong>R</strong>ate: requests per second</li>
+<li><strong>E</strong>rrors: number of failed requests per second</li>
+<li><strong>D</strong>uration: distribution of request latency</li>
+</ul>
+<p>This is ideal for APIs and microservices. Our FastAPI instrumentation above covers all three.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Rate</span>
+<span class="k">sum</span><span class="o">(</span><span class="kr">rate</span><span class="o">(</span><span class="nv">http_requests_total</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">))</span>
+
+<span class="c1"># Errors</span>
+<span class="k">sum</span><span class="o">(</span><span class="kr">rate</span><span class="o">(</span><span class="nv">http_requests_total</span><span class="p">{</span><span class="nl">status</span><span class="o">=~</span><span class="p">&quot;</span><span class="s">5..</span><span class="p">&quot;}[</span><span class="s">5m</span><span class="p">]</span><span class="o">))</span>
+
+<span class="c1"># Duration (p50, p95, p99)</span>
+<span class="kr">histogram_quantile</span><span class="o">(</span><span class="mf">0.50</span><span class="p">,</span><span class="w"> </span><span class="k">sum</span><span class="w"> </span><span class="k">by</span><span class="w"> </span><span class="o">(</span><span class="nv">le</span><span class="o">)</span><span class="w"> </span><span class="o">(</span><span class="kr">rate</span><span class="o">(</span><span class="nv">http_request_duration_seconds_bucket</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">)))</span>
+<span class="kr">histogram_quantile</span><span class="o">(</span><span class="mf">0.95</span><span class="p">,</span><span class="w"> </span><span class="k">sum</span><span class="w"> </span><span class="k">by</span><span class="w"> </span><span class="o">(</span><span class="nv">le</span><span class="o">)</span><span class="w"> </span><span class="o">(</span><span class="kr">rate</span><span class="o">(</span><span class="nv">http_request_duration_seconds_bucket</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">)))</span>
+<span class="kr">histogram_quantile</span><span class="o">(</span><span class="mf">0.99</span><span class="p">,</span><span class="w"> </span><span class="k">sum</span><span class="w"> </span><span class="k">by</span><span class="w"> </span><span class="o">(</span><span class="nv">le</span><span class="o">)</span><span class="w"> </span><span class="o">(</span><span class="kr">rate</span><span class="o">(</span><span class="nv">http_request_duration_seconds_bucket</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">)))</span>
+</code></pre></div>
+
+<h3>USE Method (for resources like CPU, memory, disk, network)</h3>
+<ul>
+<li><strong>U</strong>tilization: percentage of resource capacity being used</li>
+<li><strong>S</strong>aturation: amount of work queued or waiting</li>
+<li><strong>E</strong>rrors: number of error events</li>
+</ul>
+<p>This applies to infrastructure. For example, for a database connection pool:</p>
+<div class="highlight"><pre><span></span><code><span class="n">POOL_SIZE</span> <span class="o">=</span> <span class="n">Gauge</span><span class="p">(</span><span class="s1">&#39;db_pool_size&#39;</span><span class="p">,</span> <span class="s1">&#39;Total connections in the pool&#39;</span><span class="p">)</span>
+<span class="n">POOL_IN_USE</span> <span class="o">=</span> <span class="n">Gauge</span><span class="p">(</span><span class="s1">&#39;db_pool_in_use&#39;</span><span class="p">,</span> <span class="s1">&#39;Connections currently in use&#39;</span><span class="p">)</span>
+<span class="n">POOL_WAITING</span> <span class="o">=</span> <span class="n">Gauge</span><span class="p">(</span><span class="s1">&#39;db_pool_waiting&#39;</span><span class="p">,</span> <span class="s1">&#39;Requests waiting for a connection&#39;</span><span class="p">)</span>
+<span class="n">POOL_ERRORS</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">(</span><span class="s1">&#39;db_pool_errors_total&#39;</span><span class="p">,</span> <span class="s1">&#39;Connection pool errors&#39;</span><span class="p">,</span> <span class="p">[</span><span class="s1">&#39;type&#39;</span><span class="p">])</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># Utilization</span>
+<span class="nv">db_pool_in_use</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nv">db_pool_size</span>
+
+<span class="c1"># Saturation</span>
+<span class="nv">db_pool_waiting</span>
+
+<span class="c1"># Errors</span>
+<span class="kr">rate</span><span class="o">(</span><span class="nv">db_pool_errors_total</span><span class="p">[</span><span class="s">5m</span><span class="p">]</span><span class="o">)</span>
+</code></pre></div>
+
+<h2>Complete Docker Compose Setup</h2>
+<p>Here is a complete setup to run everything locally:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># docker-compose.yml</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;3.8&quot;</span>
+<span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">app</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">build</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">.</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;8000:8000&quot;</span>
+
+<span class="w">  </span><span class="nt">prometheus</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">prom/prometheus:latest</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./prometheus.yml:/etc/prometheus/prometheus.yml</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./alert_rules.yml:/etc/prometheus/alert_rules.yml</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./recording_rules.yml:/etc/prometheus/recording_rules.yml</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;9090:9090&quot;</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&#39;--config.file=/etc/prometheus/prometheus.yml&#39;</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&#39;--storage.tsdb.retention.time=15d&#39;</span>
+
+<span class="w">  </span><span class="nt">alertmanager</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">prom/alertmanager:latest</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./alertmanager.yml:/etc/alertmanager/alertmanager.yml</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;9093:9093&quot;</span>
+
+<span class="w">  </span><span class="nt">grafana</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">grafana/grafana:latest</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;3000:3000&quot;</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">GF_SECURITY_ADMIN_PASSWORD=admin</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">grafana-data:/var/lib/grafana</span>
+
+<span class="nt">volumes</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">grafana-data</span><span class="p">:</span>
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<p><strong>1. Using <code>rate()</code> with too small a window.</strong> The <code>rate()</code> function needs at least two samples. If your scrape interval is 15s, a <code>rate(...[15s])</code> window may miss samples. Use at least 4x your scrape interval: <code>rate(...[1m])</code> for 15s scrapes.</p>
+<p><strong>2. Forgetting to normalize paths.</strong> Dynamic path segments like <code>/api/users/12345</code> create unique label values per user ID. Always normalize to <code>/api/users/{id}</code> in your middleware.</p>
+<p><strong>3. Alerting without a <code>for</code> duration.</strong> Omitting <code>for</code> means the alert fires on the first evaluation where the condition is true, leading to noisy flapping alerts. Always use <code>for</code> with at least a few minutes.</p>
+<p><strong>4. Using Summary instead of Histogram.</strong> Summaries calculate quantiles client-side and cannot be aggregated across instances. If you have 10 pods, you cannot compute a meaningful p99 from 10 individual p99 values. Use histograms.</p>
+<p><strong>5. Not setting up recording rules for dashboards.</strong> If your Grafana dashboard queries are complex PromQL expressions, every panel load re-evaluates them. Pre-compute with recording rules for faster dashboards and more consistent alerting.</p>
+<h2>Summary</h2>
+<p>Prometheus, Grafana, and Alertmanager form a battle-tested monitoring stack. Prometheus scrapes metrics from your services via HTTP, stores them as time series, and evaluates alert rules. Grafana visualizes these metrics in dashboards. Alertmanager routes alerts to the right people via the right channels.</p>
+<p>The key skills are: choosing the right metric type (counter for totals, gauge for current state, histogram for distributions), writing effective PromQL queries, managing label cardinality, and structuring your monitoring around the RED method for services and USE method for resources. With these fundamentals, you can build observability into any backend system and respond to incidents before your users even notice.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Instrument a FastAPI Todo App</div>
+                    <div class="exercise-desc"><p>Create a FastAPI application with CRUD endpoints for a todo list (create, read, update, delete). Instrument it with prometheus_client to track: (1) total request count by method, endpoint, and status code using a Counter, (2) request latency using a Histogram with custom buckets, (3) number of active todos using a Gauge. Expose a /metrics endpoint and verify the output by curling it after making several requests.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use middleware to capture request count and duration automatically. For the active todo gauge, increment when a todo is created and decrement when deleted. Use <code>generate_latest()</code> from prometheus_client to serve the /metrics endpoint.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Write PromQL Queries for an SLO Dashboard</div>
+                    <div class="exercise-desc"><p>Given a service instrumented with http_requests_total (labels: method, endpoint, status) and http_request_duration_seconds (histogram), write PromQL queries for: (1) overall request rate, (2) error rate as a percentage, (3) p50, p95, and p99 latency, (4) the ratio of requests completing under 200ms (apdex-like), and (5) a recording rule that pre-computes the error ratio. Set up Prometheus with these recording rules and verify them in the Prometheus UI.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>For the apdex-like ratio, use the histogram bucket with le="0.2" divided by the total count. Recording rules go in a separate YAML file referenced in prometheus.yml under rule_files.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build an Alert Pipeline</div>
+                    <div class="exercise-desc"><p>Configure Prometheus alert rules for: (1) error rate above 5% for 5 minutes (critical), (2) p95 latency above 500ms for 10 minutes (warning), (3) any instance down for 2 minutes (critical). Then configure Alertmanager to route critical alerts to a 'pagerduty' receiver and warnings to a 'slack' receiver. Add an inhibit rule so that if ServiceDown fires, it suppresses the other alerts for the same job. Test by shutting down your application and verifying the alert fires in the Alertmanager UI.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>up == 0</code> to detect instances that are down. The inhibit_rules section in alertmanager.yml lets you specify source_match and target_match with equal labels to suppress related alerts.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Detect and Fix a Cardinality Bomb</div>
+                    <div class="exercise-desc"><p>Intentionally create a metric with an unbounded label (e.g., request_id or user_id) and observe the impact on Prometheus memory usage. Use the Prometheus TSDB status page (/tsdb-status) to identify the high-cardinality metric. Then fix it by removing the unbounded label and introducing a separate approach (e.g., logging) for per-request tracking. Document the before and after cardinality numbers.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>The /api/v1/status/tsdb endpoint and the TSDB Status page in the Prometheus UI show the top series by label count. Use <code>prometheus_tsdb_head_series</code> to track the total number of active time series.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Prometheus shows 'no data' for a metric you know your application is emitting</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Grafana panels show 'No data'. PromQL queries in the Prometheus expression browser return empty results.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The most common causes are: (1) Prometheus is not scraping the target — check the Targets page at /targets. (2) The metric name or labels in your PromQL query do not exactly match what is exposed. (3) The scrape interval has not elapsed yet. (4) The /metrics endpoint is returning a non-200 status code or is behind authentication.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> First, verify the target is listed and healthy at http://prometheus:9090/targets. Then curl the /metrics endpoint directly from the Prometheus container to confirm the metric is present. Ensure your PromQL query uses the exact metric name and label names (they are case-sensitive). If using rate() on a counter, remember you need at least 2 scrape intervals of data before rate() returns results.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Prometheus OOM (Out of Memory) crashes or becomes extremely slow</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Prometheus container restarts frequently. Queries time out. The Prometheus process uses many gigabytes of RAM. The /tsdb-status page shows a single metric with millions of series.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Cardinality explosion due to labels with too many unique values. Each unique combination of metric name and label values creates a separate time series, and each series consumes memory. Common culprits: user IDs, IP addresses, request IDs, or un-normalized URL paths used as label values.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Check /api/v1/status/tsdb to identify which metrics have the most series. Remove or reduce high-cardinality labels. Normalize URL paths in your instrumentation middleware. Set the --storage.tsdb.no-lockfile and memory-related flags. Consider using Prometheus' sample_limit in scrape configs to prevent a single target from creating too many series.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <h1>In prometheus.yml, add a sample limit per scrape config</h1>
+<p>scrape_configs:
+  - job_name: 'user-service'
+    sample_limit: 10000
+    static_configs:
+      - targets: ['app:8000']</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Alerts fire and resolve repeatedly (flapping)</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Alertmanager sends repeated resolved/firing notifications. The alert history in Prometheus shows rapid state changes between pending, firing, and inactive.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The alert threshold is too close to the normal operating value, or the `for` duration is too short or missing. When a metric oscillates around the threshold, the alert state toggles between pending and firing repeatedly, generating noise.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Increase the `for` duration so the condition must hold for a sustained period (e.g., 5-10 minutes). Add hysteresis by using different thresholds for firing and resolving (Prometheus does not natively support this, but you can approximate by using a lower threshold in the alert expression and relying on `for`). Smooth the metric with a longer rate window. Consider whether the alert threshold itself is appropriate.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://prometheus.io/docs/introduction/overview/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">Prometheus Official Documentation</div>
+                    
+                    <div class="resource-note">The authoritative reference for all Prometheus concepts, configuration, and PromQL.</div>
+                    
+                </a>
+                
+                <a href="https://grafana.com/tutorials/grafana-fundamentals/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag tutorial">tutorial</div>
+                    <div class="resource-title">Grafana Fundamentals Tutorial</div>
+                    
+                    <div class="resource-note">Hands-on tutorial walking through data source setup, dashboard creation, and alerting in Grafana.</div>
+                    
+                </a>
+                
+                <a href="https://grafana.com/blog/2018/08/02/the-red-method-how-to-instrument-your-services/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">The RED Method: How to Instrument Your Services</div>
+                    
+                    <div class="resource-note">Tom Wilkie's original blog post explaining the Rate-Errors-Duration methodology for service monitoring.</div>
+                    
+                </a>
+                
+                <a href="https://www.oreilly.com/library/view/prometheus-up/9781098131135/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">Prometheus: Up & Running (O'Reilly)</div>
+                    
+                    <div class="resource-note">Comprehensive book covering Prometheus internals, PromQL, alerting patterns, and production operations.</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/8.5.2-py.html" class="btn">&larr; ELK Stack: Elasticsearch, Logstash, Kibana</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-py.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

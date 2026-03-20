@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Video Streaming Platform (YouTube) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Storage & Data Systems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.2.2</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a Video Streaming Platform (YouTube)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of YouTube like a TV broadcast network. When a creator uploads a raw tape, it goes to the editing room (transcoding pipeline) where copies are made for different screen sizes. These copies are shipped to local TV stations (CDN edges) around the world. When a viewer tunes in, they get the feed from their nearest station, and the station automatically adjusts the picture quality based on the viewer's signal strength (adaptive bitrate).</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Video Streaming Platform (YouTube)</h1>
+<h2>Introduction</h2>
+<p>A video streaming platform is one of the most bandwidth-intensive systems you can design. YouTube serves over 1 billion hours of video per day. This problem tests your understanding of video encoding pipelines, adaptive bitrate streaming, content delivery networks, and storage optimization at massive scale.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li><strong>Upload videos</strong>: Creators upload videos (up to 12 hours, any common format)</li>
+<li><strong>Transcode videos</strong>: Convert to multiple resolutions and codecs</li>
+<li><strong>Stream videos</strong>: Viewers watch with adaptive bitrate streaming</li>
+<li><strong>Search and discovery</strong>: Search by title, tags; recommendation feed</li>
+<li><strong>Engagement</strong>: Like, comment, subscribe, view count</li>
+<li><strong>Channels</strong>: Creator profiles with video management</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li><strong>Availability</strong>: 99.99% for video playback</li>
+<li><strong>Latency</strong>: Video playback starts within 2 seconds</li>
+<li><strong>Scalability</strong>: 2B monthly active users, 500 hours of video uploaded per minute</li>
+<li><strong>Durability</strong>: Zero data loss for uploaded videos</li>
+<li><strong>Global reach</strong>: Low latency across all continents</li>
+</ul>
+<h2>Step 2: Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Total users:           2B monthly active
+DAU:                   800M
+Avg watch time:        40 minutes/day
+Total daily watch:     800M * 40 min = 32B minutes = 533M hours/day
+
+Video uploads:         500 hours/minute = 720,000 hours/day
+Avg video size (raw):  1 GB/hour
+Daily upload storage:  720 TB/day (raw)
+Transcoded storage:    ~5x raw (multiple resolutions) = 3.6 PB/day
+
+Streaming bandwidth:
+  Average bitrate:     5 Mbps (1080p average)
+  Concurrent viewers:  ~50M peak
+  Peak bandwidth:      50M * 5 Mbps = 250 Tbps
+
+Metadata:
+  Total videos:        ~800M videos
+  Metadata per video:  ~5 KB
+  Total metadata:      ~4 TB
+</code></pre></div>
+
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌────────────────────────────────────────────────────────────────────┐
+│                           Clients                                  │
+│              (Web Player, Mobile App, Smart TV)                    │
+└────────┬──────────────────────────────────┬────────────────────────┘
+         │  (API requests)                  │  (Video stream)
+         ▼                                  ▼
+┌─────────────────┐              ┌───────────────────────┐
+│   API Gateway   │              │         CDN           │
+│   (metadata,    │              │   (Cloudfront/Akamai) │
+│    search,      │              │   Edge caching of     │
+│    engagement)  │              │   video segments      │
+└────────┬────────┘              └───────────┬───────────┘
+         │                                   │ cache miss
+         ▼                                   ▼
+┌─────────────────────────┐      ┌───────────────────────┐
+│    Application Servers  │      │   Origin Storage      │
+│  ┌──────────────────┐   │      │   (S3 / GCS)          │
+│  │ Video Metadata   │   │      │   Video segments      │
+│  │ Service          │   │      │   stored by quality   │
+│  ├──────────────────┤   │      └───────────────────────┘
+│  │ Search Service   │   │
+│  ├──────────────────┤   │
+│  │ Engagement       │   │
+│  │ Service          │   │
+│  └──────────────────┘   │
+└────────┬────────────────┘
+         │
+    ┌────┴────────────────────────────────┐
+    │                                     │
+    ▼                                     ▼
+┌──────────────┐                ┌─────────────────────┐
+│  PostgreSQL  │                │  Elasticsearch      │
+│  (metadata)  │                │  (search index)     │
+└──────────────┘                └─────────────────────┘
+
+
+       Upload Pipeline (Async):
+
+┌──────────┐    ┌──────────────┐    ┌──────────────┐    ┌───────────┐
+│  Upload  │───&gt;│  Message     │───&gt;│  Transcoding │───&gt;│  Origin   │
+│  Service │    │  Queue       │    │  Workers     │    │  Storage  │
+│          │    │  (SQS/Kafka) │    │  (FFmpeg)    │    │  (S3)     │
+└──────────┘    └──────────────┘    └──────────────┘    └───────────┘
+</code></pre></div>
+
+<h2>Step 4: API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// Initiate video upload</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/videos/upload&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">title</span><span class="p">,</span><span class="w"> </span><span class="nx">description</span><span class="p">,</span><span class="w"> </span><span class="nx">tags</span><span class="p">,</span><span class="w"> </span><span class="nx">category</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">video</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">videoService</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">creatorId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">title</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">description</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">tags</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">category</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;uploading&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Generate presigned URL for direct upload to S3</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">uploadUrl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">storageService</span><span class="p">.</span><span class="nx">getPresignedUploadUrl</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`raw/</span><span class="si">${</span><span class="nx">video</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">/original`</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">videoId</span><span class="o">:</span><span class="w"> </span><span class="nx">video</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">uploadUrl</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">expiresIn</span><span class="o">:</span><span class="w"> </span><span class="mf">3600</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Callback after upload complete -- triggers transcoding pipeline</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/videos/:videoId/uploaded&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">videoId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">videoService</span><span class="p">.</span><span class="nx">updateStatus</span><span class="p">(</span><span class="nx">videoId</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;processing&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Push to transcoding queue</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">transcodingQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;transcode&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">videoId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">sourceKey</span><span class="o">:</span><span class="w"> </span><span class="sb">`raw/</span><span class="si">${</span><span class="nx">videoId</span><span class="si">}</span><span class="sb">/original`</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">resolutions</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mf">360</span><span class="p">,</span><span class="w"> </span><span class="mf">480</span><span class="p">,</span><span class="w"> </span><span class="mf">720</span><span class="p">,</span><span class="w"> </span><span class="mf">1080</span><span class="p">,</span><span class="w"> </span><span class="mf">1440</span><span class="p">,</span><span class="w"> </span><span class="mf">2160</span><span class="p">],</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;processing&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Stream a video (returns manifest URL)</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/videos/:videoId/stream&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">video</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">videoService</span><span class="p">.</span><span class="nx">getById</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">videoId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">video</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">video</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;ready&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Video not found or not ready&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Increment view count asynchronously</span>
+<span class="w">  </span><span class="nx">viewCountQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;increment&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">videoId</span><span class="o">:</span><span class="w"> </span><span class="nx">video</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="o">?</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Return HLS manifest URL from CDN</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">manifestUrl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">cdnService</span><span class="p">.</span><span class="nx">getUrl</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`transcoded/</span><span class="si">${</span><span class="nx">video</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">/manifest.m3u8`</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">manifestUrl</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">title</span><span class="o">:</span><span class="w"> </span><span class="nx">video</span><span class="p">.</span><span class="nx">title</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">duration</span><span class="o">:</span><span class="w"> </span><span class="nx">video</span><span class="p">.</span><span class="nx">duration</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">resolutions</span><span class="o">:</span><span class="w"> </span><span class="nx">video</span><span class="p">.</span><span class="nx">availableResolutions</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Search videos</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/videos/search&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">q</span><span class="p">,</span><span class="w"> </span><span class="nx">category</span><span class="p">,</span><span class="w"> </span><span class="nx">sort</span><span class="p">,</span><span class="w"> </span><span class="nx">page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">20</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">searchService</span><span class="p">.</span><span class="nx">search</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">query</span><span class="o">:</span><span class="w"> </span><span class="nx">q</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">filters</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">category</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">sort</span><span class="o">:</span><span class="w"> </span><span class="nx">sort</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;relevance&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="kr">from</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">page</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">size</span><span class="o">:</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">results</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Engagement: like a video</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/videos/:videoId/like&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">engagementService</span><span class="p">.</span><span class="nx">like</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">videoId</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">liked</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Get video details with engagement stats</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/videos/:videoId&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">video</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">videoService</span><span class="p">.</span><span class="nx">getById</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">videoId</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">stats</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">engagementService</span><span class="p">.</span><span class="nx">getStats</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">videoId</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="p">...</span><span class="nx">video</span><span class="p">,</span><span class="w"> </span><span class="nx">stats</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 5: Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Videos metadata</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">videos</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">creator_id</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">title</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">500</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">description</span><span class="w">     </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">tags</span><span class="w">            </span><span class="nb">TEXT</span><span class="p">[],</span>
+<span class="w">  </span><span class="n">category</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">),</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;uploading&#39;</span><span class="p">,</span>
+<span class="w">                  </span><span class="c1">-- uploading, processing, ready, failed, removed</span>
+<span class="w">  </span><span class="n">duration</span><span class="w">        </span><span class="nb">INT</span><span class="p">,</span><span class="w">                     </span><span class="c1">-- seconds</span>
+<span class="w">  </span><span class="n">thumbnail_url</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">),</span>
+<span class="w">  </span><span class="n">manifest_key</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">),</span><span class="w">            </span><span class="c1">-- S3 key for HLS manifest</span>
+<span class="w">  </span><span class="n">original_key</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">),</span><span class="w">            </span><span class="c1">-- S3 key for raw upload</span>
+<span class="w">  </span><span class="n">resolutions</span><span class="w">     </span><span class="nb">INT</span><span class="p">[],</span><span class="w">                   </span><span class="c1">-- [360, 480, 720, 1080]</span>
+<span class="w">  </span><span class="n">file_size</span><span class="w">       </span><span class="nb">BIGINT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">view_count</span><span class="w">      </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">like_count</span><span class="w">      </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">comment_count</span><span class="w">   </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">published_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_videos_creator</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">videos</span><span class="p">(</span><span class="n">creator_id</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_videos_status</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">videos</span><span class="p">(</span><span class="n">status</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_videos_published</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">videos</span><span class="p">(</span><span class="n">published_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+
+<span class="c1">-- Video engagement (likes)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">video_likes</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">video_id</span><span class="w">    </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">videos</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">     </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">  </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">video_id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- Comments</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">comments</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">          </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">video_id</span><span class="w">    </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">videos</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">     </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">parent_id</span><span class="w">   </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">comments</span><span class="p">(</span><span class="n">id</span><span class="p">),</span><span class="w">   </span><span class="c1">-- for replies</span>
+<span class="w">  </span><span class="n">body</span><span class="w">        </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">like_count</span><span class="w">  </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">  </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_comments_video</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">comments</span><span class="p">(</span><span class="n">video_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+
+<span class="c1">-- View history for recommendations</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">view_history</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">video_id</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">       </span><span class="n">UUID</span><span class="p">,</span>
+<span class="w">  </span><span class="n">watch_time</span><span class="w">    </span><span class="nb">INT</span><span class="p">,</span><span class="w">            </span><span class="c1">-- seconds watched</span>
+<span class="w">  </span><span class="n">percentage</span><span class="w">    </span><span class="nb">SMALLINT</span><span class="p">,</span><span class="w">       </span><span class="c1">-- percentage watched</span>
+<span class="w">  </span><span class="n">device_type</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Partition view_history by month for manageability</span>
+<span class="c1">-- CREATE TABLE view_history_2026_03 PARTITION OF view_history</span>
+<span class="c1">--   FOR VALUES FROM (&#39;2026-03-01&#39;) TO (&#39;2026-04-01&#39;);</span>
+
+<span class="c1">-- Subscriptions</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">subscriptions</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">channel_id</span><span class="w">    </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">subscriber_id</span><span class="w"> </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">channel_id</span><span class="p">,</span><span class="w"> </span><span class="n">subscriber_id</span><span class="p">)</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Step 6: Deep Dive -- Video Transcoding Pipeline</h2>
+<p>The transcoding pipeline is the most complex component. Raw uploads must be converted into multiple formats and resolutions for adaptive streaming.</p>
+<h3>Adaptive Bitrate Streaming (HLS)</h3>
+<p>HTTP Live Streaming (HLS) works by splitting videos into small segments (2-10 seconds each) and providing a manifest file that lists available quality levels:</p>
+<div class="highlight"><pre><span></span><code>manifest.m3u8 (Master Playlist)
+  ├── 360p/playlist.m3u8  → segment_000.ts, segment_001.ts, ...
+  ├── 480p/playlist.m3u8  → segment_000.ts, segment_001.ts, ...
+  ├── 720p/playlist.m3u8  → segment_000.ts, segment_001.ts, ...
+  └── 1080p/playlist.m3u8 → segment_000.ts, segment_001.ts, ...
+</code></pre></div>
+
+<p>The player starts at a medium quality, then adapts up or down based on bandwidth.</p>
+<h3>Transcoding Worker</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Worker</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bullmq&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">execFile</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:child_process&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">promisify</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:util&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">execFileAsync</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">promisify</span><span class="p">(</span><span class="nx">execFile</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">worker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;transcode&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">videoId</span><span class="p">,</span><span class="w"> </span><span class="nx">sourceKey</span><span class="p">,</span><span class="w"> </span><span class="nx">resolutions</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 1. Download raw video from S3</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">localPath</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`/tmp/</span><span class="si">${</span><span class="nx">videoId</span><span class="si">}</span><span class="sb">/original`</span><span class="p">;</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">storageService</span><span class="p">.</span><span class="nx">download</span><span class="p">(</span><span class="nx">sourceKey</span><span class="p">,</span><span class="w"> </span><span class="nx">localPath</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 2. Extract metadata</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">probe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">execFileAsync</span><span class="p">(</span><span class="s1">&#39;ffprobe&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="s1">&#39;-v&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;quiet&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="s1">&#39;-print_format&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;json&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="s1">&#39;-show_format&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="s1">&#39;-show_streams&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">localPath</span><span class="p">,</span>
+<span class="w">  </span><span class="p">]);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">metadata</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">probe</span><span class="p">.</span><span class="nx">stdout</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">duration</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">metadata</span><span class="p">.</span><span class="nx">format</span><span class="p">.</span><span class="nx">duration</span><span class="p">));</span>
+
+<span class="w">  </span><span class="c1">// 3. Generate thumbnail</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">execFileAsync</span><span class="p">(</span><span class="s1">&#39;ffmpeg&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="s1">&#39;-i&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">localPath</span><span class="p">,</span>
+<span class="w">    </span><span class="s1">&#39;-ss&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">String</span><span class="p">(</span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">duration</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">0.25</span><span class="p">)),</span>
+<span class="w">    </span><span class="s1">&#39;-vframes&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;1&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="sb">`-/tmp/</span><span class="si">${</span><span class="nx">videoId</span><span class="si">}</span><span class="sb">/thumbnail.jpg`</span><span class="p">,</span>
+<span class="w">  </span><span class="p">]);</span>
+
+<span class="w">  </span><span class="c1">// 4. Transcode to each resolution</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">resolutionConfigs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="mf">360</span><span class="o">:</span><span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">width</span><span class="o">:</span><span class="w"> </span><span class="mf">640</span><span class="p">,</span><span class="w">  </span><span class="nx">height</span><span class="o">:</span><span class="w"> </span><span class="mf">360</span><span class="p">,</span><span class="w">  </span><span class="nx">bitrate</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;800k&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="mf">480</span><span class="o">:</span><span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">width</span><span class="o">:</span><span class="w"> </span><span class="mf">854</span><span class="p">,</span><span class="w">  </span><span class="nx">height</span><span class="o">:</span><span class="w"> </span><span class="mf">480</span><span class="p">,</span><span class="w">  </span><span class="nx">bitrate</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;1400k&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="mf">720</span><span class="o">:</span><span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">width</span><span class="o">:</span><span class="w"> </span><span class="mf">1280</span><span class="p">,</span><span class="w"> </span><span class="nx">height</span><span class="o">:</span><span class="w"> </span><span class="mf">720</span><span class="p">,</span><span class="w">  </span><span class="nx">bitrate</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;2800k&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="mf">1080</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">width</span><span class="o">:</span><span class="w"> </span><span class="mf">1920</span><span class="p">,</span><span class="w"> </span><span class="nx">height</span><span class="o">:</span><span class="w"> </span><span class="mf">1080</span><span class="p">,</span><span class="w"> </span><span class="nx">bitrate</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;5000k&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">resolutions</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">config</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">resolutionConfigs</span><span class="p">[</span><span class="nx">res</span><span class="p">];</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">config</span><span class="p">)</span><span class="w"> </span><span class="k">continue</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">outputDir</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`/tmp/</span><span class="si">${</span><span class="nx">videoId</span><span class="si">}</span><span class="sb">/</span><span class="si">${</span><span class="nx">res</span><span class="si">}</span><span class="sb">p`</span><span class="p">;</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">execFileAsync</span><span class="p">(</span><span class="s1">&#39;ffmpeg&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="s1">&#39;-i&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">localPath</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;-vf&#39;</span><span class="p">,</span><span class="w"> </span><span class="sb">`scale=</span><span class="si">${</span><span class="nx">config</span><span class="p">.</span><span class="nx">width</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">config</span><span class="p">.</span><span class="nx">height</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;-b:v&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">config</span><span class="p">.</span><span class="nx">bitrate</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;-c:v&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;libx264&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;-preset&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;medium&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;-c:a&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;aac&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;-b:a&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;128k&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;-hls_time&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;6&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;-hls_playlist_type&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;vod&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;-hls_segment_filename&#39;</span><span class="p">,</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">outputDir</span><span class="si">}</span><span class="sb">/segment_%03d.ts`</span><span class="p">,</span>
+<span class="w">      </span><span class="sb">`</span><span class="si">${</span><span class="nx">outputDir</span><span class="si">}</span><span class="sb">/playlist.m3u8`</span><span class="p">,</span>
+<span class="w">    </span><span class="p">]);</span>
+
+<span class="w">    </span><span class="c1">// Upload segments to S3</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">storageService</span><span class="p">.</span><span class="nx">uploadDirectory</span><span class="p">(</span><span class="nx">outputDir</span><span class="p">,</span><span class="w"> </span><span class="sb">`transcoded/</span><span class="si">${</span><span class="nx">videoId</span><span class="si">}</span><span class="sb">/</span><span class="si">${</span><span class="nx">res</span><span class="si">}</span><span class="sb">p`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 5. Generate master manifest</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">masterManifest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">generateMasterPlaylist</span><span class="p">(</span><span class="nx">videoId</span><span class="p">,</span><span class="w"> </span><span class="nx">resolutions</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">storageService</span><span class="p">.</span><span class="nx">putObject</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`transcoded/</span><span class="si">${</span><span class="nx">videoId</span><span class="si">}</span><span class="sb">/manifest.m3u8`</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">masterManifest</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 6. Update video status</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">videoService</span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">videoId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;ready&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">duration</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">resolutions</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">manifestKey</span><span class="o">:</span><span class="w"> </span><span class="sb">`transcoded/</span><span class="si">${</span><span class="nx">videoId</span><span class="si">}</span><span class="sb">/manifest.m3u8`</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="nx">redisConnection</span><span class="p">,</span><span class="w"> </span><span class="nx">concurrency</span><span class="o">:</span><span class="w"> </span><span class="mf">2</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 7: Scaling Strategies</h2>
+<ol>
+<li><strong>CDN is king</strong>: 90%+ of video traffic should be served from CDN edge servers, not origin. Popular videos get cached at edges worldwide.</li>
+<li><strong>Tiered storage</strong>: Hot videos on SSD-backed storage, cold videos on cheaper storage (S3 Glacier).</li>
+<li><strong>View count aggregation</strong>: Do not UPDATE a counter on every view. Buffer counts in Redis and flush to PostgreSQL in batches.</li>
+<li><strong>Shard by video ID</strong>: Metadata reads are heavily skewed (popular videos). Cache aggressively in Redis.</li>
+<li><strong>Separate read and write paths</strong>: Upload/transcode pipeline is completely separate from the viewing pipeline.</li>
+<li><strong>Pre-warm popular content</strong>: Push trending videos to CDN edges proactively.</li>
+</ol>
+<div class="highlight"><pre><span></span><code>View Count Pipeline (avoiding write hotspots):
+
+Viewer ──&gt; API ──&gt; Redis INCR ──&gt; Periodic Flush ──&gt; PostgreSQL
+                   (real-time)    (every 30s)        (durable)
+
+  Redis: INCR video:{id}:views
+  Flush: UPDATE videos SET view_count = view_count + $delta WHERE id = $id
+</code></pre></div>
+
+<h2>Step 8: Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Streaming protocol</td>
+<td>HLS</td>
+<td>DASH</td>
+<td>HLS (wider device support)</td>
+</tr>
+<tr>
+<td>Segment duration</td>
+<td>2s</td>
+<td>10s</td>
+<td>6s (balance startup time vs overhead)</td>
+</tr>
+<tr>
+<td>Transcoding</td>
+<td>On-upload</td>
+<td>On-demand</td>
+<td>On-upload for common resolutions, on-demand for rare ones</td>
+</tr>
+<tr>
+<td>Thumbnail</td>
+<td>Single auto-generated</td>
+<td>Multiple choices + AI</td>
+<td>Auto-generate at upload, allow creator override</td>
+</tr>
+<tr>
+<td>View counting</td>
+<td>Synchronous DB write</td>
+<td>Async buffered</td>
+<td>Async buffered (Redis + periodic flush)</td>
+</tr>
+<tr>
+<td>Storage class</td>
+<td>All SSD</td>
+<td>Tiered (hot/cold)</td>
+<td>Tiered (95% of views go to 5% of videos)</td>
+</tr>
+</tbody>
+</table>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Video Transcoding Worker</div>
+                    <div class="exercise-desc"><p>Create a BullMQ worker that takes a video file path, transcodes it to 360p and 720p using FFmpeg, splits it into HLS segments, generates a master playlist, and stores everything in a local directory. Verify playback with an HLS player.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Install ffmpeg locally. Use <code>child_process.execFile</code> to run ffmpeg commands. The HLS master playlist is a text file referencing each resolution's playlist.m3u8.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Buffered View Counting</div>
+                    <div class="exercise-desc"><p>Build a system where view events are recorded in Redis using INCR and periodically flushed to PostgreSQL. Implement the flush as a scheduled BullMQ job that runs every 30 seconds. Verify that total counts in PostgreSQL match Redis after multiple flush cycles.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Redis GETSET to atomically read and reset the counter during flush. Use <code>ioredis.pipeline()</code> to batch reads for multiple videos.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Adaptive Bitrate Simulation</div>
+                    <div class="exercise-desc"><p>Write a Node.js simulation of an adaptive bitrate algorithm. Given an array of available bitrates and a fluctuating bandwidth (random values between 1-10 Mbps), implement the logic that selects the highest quality that fits within 80% of available bandwidth. Log quality switches over a 5-minute simulated viewing session.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Buffer-based ABR: if buffer &gt; 30s, try upgrading quality; if buffer &lt; 10s, downgrade. Bandwidth-based: use exponential moving average of recent download speeds.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Video playback frequently buffers for users in certain regions</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> CDN cache miss rate is high in those regions, causing viewers to fetch segments from the origin server with high latency.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Analyze CDN cache hit rates by region. Pre-warm popular content at edge locations. Add more CDN points of presence in underserved regions. Consider a multi-CDN strategy where you route to the CDN with best performance per region.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Transcoding queue grows unboundedly during peak upload hours</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Fixed number of transcoding workers cannot keep up with upload spikes. Some videos are very long (hours) and block workers.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use auto-scaling worker pools (ECS/Kubernetes HPA). Prioritize shorter videos and popular creators. Split long videos into segments for parallel transcoding. Set a maximum queue depth with back-pressure that temporarily rejects new uploads.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">View count shows different numbers on the video page vs the creator dashboard</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Buffered view counting creates a delay between Redis (real-time) and PostgreSQL (flushed every 30s). Dashboard reads from PostgreSQL while the video page reads from Redis.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Read from Redis for the video page (real-time approximate count). Read from PostgreSQL for analytics dashboards (accurate, slightly delayed). Document the expected delay. Alternatively, merge both: PostgreSQL count + Redis unflushed delta.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="http://highscalability.com/youtube-architecture" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">YouTube Architecture (High Scalability)</div>
+                    
+                    <div class="resource-note">Classic overview of YouTube's early architecture and scaling decisions</div>
+                    
+                </a>
+                
+                <a href="https://datatracker.ietf.org/doc/html/rfc8216" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">HTTP Live Streaming (HLS) Specification</div>
+                    
+                    <div class="resource-note">RFC 8216 -- the official HLS specification</div>
+                    
+                </a>
+                
+                <a href="https://ffmpeg.org/documentation.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">FFmpeg Documentation</div>
+                    
+                    <div class="resource-note">Reference for video transcoding commands and options</div>
+                    
+                </a>
+                
+                <a href="https://netflixtechblog.com/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag blog">blog</div>
+                    <div class="resource-title">Netflix Tech Blog - Video Encoding</div>
+                    
+                    <div class="resource-note">Netflix's technical blog covers per-title encoding optimization and streaming infrastructure</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.2.1-js.html" class="btn">&larr; Design a File Storage System (Dropbox)</a>
+            
+            
+            <a href="/backend-learning/lesson/9.2.3-js.html" class="btn">Design a Key-Value Store (Redis/DynamoDB) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

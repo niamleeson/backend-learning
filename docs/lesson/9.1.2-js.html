@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Rate Limiter - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Core System Design Problems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.1.2</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design a Rate Limiter</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>A rate limiter is like a bouncer at a nightclub with a clicker counter. The bouncer counts everyone entering in the last hour. Once the count hits capacity, new arrivals are turned away with a polite 'please come back later.' The bouncer does not care who you are by default, but VIP list members (premium API keys) get a higher personal limit.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Rate Limiter</h1>
+<h2>Introduction</h2>
+<p>A rate limiter controls how many requests a client can make to an API within a given time window. It protects backend services from being overwhelmed by excessive traffic, whether from legitimate heavy users, bugs in client code, or malicious denial-of-service attacks. Rate limiting is a fundamental building block of any production API and a favorite system design interview topic.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ol>
+<li>Limit the number of requests a client can make in a configurable time window</li>
+<li>Support multiple rate limiting rules (e.g., 100 requests/minute per user, 1000 requests/hour per IP)</li>
+<li>Return informative headers telling clients their limit, remaining quota, and reset time</li>
+<li>Support different limiting strategies: fixed window, sliding window, token bucket</li>
+<li>Configurable per-route and per-user limits</li>
+</ol>
+<h3>Non-Functional Requirements</h3>
+<ol>
+<li>Very low latency -- the rate limiter sits in the critical path of every request (&lt;1ms overhead)</li>
+<li>Distributed -- must work correctly across multiple API server instances</li>
+<li>Highly available -- if the rate limiter fails, the system should degrade gracefully (allow traffic)</li>
+<li>Accurate -- should not allow significantly more requests than the configured limit</li>
+</ol>
+<h2>Step 2: Capacity Estimation</h2>
+<h3>Traffic Estimates</h3>
+<ul>
+<li>API traffic: 50,000 requests/second across all endpoints</li>
+<li>Unique clients (by user ID or IP): 10M active per day</li>
+<li>Rate limit rules to evaluate per request: 2-3 rules</li>
+<li>Rate limit checks per second: 50,000 x 3 = 150,000 Redis operations/second</li>
+</ul>
+<h3>Storage Estimates</h3>
+<ul>
+<li>Per client rate limit state: ~100 bytes (counter, timestamps)</li>
+<li>Active clients in a 1-hour window: ~2M</li>
+<li>Memory needed: 2M x 100 bytes x 3 rules = 600 MB</li>
+<li>Fits comfortably in a single Redis instance</li>
+</ul>
+<h2>Step 3: Rate Limiting Algorithms</h2>
+<h3>Algorithm 1: Fixed Window Counter</h3>
+<div class="highlight"><pre><span></span><code>Time:    |-------- Window 1 --------|-------- Window 2 --------|
+         0:00                       1:00                       2:00
+
+Requests: |||||||||||                 |||||||
+          (11 requests)               (7 requests)
+
+Limit: 10 per minute
+Result: 11th request in Window 1 is REJECTED
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">fixedWindowCheck</span><span class="p">(</span><span class="nx">clientId</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span><span class="w"> </span><span class="nx">windowSizeMs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getRedisClient</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">windowKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">windowSizeMs</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`ratelimit:</span><span class="si">${</span><span class="nx">clientId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">windowKey</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">current</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">incr</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">current</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Set expiry on first request in window</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pexpire</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">windowSizeMs</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">allowed</span><span class="o">:</span><span class="w"> </span><span class="nx">current</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">remaining</span><span class="o">:</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">max</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">current</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">resetAt</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">windowKey</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">windowSizeMs</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li>Pros: Simple, low memory</li>
+<li>Cons: Boundary burst problem -- a client can send 2x the limit at the boundary of two windows</li>
+</ul>
+<h3>Algorithm 2: Sliding Window Log</h3>
+<div class="highlight"><pre><span></span><code>Time:    .......|====== sliding 60s window ======|...
+                |  (counts all requests in this  |
+                |   sliding window of time)      |
+
+Each request timestamp is stored. On each new request,
+remove timestamps older than (now - windowSize) and count.
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">slidingWindowLogCheck</span><span class="p">(</span><span class="nx">clientId</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span><span class="w"> </span><span class="nx">windowSizeMs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getRedisClient</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`ratelimit:</span><span class="si">${</span><span class="nx">clientId</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">windowStart</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">now</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">windowSizeMs</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">// Remove expired entries</span>
+<span class="w">  </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">zremrangebyscore</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">windowStart</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Add current request</span>
+<span class="w">  </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">zadd</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">now</span><span class="p">,</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">now</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nb">Math</span><span class="p">.</span><span class="nx">random</span><span class="p">()</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Count requests in window</span>
+<span class="w">  </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">zcard</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Set expiry on the whole key</span>
+<span class="w">  </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">pexpire</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">windowSizeMs</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">results</span><span class="p">[</span><span class="mf">2</span><span class="p">][</span><span class="mf">1</span><span class="p">];</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">allowed</span><span class="o">:</span><span class="w"> </span><span class="nx">count</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">remaining</span><span class="o">:</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">max</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">count</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">resetAt</span><span class="o">:</span><span class="w"> </span><span class="nx">now</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">windowSizeMs</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li>Pros: Precise, no boundary burst problem</li>
+<li>Cons: High memory usage (stores every request timestamp)</li>
+</ul>
+<h3>Algorithm 3: Sliding Window Counter (Recommended)</h3>
+<p>A hybrid that approximates the sliding window using two fixed windows:</p>
+<div class="highlight"><pre><span></span><code>Previous Window    Current Window
+|--- 60s ---|--- 60s ---|
+  (8 reqs)   (5 reqs so far)
+                   ^
+                   now (30s into current window)
+
+Weighted count = 8 * (30/60) + 5 = 4 + 5 = 9
+If limit is 10, this request is ALLOWED (9 &lt; 10)
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">slidingWindowCounterCheck</span><span class="p">(</span><span class="nx">clientId</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span><span class="w"> </span><span class="nx">windowSizeMs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getRedisClient</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">currentWindow</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">now</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">windowSizeMs</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">previousWindow</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">currentWindow</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">currentKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`ratelimit:</span><span class="si">${</span><span class="nx">clientId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">currentWindow</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">previousKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`ratelimit:</span><span class="si">${</span><span class="nx">clientId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">previousWindow</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">previousCount</span><span class="p">,</span><span class="w"> </span><span class="nx">currentCount</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">([</span>
+<span class="w">    </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">previousKey</span><span class="p">).</span><span class="nx">then</span><span class="p">(</span><span class="nx">v</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">v</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">currentKey</span><span class="p">).</span><span class="nx">then</span><span class="p">(</span><span class="nx">v</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">v</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span>
+<span class="w">  </span><span class="p">]);</span>
+
+<span class="w">  </span><span class="c1">// Weight the previous window by how much of it overlaps</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">elapsedInCurrentWindow</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">now</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="nx">windowSizeMs</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">previousWeight</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="nx">elapsedInCurrentWindow</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">windowSizeMs</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">estimatedCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">previousCount</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">previousWeight</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">currentCount</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">estimatedCount</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">allowed</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nx">remaining</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">resetAt</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">currentWindow</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">windowSizeMs</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Increment current window counter</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">incr</span><span class="p">(</span><span class="nx">currentKey</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">pexpire</span><span class="p">(</span><span class="nx">currentKey</span><span class="p">,</span><span class="w"> </span><span class="nx">windowSizeMs</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">2</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">allowed</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">remaining</span><span class="o">:</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">estimatedCount</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">resetAt</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">currentWindow</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">windowSizeMs</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Algorithm 4: Token Bucket</h3>
+<div class="highlight"><pre><span></span><code>Bucket Capacity: 10 tokens
+Refill Rate: 1 token per second
+
+[||||||||||]  &lt;- Full bucket (10 tokens)
+
+Request arrives -&gt; consume 1 token
+[|||||||||.]  &lt;- 9 tokens remaining
+
+3 more requests arrive
+[||||||....]  &lt;- 6 tokens remaining
+
+4 seconds pass -&gt; 4 tokens refilled
+[||||||||||]  &lt;- Full again (capped at 10)
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">tokenBucketCheck</span><span class="p">(</span><span class="nx">clientId</span><span class="p">,</span><span class="w"> </span><span class="nx">bucketSize</span><span class="p">,</span><span class="w"> </span><span class="nx">refillRate</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getRedisClient</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`ratelimit:bucket:</span><span class="si">${</span><span class="nx">clientId</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Lua script for atomic token bucket operation</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">luaScript</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`</span>
+<span class="sb">    local key = KEYS[1]</span>
+<span class="sb">    local bucket_size = tonumber(ARGV[1])</span>
+<span class="sb">    local refill_rate = tonumber(ARGV[2])</span>
+<span class="sb">    local now = tonumber(ARGV[3])</span>
+
+<span class="sb">    local bucket = redis.call(&#39;hmget&#39;, key, &#39;tokens&#39;, &#39;last_refill&#39;)</span>
+<span class="sb">    local tokens = tonumber(bucket[1]) or bucket_size</span>
+<span class="sb">    local last_refill = tonumber(bucket[2]) or now</span>
+
+<span class="sb">    -- Calculate tokens to add based on elapsed time</span>
+<span class="sb">    local elapsed = now - last_refill</span>
+<span class="sb">    local new_tokens = math.min(bucket_size, tokens + (elapsed * refill_rate / 1000))</span>
+
+<span class="sb">    if new_tokens &lt; 1 then</span>
+<span class="sb">      return {0, math.ceil((1 - new_tokens) * 1000 / refill_rate)}</span>
+<span class="sb">    end</span>
+
+<span class="sb">    new_tokens = new_tokens - 1</span>
+<span class="sb">    redis.call(&#39;hmset&#39;, key, &#39;tokens&#39;, new_tokens, &#39;last_refill&#39;, now)</span>
+<span class="sb">    redis.call(&#39;pexpire&#39;, key, math.ceil(bucket_size / refill_rate * 1000) * 2)</span>
+
+<span class="sb">    return {1, 0}</span>
+<span class="sb">  `</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">allowed</span><span class="p">,</span><span class="w"> </span><span class="nx">retryAfterMs</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nb">eval</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">luaScript</span><span class="p">,</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">bucketSize</span><span class="p">,</span><span class="w"> </span><span class="nx">refillRate</span><span class="p">,</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">allowed</span><span class="o">:</span><span class="w"> </span><span class="nx">allowed</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">retryAfterMs</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li>Pros: Smooth rate, allows short bursts, widely used (AWS, Stripe)</li>
+<li>Cons: More complex, parameters (bucket size + refill rate) less intuitive than "N per window"</li>
+</ul>
+<h2>Step 4: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>            Client Request
+                  |
+                  v
+         +--------+--------+
+         |  Load Balancer  |
+         +--------+--------+
+                  |
+                  v
+         +--------+--------+
+         |  API Gateway /  |---- Rate Limit Check ---+
+         |  Middleware      |                         |
+         +--------+--------+                         v
+                  |                          +--------+--------+
+                  |                          |  Redis Cluster   |
+           (if allowed)                     |  (rate limit     |
+                  |                          |   state)         |
+                  v                          +-----------------+
+         +--------+--------+
+         |  Backend Service |
+         +-----------------+
+
+         Response Headers:
+         X-RateLimit-Limit: 100
+         X-RateLimit-Remaining: 42
+         X-RateLimit-Reset: 1710756000
+         Retry-After: 30  (only on 429)
+</code></pre></div>
+
+<h3>Where to Place the Rate Limiter</h3>
+<ol>
+<li><strong>API Gateway level</strong> (e.g., Kong, AWS API Gateway): Best for global limits, applied before your code runs</li>
+<li><strong>Middleware level</strong> (Express middleware): Best for per-route, per-user rules</li>
+<li><strong>Service mesh</strong> (Istio, Envoy): Best for inter-service rate limiting in microservices</li>
+</ol>
+<p>For most Node.js APIs, an Express middleware backed by Redis is the right approach.</p>
+<h2>Step 5: Express Middleware Implementation</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">({</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-cluster&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">6379</span><span class="w"> </span><span class="p">});</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">rateLimiter</span><span class="p">(</span><span class="nx">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">windowMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span><span class="w">      </span><span class="c1">// 1 minute</span>
+<span class="w">    </span><span class="nx">max</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span><span class="w">                  </span><span class="c1">// 100 requests per window</span>
+<span class="w">    </span><span class="nx">keyGenerator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">ip</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">handler</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">429</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Too Many Requests&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">retryAfter</span><span class="o">:</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">getHeader</span><span class="p">(</span><span class="s1">&#39;Retry-After&#39;</span><span class="p">)</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">skipFailedRequests</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">skip</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="kc">false</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">options</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">skip</span><span class="p">(</span><span class="nx">req</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">next</span><span class="p">();</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">clientKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">keyGenerator</span><span class="p">(</span><span class="nx">req</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">slidingWindowCounterCheck</span><span class="p">(</span><span class="nx">clientKey</span><span class="p">,</span><span class="w"> </span><span class="nx">max</span><span class="p">,</span><span class="w"> </span><span class="nx">windowMs</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Always set rate limit headers</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">setHeader</span><span class="p">(</span><span class="s1">&#39;X-RateLimit-Limit&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">max</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">setHeader</span><span class="p">(</span><span class="s1">&#39;X-RateLimit-Remaining&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">remaining</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">setHeader</span><span class="p">(</span><span class="s1">&#39;X-RateLimit-Reset&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">ceil</span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">resetAt</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1000</span><span class="p">));</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">result</span><span class="p">.</span><span class="nx">allowed</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">retryAfter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">ceil</span><span class="p">((</span><span class="nx">result</span><span class="p">.</span><span class="nx">resetAt</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">())</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1000</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">res</span><span class="p">.</span><span class="nx">setHeader</span><span class="p">(</span><span class="s1">&#39;Retry-After&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">retryAfter</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">handler</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="nx">next</span><span class="p">();</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="c1">// Global: 1000 requests per minute per IP</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">rateLimiter</span><span class="p">({</span><span class="w"> </span><span class="nx">max</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span><span class="w"> </span><span class="nx">windowMs</span><span class="o">:</span><span class="w"> </span><span class="mf">60000</span><span class="w"> </span><span class="p">}));</span>
+
+<span class="c1">// Per-route: 10 login attempts per 15 minutes per IP</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/auth/login&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">rateLimiter</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">max</span><span class="o">:</span><span class="w"> </span><span class="mf">10</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">windowMs</span><span class="o">:</span><span class="w"> </span><span class="mf">15</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">keyGenerator</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="sb">`login:</span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">ip</span><span class="si">}</span><span class="sb">`</span>
+<span class="p">}),</span><span class="w"> </span><span class="nx">loginHandler</span><span class="p">);</span>
+
+<span class="c1">// Per-user: 50 API calls per minute per authenticated user</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="s1">&#39;/api&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">rateLimiter</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">max</span><span class="o">:</span><span class="w"> </span><span class="mf">50</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">windowMs</span><span class="o">:</span><span class="w"> </span><span class="mf">60000</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">keyGenerator</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="sb">`user:</span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="o">?</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">ip</span><span class="si">}</span><span class="sb">`</span>
+<span class="p">}));</span>
+</code></pre></div>
+
+<h2>Step 6: Database Schema for Rate Limit Rules</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Rate limit rules (configurable without code changes)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">rate_limit_rules</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="nb">SERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">name</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">route_pattern</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">200</span><span class="p">),</span><span class="w">           </span><span class="c1">-- e.g., &#39;/api/*&#39; or &#39;/auth/login&#39;</span>
+<span class="w">  </span><span class="k">key_type</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">   </span><span class="c1">-- &#39;ip&#39;, &#39;user&#39;, &#39;api_key&#39;</span>
+<span class="w">  </span><span class="n">max_requests</span><span class="w">  </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">window_ms</span><span class="w">     </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">algorithm</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">30</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;sliding_window&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">enabled</span><span class="w">       </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">true</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Rate limit overrides for specific clients (premium users, partners)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">rate_limit_overrides</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="nb">SERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">client_id</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- user ID or API key</span>
+<span class="w">  </span><span class="n">rule_id</span><span class="w">       </span><span class="nb">INT</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">rate_limit_rules</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">max_requests</span><span class="w">  </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">           </span><span class="c1">-- overridden limit</span>
+<span class="w">  </span><span class="n">expires_at</span><span class="w">    </span><span class="k">TIMESTAMP</span>
+<span class="p">);</span>
+
+<span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">rate_limit_rules</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">route_pattern</span><span class="p">,</span><span class="w"> </span><span class="k">key_type</span><span class="p">,</span><span class="w"> </span><span class="n">max_requests</span><span class="p">,</span><span class="w"> </span><span class="n">window_ms</span><span class="p">)</span>
+<span class="k">VALUES</span>
+<span class="w">  </span><span class="p">(</span><span class="s1">&#39;Global IP Limit&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;*&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;ip&#39;</span><span class="p">,</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span><span class="w"> </span><span class="mi">60000</span><span class="p">),</span>
+<span class="w">  </span><span class="p">(</span><span class="s1">&#39;Login Brute Force&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;/auth/login&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;ip&#39;</span><span class="p">,</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span><span class="w"> </span><span class="mi">900000</span><span class="p">),</span>
+<span class="w">  </span><span class="p">(</span><span class="s1">&#39;API User Limit&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;/api/*&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;user&#39;</span><span class="p">,</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span><span class="w"> </span><span class="mi">60000</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Step 7: Scaling Strategies</h2>
+<h3>Distributed Rate Limiting with Redis Cluster</h3>
+<p>When you have multiple API servers, all rate limit state must be shared. Redis is the standard solution:</p>
+<div class="highlight"><pre><span></span><code>  API Server 1 ---+
+  API Server 2 ---+---&gt;  Redis Cluster  (shared state)
+  API Server 3 ---+
+</code></pre></div>
+
+<p>Use Redis Cluster mode for high availability:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">.</span><span class="nx">Cluster</span><span class="p">([</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-1&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">6379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-2&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">6379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-3&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">6379</span><span class="w"> </span><span class="p">}</span>
+<span class="p">]);</span>
+</code></pre></div>
+
+<h3>Graceful Degradation</h3>
+<p>If Redis is down, do not block all traffic:</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">rateLimitCheck</span><span class="p">(</span><span class="nx">clientKey</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span><span class="w"> </span><span class="nx">windowMs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">slidingWindowCounterCheck</span><span class="p">(</span><span class="nx">clientKey</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span><span class="w"> </span><span class="nx">windowMs</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Redis is down -- fail open (allow request)</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Rate limiter Redis error:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">allowed</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">remaining</span><span class="o">:</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span><span class="w"> </span><span class="nx">resetAt</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">windowMs</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Local + Distributed Hybrid</h3>
+<p>For ultra-low latency, use a two-tier approach:</p>
+<ol>
+<li><strong>Local in-memory counter</strong> (per server): catches obvious abusers without network round-trip</li>
+<li><strong>Redis distributed counter</strong>: provides global accuracy</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">localCounters</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">hybridRateLimitCheck</span><span class="p">(</span><span class="nx">clientKey</span><span class="p">,</span><span class="w"> </span><span class="nx">localLimit</span><span class="p">,</span><span class="w"> </span><span class="nx">globalLimit</span><span class="p">,</span><span class="w"> </span><span class="nx">windowMs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Tier 1: Fast local check</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">localKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">clientKey</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">windowMs</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">localCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">localCounters</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">localKey</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">localCounters</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">localKey</span><span class="p">,</span><span class="w"> </span><span class="nx">localCount</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// If local limit exceeded, reject immediately (no Redis call)</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">localCount</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">localLimit</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">allowed</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Tier 2: Distributed check via Redis</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">slidingWindowCounterCheck</span><span class="p">(</span><span class="nx">clientKey</span><span class="p">,</span><span class="w"> </span><span class="nx">globalLimit</span><span class="p">,</span><span class="w"> </span><span class="nx">windowMs</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 8: Trade-Offs and Discussion Points</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Algorithm</td>
+<td>Fixed window</td>
+<td>Sliding window counter</td>
+<td>Sliding window counter (best accuracy/memory balance)</td>
+</tr>
+<tr>
+<td>Storage</td>
+<td>Redis</td>
+<td>In-memory per server</td>
+<td>Redis (distributed correctness)</td>
+</tr>
+<tr>
+<td>Failure Mode</td>
+<td>Fail closed (block)</td>
+<td>Fail open (allow)</td>
+<td>Fail open (availability over protection)</td>
+</tr>
+<tr>
+<td>Granularity</td>
+<td>Per IP</td>
+<td>Per user + per IP</td>
+<td>Both (layered rules)</td>
+</tr>
+<tr>
+<td>Response</td>
+<td>429 only</td>
+<td>429 + headers + Retry-After</td>
+<td>Full headers (client-friendly)</td>
+</tr>
+</tbody>
+</table>
+<h3>Race Conditions in Distributed Rate Limiting</h3>
+<p>With multiple Redis operations (read count, check limit, increment), race conditions can let extra requests through. The solution is atomic operations via Lua scripts, which Redis executes as a single unit:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Atomic sliding window counter in Lua</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">atomicCheck</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`</span>
+<span class="sb">  local key = KEYS[1]</span>
+<span class="sb">  local limit = tonumber(ARGV[1])</span>
+<span class="sb">  local window = tonumber(ARGV[2])</span>
+<span class="sb">  local now = tonumber(ARGV[3])</span>
+
+<span class="sb">  local current = tonumber(redis.call(&#39;get&#39;, key) or &#39;0&#39;)</span>
+<span class="sb">  if current &gt;= limit then</span>
+<span class="sb">    return {0, current}</span>
+<span class="sb">  end</span>
+
+<span class="sb">  current = redis.call(&#39;incr&#39;, key)</span>
+<span class="sb">  if current == 1 then</span>
+<span class="sb">    redis.call(&#39;pexpire&#39;, key, window)</span>
+<span class="sb">  end</span>
+<span class="sb">  return {1, current}</span>
+<span class="sb">`</span><span class="p">;</span>
+</code></pre></div>
+
+<h2>Summary</h2>
+<p>A rate limiter is a critical infrastructure component that protects APIs from abuse and ensures fair resource allocation. The sliding window counter algorithm offers the best balance of accuracy and memory efficiency. In a distributed environment, use Redis with Lua scripts for atomic operations, implement fail-open behavior for resilience, and expose rate limit information via standard HTTP headers. Layer multiple rules (global, per-route, per-user) and provide overrides for premium clients.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Implement Fixed Window Rate Limiter</div>
+                    <div class="exercise-desc"><p>Build an Express middleware that implements fixed window rate limiting using Redis. It should take configuration for max requests and window size, generate keys based on client IP, set appropriate X-RateLimit-* headers on every response, and return 429 with a Retry-After header when the limit is exceeded. Test it with a loop of rapid requests.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use redis.incr() for atomic increment and redis.pexpire() for window expiry. The window key should include Math.floor(Date.now() / windowMs) to create discrete time buckets.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Token Bucket with Lua Script</div>
+                    <div class="exercise-desc"><p>Implement the token bucket algorithm using a Redis Lua script for atomicity. The bucket should have a configurable capacity and refill rate. Tokens are consumed on each request and replenished based on elapsed time. Write a test that sends a burst of requests, verifies the burst is allowed up to bucket capacity, and then verifies subsequent requests are throttled until tokens refill.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Store tokens and last_refill_time in a Redis hash. In the Lua script, calculate elapsed time, add refilled tokens (capped at bucket_size), then try to consume one token. Use redis.eval() to run the script.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Multi-Tier Rate Limiting</div>
+                    <div class="exercise-desc"><p>Create a rate limiting system with three tiers: global per-IP limit (1000/min), per-route limit (100/min for /api/*, 10/15min for /auth/login), and per-user limit (50/min for authenticated users). Load rules from a database table and apply them as Express middleware. Ensure the most restrictive limit wins.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Create a middleware factory that accepts an array of rules. For each request, evaluate all matching rules and reject if any one is exceeded. Use route pattern matching (e.g., minimatch or path-to-regexp) to match rules to routes.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Rate limiter allows double the configured limit at window boundaries</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The fixed window counter algorithm resets at exact window boundaries. A client can send max requests at the end of one window and max more at the start of the next, resulting in 2x the limit in a short period.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Switch to the sliding window counter algorithm, which weights the previous window's count by how much of it overlaps with the current sliding window. This smooths out the boundary burst problem.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Rate limiter blocks all traffic when Redis goes down</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The middleware throws an unhandled exception when the Redis connection fails, causing Express to return 500 errors for every request.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Wrap Redis calls in try/catch and implement fail-open behavior: if Redis is unreachable, allow the request through. Log the error for alerting. Optionally, fall back to an in-memory counter as a degraded mode.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Race condition allows more requests than the limit under high concurrency</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The check-then-increment pattern (read count, compare to limit, then increment) is not atomic. Multiple concurrent requests can read the same count before any of them increment it.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use Redis Lua scripts to make the check-and-increment operation atomic. Redis executes Lua scripts as a single, uninterruptible operation, eliminating race conditions.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://blog.cloudflare.com/counting-things-a-lot-of-different-things/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Rate Limiting Fundamentals - Cloudflare Blog</div>
+                    
+                    <div class="resource-note">Cloudflare's deep dive into counting at scale, directly applicable to rate limiting</div>
+                    
+                </a>
+                
+                <a href="https://bytebytego.com/courses/system-design-interview/design-a-rate-limiter" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">System Design: Rate Limiter - Alex Xu</div>
+                    
+                    <div class="resource-note">Comprehensive walkthrough of all major rate limiting algorithms with trade-offs</div>
+                    
+                </a>
+                
+                <a href="https://stripe.com/blog/rate-limiters" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Stripe's Rate Limiting Strategy</div>
+                    
+                    <div class="resource-note">How Stripe implements token bucket rate limiting for their payment API</div>
+                    
+                </a>
+                
+                <a href="https://github.com/express-rate-limit/express-rate-limit" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">express-rate-limit Documentation</div>
+                    
+                    <div class="resource-note">Production-ready rate limiting middleware for Express with Redis store support</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.1.1-js.html" class="btn">&larr; Design a URL Shortener (TinyURL)</a>
+            
+            
+            <a href="/backend-learning/lesson/9.1.3-js.html" class="btn">Design a Notification Service &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,1041 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Metrics/Monitoring System (Datadog) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Infrastructure & Platform
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.4.5</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design a Metrics/Monitoring System (Datadog)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a metrics system like a network of weather stations. Each station (agent) measures temperature, wind, and humidity (metrics) every few seconds and sends readings to a central weather service (ingestion pipeline). The service stores fine-grained data for recent days but only daily averages for years past (downsampling). Meteorologists (users) view dashboards of charts and set up storm warnings (alerts) that trigger when thresholds are crossed. The key challenge is that there are millions of stations reporting simultaneously.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Metrics/Monitoring System (Datadog)</h1>
+<h2>Introduction</h2>
+<p>A metrics and monitoring system collects, stores, and visualizes time-series data from applications and infrastructure. Systems like Datadog, Prometheus, Grafana, and New Relic are essential for operating production services. This design problem tests your understanding of time-series databases, data ingestion at scale, aggregation pipelines, alerting, and dashboard rendering.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li>Ingest metrics from thousands of hosts and services (CPU, memory, disk, custom app metrics)</li>
+<li>Support multiple metric types: counters, gauges, histograms, timers</li>
+<li>Store metrics with configurable retention (7 days at 1-second granularity, 1 year at 1-minute, 5 years at 1-hour)</li>
+<li>Query metrics with filters, grouping, and aggregation functions (avg, sum, max, min, percentiles)</li>
+<li>Create dashboards with real-time charts</li>
+<li>Define alert rules that trigger notifications when thresholds are breached</li>
+<li>Support tagging/labeling for multi-dimensional queries (e.g., host=web-1, region=us-east)</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li><strong>Ingestion rate</strong>: 10 million data points per second</li>
+<li><strong>Query latency</strong>: &lt; 500ms for dashboard queries (last 1 hour, aggregated)</li>
+<li><strong>Storage</strong>: Retain data for 5 years with progressive downsampling</li>
+<li><strong>Availability</strong>: 99.9% for ingestion, 99.95% for queries</li>
+<li><strong>Freshness</strong>: Metrics visible within 10 seconds of emission</li>
+</ul>
+<h3>Out of Scope</h3>
+<ul>
+<li>Log aggregation (separate system)</li>
+<li>Distributed tracing</li>
+<li>Synthetic monitoring</li>
+</ul>
+<h2>Step 2: Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Assumptions:
+- 100,000 hosts reporting metrics
+- Each host reports 100 metrics every 10 seconds
+- 100,000 x 100 / 10 = 1 million data points/second (average)
+- Peak: 10 million data points/second
+- Each data point: metric_name + tags + timestamp + value = ~150 bytes
+
+Ingestion Bandwidth:
+- 10M points/s x 150 bytes = 1.5 GB/s inbound
+- Daily: 1.5 GB/s x 86,400 = ~130 TB/day raw
+
+Storage (with compression and downsampling):
+- Raw (10s granularity, 7 days): 130 TB/day x 7 = 910 TB
+- With compression (10x): 91 TB
+- 1-minute rollups (1 year): 130 TB / 6 x 365 / 10 = ~800 TB
+- 1-hour rollups (5 years): ~70 TB
+- Total: ~1 PB
+
+Query Load:
+- 10,000 concurrent dashboard users
+- Each dashboard: 20 charts, each chart queries 1-3 metrics
+- Refresh every 30 seconds
+- 10,000 x 20 x 2 / 30 = ~13,000 queries/second
+
+Unique time series (cardinality):
+- 100,000 hosts x 100 metrics x 10 tag combinations = 100 million time series
+</code></pre></div>
+
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────────────────────┐
+│                    METRICS / MONITORING SYSTEM                           │
+│                                                                        │
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐                          │
+│  │ App Server│  │ App Server│  │ DB Server │   ... 100K hosts          │
+│  │ (Agent)   │  │ (Agent)   │  │ (Agent)   │                          │
+│  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘                          │
+│        │              │              │                                  │
+│        └──────────────┼──────────────┘                                  │
+│                       │                                                 │
+│                       ▼                                                 │
+│              ┌──────────────────┐                                       │
+│              │  Ingestion       │                                       │
+│              │  Gateway / LB    │                                       │
+│              └────────┬─────────┘                                       │
+│                       │                                                 │
+│              ┌────────▼─────────┐                                       │
+│              │  Kafka / Message │                                       │
+│              │  Buffer          │                                       │
+│              └────────┬─────────┘                                       │
+│                       │                                                 │
+│           ┌───────────┼────────────┐                                    │
+│           ▼           ▼            ▼                                    │
+│  ┌──────────────┐ ┌──────────┐ ┌──────────────┐                        │
+│  │ Write Workers│ │ Alerting │ │ Downsampler  │                        │
+│  │ (Batch Write)│ │ Engine   │ │ (Rollup)     │                        │
+│  └──────┬───────┘ └──────────┘ └──────────────┘                        │
+│         │                                                               │
+│         ▼                                                               │
+│  ┌──────────────────────────────────────────────┐                       │
+│  │           Time-Series Database                │                       │
+│  │                                              │                       │
+│  │  ┌────────────┐ ┌────────────┐ ┌──────────┐  │                       │
+│  │  │ Raw Data   │ │ 1-min      │ │ 1-hour   │  │                       │
+│  │  │ (7 days)   │ │ Rollups    │ │ Rollups  │  │                       │
+│  │  │            │ │ (1 year)   │ │ (5 years)│  │                       │
+│  │  └────────────┘ └────────────┘ └──────────┘  │                       │
+│  └──────────────────────┬───────────────────────┘                       │
+│                         │                                               │
+│                         ▼                                               │
+│              ┌──────────────────┐     ┌──────────────────┐             │
+│              │  Query Service   │     │  Dashboard /     │             │
+│              │  (Aggregation    │◄───&gt;│  Visualization   │             │
+│              │   Engine)        │     │  (Web UI)        │             │
+│              └──────────────────┘     └──────────────────┘             │
+│                                                                        │
+│              ┌──────────────────┐     ┌──────────────────┐             │
+│              │  Alert Manager   │────&gt;│  Notification    │             │
+│              │  (Rule Engine)   │     │  (PagerDuty,     │             │
+│              │                  │     │   Slack, Email)  │             │
+│              └──────────────────┘     └──────────────────┘             │
+│                                                                        │
+│              ┌──────────────────┐                                       │
+│              │  Metadata Store  │                                       │
+│              │  (PostgreSQL)    │                                       │
+│              │  - Dashboards    │                                       │
+│              │  - Alert rules   │                                       │
+│              │  - User/Orgs     │                                       │
+│              └──────────────────┘                                       │
+└──────────────────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>Step 4: Data Model</h2>
+<h3>Metric Data Point</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// A single metric data point</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">dataPoint</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">metric</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;http.request.duration&#39;</span><span class="p">,</span><span class="w">     </span><span class="c1">// metric name</span>
+<span class="w">  </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;histogram&#39;</span><span class="p">,</span><span class="w">                   </span><span class="c1">// counter, gauge, histogram</span>
+<span class="w">  </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="mf">142.5</span><span class="p">,</span><span class="w">                        </span><span class="c1">// numeric value (ms)</span>
+<span class="w">  </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="mf">1710720000</span><span class="p">,</span><span class="w">               </span><span class="c1">// Unix timestamp (seconds)</span>
+<span class="w">  </span><span class="nx">tags</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w">                              </span><span class="c1">// dimensions/labels</span>
+<span class="w">    </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;web-server-42&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">service</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user-api&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;GET&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">path</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;/api/users&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">status_code</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;200&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">region</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;us-east-1&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">};</span>
+</code></pre></div>
+
+<h3>Time Series Identity</h3>
+<p>A unique time series is identified by (metric_name, sorted_tags). This is the "cardinality" of the system:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">function</span><span class="w"> </span><span class="nx">timeSeriesId</span><span class="p">(</span><span class="nx">metric</span><span class="p">,</span><span class="w"> </span><span class="nx">tags</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">sortedTags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Object</span><span class="p">.</span><span class="nx">entries</span><span class="p">(</span><span class="nx">tags</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">sort</span><span class="p">(([</span><span class="nx">a</span><span class="p">],</span><span class="w"> </span><span class="p">[</span><span class="nx">b</span><span class="p">])</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">localeCompare</span><span class="p">(</span><span class="nx">b</span><span class="p">))</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">map</span><span class="p">(([</span><span class="nx">k</span><span class="p">,</span><span class="w"> </span><span class="nx">v</span><span class="p">])</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">k</span><span class="si">}</span><span class="sb">=</span><span class="si">${</span><span class="nx">v</span><span class="si">}</span><span class="sb">`</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="s1">&#39;,&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">metric</span><span class="si">}</span><span class="sb">{</span><span class="si">${</span><span class="nx">sortedTags</span><span class="si">}</span><span class="sb">}`</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Example:</span>
+<span class="c1">// http.request.duration{host=web-42,method=GET,path=/api/users,region=us-east-1,service=user-api,status_code=200}</span>
+</code></pre></div>
+
+<h2>Step 5: API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="c1">// POST /api/v1/metrics - Ingest metrics (used by agents)</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/metrics&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">metrics</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// metrics: [{ metric, type, value, timestamp, tags }]</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nb">Array</span><span class="p">.</span><span class="nx">isArray</span><span class="p">(</span><span class="nx">metrics</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">metrics</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;metrics array required&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">metrics</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">10000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">413</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Batch too large, max 10000&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Send to Kafka for async processing</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">kafkaProducer</span><span class="p">.</span><span class="nx">send</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;metrics-ingest&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">messages</span><span class="o">:</span><span class="w"> </span><span class="nx">metrics</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">m</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">timeSeriesId</span><span class="p">(</span><span class="nx">m</span><span class="p">.</span><span class="nx">metric</span><span class="p">,</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">tags</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">m</span><span class="p">),</span>
+<span class="w">    </span><span class="p">})),</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">202</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">accepted</span><span class="o">:</span><span class="w"> </span><span class="nx">metrics</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// POST /api/v1/query - Query metrics</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/query&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">metric</span><span class="p">,</span><span class="w">           </span><span class="c1">// &#39;http.request.duration&#39;</span>
+<span class="w">    </span><span class="nx">aggregation</span><span class="p">,</span><span class="w">      </span><span class="c1">// &#39;avg&#39;, &#39;sum&#39;, &#39;max&#39;, &#39;min&#39;, &#39;p99&#39;</span>
+<span class="w">    </span><span class="nx">groupBy</span><span class="p">,</span><span class="w">          </span><span class="c1">// [&#39;host&#39;, &#39;status_code&#39;]</span>
+<span class="w">    </span><span class="nx">filters</span><span class="p">,</span><span class="w">          </span><span class="c1">// { region: &#39;us-east-1&#39;, service: &#39;user-api&#39; }</span>
+<span class="w">    </span><span class="nx">startTime</span><span class="p">,</span><span class="w">        </span><span class="c1">// ISO 8601 or Unix timestamp</span>
+<span class="w">    </span><span class="nx">endTime</span><span class="p">,</span><span class="w">          </span><span class="c1">// ISO 8601 or Unix timestamp</span>
+<span class="w">    </span><span class="nx">granularity</span><span class="p">,</span><span class="w">      </span><span class="c1">// &#39;10s&#39;, &#39;1m&#39;, &#39;5m&#39;, &#39;1h&#39;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">queryService</span><span class="p">.</span><span class="nx">execute</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">metric</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">aggregation</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">groupBy</span><span class="o">:</span><span class="w"> </span><span class="nx">groupBy</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">    </span><span class="nx">filters</span><span class="o">:</span><span class="w"> </span><span class="nx">filters</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">{},</span>
+<span class="w">    </span><span class="nx">startTime</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">startTime</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">endTime</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">endTime</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">granularity</span><span class="o">:</span><span class="w"> </span><span class="nx">granularity</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;1m&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">metric</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">series</span><span class="o">:</span><span class="w"> </span><span class="nx">results</span><span class="p">,</span><span class="w"> </span><span class="c1">// [{ tags: {...}, datapoints: [[timestamp, value], ...] }]</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// POST /api/v1/alerts - Create alert rule</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/alerts&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">name</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">query</span><span class="p">,</span><span class="w">           </span><span class="c1">// { metric, aggregation, filters, groupBy }</span>
+<span class="w">    </span><span class="nx">condition</span><span class="p">,</span><span class="w">       </span><span class="c1">// { operator: &#39;&gt;&#39;, threshold: 500 }</span>
+<span class="w">    </span><span class="nb">window</span><span class="p">,</span><span class="w">          </span><span class="c1">// &#39;5m&#39; (evaluate over last 5 minutes)</span>
+<span class="w">    </span><span class="nx">notifyChannels</span><span class="p">,</span><span class="w">  </span><span class="c1">// [&#39;slack:#alerts&#39;, &#39;pagerduty:team-backend&#39;]</span>
+<span class="w">    </span><span class="nx">severity</span><span class="p">,</span><span class="w">        </span><span class="c1">// &#39;critical&#39;, &#39;warning&#39;, &#39;info&#39;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">alert</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">alertService</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">query</span><span class="p">,</span><span class="w"> </span><span class="nx">condition</span><span class="p">,</span><span class="w"> </span><span class="nb">window</span><span class="p">,</span><span class="w"> </span><span class="nx">notifyChannels</span><span class="p">,</span><span class="w"> </span><span class="nx">severity</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">alert</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// GET /api/v1/dashboards/:id - Get dashboard definition</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/dashboards/:id&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">dashboard</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">dashboardService</span><span class="p">.</span><span class="nx">getById</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">dashboard</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Not found&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">dashboard</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 6: Metrics Agent</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">os</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:os&#39;</span><span class="p">;</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">MetricsAgent</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">endpoint</span><span class="p">,</span><span class="w"> </span><span class="nx">tags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">endpoint</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">endpoint</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">defaultTags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tags</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">buffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">flushIntervalMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">10000</span><span class="p">;</span><span class="w"> </span><span class="c1">// Flush every 10 seconds</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">maxBufferSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1000</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Gauge: current value (e.g., CPU usage, memory)</span>
+<span class="w">  </span><span class="nx">gauge</span><span class="p">(</span><span class="nx">metric</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">tags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">buffer</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">metric</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;gauge&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">value</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1000</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">tags</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="k">this</span><span class="p">.</span><span class="nx">defaultTags</span><span class="p">,</span><span class="w"> </span><span class="p">...</span><span class="nx">tags</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">_maybeFlush</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Counter: monotonically increasing value (e.g., request count)</span>
+<span class="w">  </span><span class="nx">increment</span><span class="p">(</span><span class="nx">metric</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">tags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">buffer</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">metric</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;counter&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">value</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1000</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">tags</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="k">this</span><span class="p">.</span><span class="nx">defaultTags</span><span class="p">,</span><span class="w"> </span><span class="p">...</span><span class="nx">tags</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">_maybeFlush</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Histogram: distribution of values (e.g., request latency)</span>
+<span class="w">  </span><span class="nx">histogram</span><span class="p">(</span><span class="nx">metric</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">tags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">buffer</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">metric</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;histogram&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">value</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1000</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">tags</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="k">this</span><span class="p">.</span><span class="nx">defaultTags</span><span class="p">,</span><span class="w"> </span><span class="p">...</span><span class="nx">tags</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">_maybeFlush</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// System metrics collector</span>
+<span class="w">  </span><span class="nx">collectSystemMetrics</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">cpus</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">cpus</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">totalMem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">totalmem</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">freeMem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">freemem</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">loadAvg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">loadavg</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">gauge</span><span class="p">(</span><span class="s1">&#39;system.cpu.count&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">cpus</span><span class="p">.</span><span class="nx">length</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">gauge</span><span class="p">(</span><span class="s1">&#39;system.memory.total&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">totalMem</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">gauge</span><span class="p">(</span><span class="s1">&#39;system.memory.used&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">totalMem</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">freeMem</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">gauge</span><span class="p">(</span><span class="s1">&#39;system.memory.usage_pct&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">((</span><span class="nx">totalMem</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">freeMem</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">totalMem</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">100</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">gauge</span><span class="p">(</span><span class="s1">&#39;system.load.1m&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">loadAvg</span><span class="p">[</span><span class="mf">0</span><span class="p">]);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">gauge</span><span class="p">(</span><span class="s1">&#39;system.load.5m&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">loadAvg</span><span class="p">[</span><span class="mf">1</span><span class="p">]);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">gauge</span><span class="p">(</span><span class="s1">&#39;system.load.15m&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">loadAvg</span><span class="p">[</span><span class="mf">2</span><span class="p">]);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">start</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Collect system metrics every 10 seconds</span>
+<span class="w">    </span><span class="nx">setInterval</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">collectSystemMetrics</span><span class="p">(),</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">flushIntervalMs</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// Flush buffer periodically</span>
+<span class="w">    </span><span class="nx">setInterval</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">flush</span><span class="p">(),</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">flushIntervalMs</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">_maybeFlush</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">buffer</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">maxBufferSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">flush</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">flush</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">buffer</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">batch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">buffer</span><span class="p">.</span><span class="nx">splice</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">buffer</span><span class="p">.</span><span class="nx">length</span><span class="p">);</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="k">this</span><span class="p">.</span><span class="nx">endpoint</span><span class="si">}</span><span class="sb">/api/v1/metrics`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/json&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">metrics</span><span class="o">:</span><span class="w"> </span><span class="nx">batch</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Put failed metrics back in buffer (with limit to prevent memory growth)</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">buffer</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">10000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">this</span><span class="p">.</span><span class="nx">buffer</span><span class="p">.</span><span class="nx">unshift</span><span class="p">(...</span><span class="nx">batch</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Failed to flush metrics:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage in an Express app</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">metrics</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">MetricsAgent</span><span class="p">(</span><span class="s1">&#39;http://metrics-gateway:8080&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">hostname</span><span class="p">(),</span>
+<span class="w">  </span><span class="nx">service</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user-api&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">region</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">REGION</span><span class="p">,</span>
+<span class="p">});</span>
+<span class="nx">metrics</span><span class="p">.</span><span class="nx">start</span><span class="p">();</span>
+
+<span class="c1">// Middleware to track request metrics</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">metricsMiddleware</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;finish&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">duration</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">start</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">tags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">method</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">path</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">route</span><span class="o">?</span><span class="p">.</span><span class="nx">path</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">path</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">status_code</span><span class="o">:</span><span class="w"> </span><span class="nb">String</span><span class="p">(</span><span class="nx">res</span><span class="p">.</span><span class="nx">statusCode</span><span class="p">),</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="nx">metrics</span><span class="p">.</span><span class="nx">increment</span><span class="p">(</span><span class="s1">&#39;http.requests.total&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">tags</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">metrics</span><span class="p">.</span><span class="nx">histogram</span><span class="p">(</span><span class="s1">&#39;http.request.duration_ms&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">duration</span><span class="p">,</span><span class="w"> </span><span class="nx">tags</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">next</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 7: Time-Series Storage</h2>
+<h3>Storage Engine Design</h3>
+<p>Time-series data has unique characteristics: write-heavy, append-only, time-ordered reads, and amenable to compression.</p>
+<div class="highlight"><pre><span></span><code>Data Layout (columnar, time-partitioned):
+
+┌─────────────────────────────────────────────────────────┐
+│  Partition: 2026-03-18 00:00 to 2026-03-18 01:00        │
+│                                                         │
+│  Series: http.req.duration{host=web-1,status=200}       │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │ Timestamps: [1710720000, 1710720010, 1710720020]│    │
+│  │ Values:     [142.5, 138.2, 155.8]               │    │
+│  └─────────────────────────────────────────────────┘    │
+│                                                         │
+│  Series: http.req.duration{host=web-2,status=200}       │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │ Timestamps: [1710720000, 1710720010, 1710720020]│    │
+│  │ Values:     [98.1, 102.4, 95.7]                 │    │
+│  └─────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>Write Worker (Batch Writer)</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Kafka</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;kafkajs&#39;</span><span class="p">;</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">MetricsWriter</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">batch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span><span class="w"> </span><span class="c1">// seriesId -&gt; [datapoints]</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">batchSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">10000</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">flushIntervalMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5000</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">start</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">kafka</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Kafka</span><span class="p">({</span><span class="w"> </span><span class="nx">brokers</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;kafka:9092&#39;</span><span class="p">]</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">consumer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">kafka</span><span class="p">.</span><span class="nx">consumer</span><span class="p">({</span><span class="w"> </span><span class="nx">groupId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;metrics-writer&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">consumer</span><span class="p">.</span><span class="nx">connect</span><span class="p">();</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">consumer</span><span class="p">.</span><span class="nx">subscribe</span><span class="p">({</span><span class="w"> </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;metrics-ingest&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// Periodic flush</span>
+<span class="w">    </span><span class="nx">setInterval</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">flush</span><span class="p">(),</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">flushIntervalMs</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">consumer</span><span class="p">.</span><span class="nx">run</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">eachMessage</span><span class="o">:</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">message</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">point</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">message</span><span class="p">.</span><span class="nx">value</span><span class="p">.</span><span class="nx">toString</span><span class="p">());</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">seriesId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">message</span><span class="p">.</span><span class="nx">key</span><span class="p">.</span><span class="nx">toString</span><span class="p">();</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">this</span><span class="p">.</span><span class="nx">batch</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">seriesId</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">this</span><span class="p">.</span><span class="nx">batch</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">seriesId</span><span class="p">,</span><span class="w"> </span><span class="p">[]);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">this</span><span class="p">.</span><span class="nx">batch</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">seriesId</span><span class="p">).</span><span class="nx">push</span><span class="p">({</span>
+<span class="w">          </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nx">point</span><span class="p">.</span><span class="nx">timestamp</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nx">point</span><span class="p">.</span><span class="nx">value</span><span class="p">,</span>
+<span class="w">        </span><span class="p">});</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">getTotalPoints</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">batchSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">flush</span><span class="p">();</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">getTotalPoints</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">total</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">points</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">batch</span><span class="p">.</span><span class="nx">values</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">points</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">total</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">flush</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">batch</span><span class="p">.</span><span class="nx">size</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">currentBatch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">batch</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">batch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// Write to time-series database</span>
+<span class="w">    </span><span class="c1">// In production: write to ClickHouse, TimescaleDB, or custom TSDB</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">insertValues</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">seriesId</span><span class="p">,</span><span class="w"> </span><span class="nx">points</span><span class="p">]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">currentBatch</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">point</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">points</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">insertValues</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span>
+<span class="w">          </span><span class="nx">series_id</span><span class="o">:</span><span class="w"> </span><span class="nx">seriesId</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">point</span><span class="p">.</span><span class="nx">timestamp</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">),</span>
+<span class="w">          </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nx">point</span><span class="p">.</span><span class="nx">value</span><span class="p">,</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Batch insert (using TimescaleDB/PostgreSQL as example)</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$executeRaw</span><span class="sb">`</span>
+<span class="sb">      INSERT INTO metrics_raw (series_id, timestamp, value)</span>
+<span class="sb">      SELECT * FROM unnest(</span>
+<span class="sb">        </span><span class="si">${</span><span class="nx">insertValues</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">v</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">v</span><span class="p">.</span><span class="nx">series_id</span><span class="p">)</span><span class="si">}</span><span class="sb">::text[],</span>
+<span class="sb">        </span><span class="si">${</span><span class="nx">insertValues</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">v</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">v</span><span class="p">.</span><span class="nx">timestamp</span><span class="p">)</span><span class="si">}</span><span class="sb">::timestamptz[],</span>
+<span class="sb">        </span><span class="si">${</span><span class="nx">insertValues</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">v</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">v</span><span class="p">.</span><span class="nx">value</span><span class="p">)</span><span class="si">}</span><span class="sb">::double precision[]</span>
+<span class="sb">      )</span>
+<span class="sb">    `</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Downsampling (Rollup)</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">Downsampler</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Run periodically to create rollups</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">createOneMinuteRollups</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Aggregate raw 10-second data into 1-minute buckets</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$executeRaw</span><span class="sb">`</span>
+<span class="sb">      INSERT INTO metrics_1m (series_id, bucket, avg_value, min_value, max_value, sum_value, count)</span>
+<span class="sb">      SELECT</span>
+<span class="sb">        series_id,</span>
+<span class="sb">        time_bucket(&#39;1 minute&#39;, timestamp) AS bucket,</span>
+<span class="sb">        AVG(value) AS avg_value,</span>
+<span class="sb">        MIN(value) AS min_value,</span>
+<span class="sb">        MAX(value) AS max_value,</span>
+<span class="sb">        SUM(value) AS sum_value,</span>
+<span class="sb">        COUNT(*) AS count</span>
+<span class="sb">      FROM metrics_raw</span>
+<span class="sb">      WHERE timestamp &gt;= NOW() - INTERVAL &#39;10 minutes&#39;</span>
+<span class="sb">        AND timestamp &lt; NOW() - INTERVAL &#39;5 minutes&#39;</span>
+<span class="sb">      GROUP BY series_id, bucket</span>
+<span class="sb">      ON CONFLICT (series_id, bucket) DO NOTHING</span>
+<span class="sb">    `</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">createOneHourRollups</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$executeRaw</span><span class="sb">`</span>
+<span class="sb">      INSERT INTO metrics_1h (series_id, bucket, avg_value, min_value, max_value, sum_value, count)</span>
+<span class="sb">      SELECT</span>
+<span class="sb">        series_id,</span>
+<span class="sb">        time_bucket(&#39;1 hour&#39;, bucket) AS bucket,</span>
+<span class="sb">        AVG(avg_value) AS avg_value,</span>
+<span class="sb">        MIN(min_value) AS min_value,</span>
+<span class="sb">        MAX(max_value) AS max_value,</span>
+<span class="sb">        SUM(sum_value) AS sum_value,</span>
+<span class="sb">        SUM(count) AS count</span>
+<span class="sb">      FROM metrics_1m</span>
+<span class="sb">      WHERE bucket &gt;= NOW() - INTERVAL &#39;2 hours&#39;</span>
+<span class="sb">        AND bucket &lt; NOW() - INTERVAL &#39;1 hour&#39;</span>
+<span class="sb">      GROUP BY series_id, time_bucket(&#39;1 hour&#39;, bucket)</span>
+<span class="sb">      ON CONFLICT (series_id, bucket) DO NOTHING</span>
+<span class="sb">    `</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 8: Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Time-series identifier registry</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">series_registry</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">series_id</span><span class="w">       </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">metric_name</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">200</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tags</span><span class="w">            </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tags_hash</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- SHA-256 of sorted tags</span>
+<span class="w">    </span><span class="n">first_seen</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">last_seen</span><span class="w">       </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">    </span><span class="k">UNIQUE</span><span class="p">(</span><span class="n">metric_name</span><span class="p">,</span><span class="w"> </span><span class="n">tags_hash</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_series_metric</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">series_registry</span><span class="p">(</span><span class="n">metric_name</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_series_tags</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">series_registry</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">GIN</span><span class="p">(</span><span class="n">tags</span><span class="p">);</span>
+
+<span class="c1">-- Raw metrics (10-second granularity, 7-day retention)</span>
+<span class="c1">-- Using TimescaleDB hypertable for automatic partitioning</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">metrics_raw</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">series_id</span><span class="w">   </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">series_registry</span><span class="p">(</span><span class="n">series_id</span><span class="p">),</span>
+<span class="w">    </span><span class="k">timestamp</span><span class="w">   </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">value</span><span class="w">       </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span>
+<span class="p">);</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">create_hypertable</span><span class="p">(</span><span class="s1">&#39;metrics_raw&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;timestamp&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">chunk_time_interval</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;1 hour&#39;</span><span class="p">);</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">add_retention_policy</span><span class="p">(</span><span class="s1">&#39;metrics_raw&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;7 days&#39;</span><span class="p">);</span>
+
+<span class="c1">-- 1-minute rollups (1-year retention)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">metrics_1m</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">series_id</span><span class="w">   </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">bucket</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">avg_value</span><span class="w">   </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span><span class="p">,</span>
+<span class="w">    </span><span class="n">min_value</span><span class="w">   </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span><span class="p">,</span>
+<span class="w">    </span><span class="n">max_value</span><span class="w">   </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span><span class="p">,</span>
+<span class="w">    </span><span class="n">sum_value</span><span class="w">   </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span><span class="p">,</span>
+<span class="w">    </span><span class="k">count</span><span class="w">       </span><span class="nb">BIGINT</span><span class="p">,</span>
+<span class="w">    </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">series_id</span><span class="p">,</span><span class="w"> </span><span class="n">bucket</span><span class="p">)</span>
+<span class="p">);</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">create_hypertable</span><span class="p">(</span><span class="s1">&#39;metrics_1m&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;bucket&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">chunk_time_interval</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;1 day&#39;</span><span class="p">);</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">add_retention_policy</span><span class="p">(</span><span class="s1">&#39;metrics_1m&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;1 year&#39;</span><span class="p">);</span>
+
+<span class="c1">-- 1-hour rollups (5-year retention)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">metrics_1h</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">series_id</span><span class="w">   </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">bucket</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">avg_value</span><span class="w">   </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span><span class="p">,</span>
+<span class="w">    </span><span class="n">min_value</span><span class="w">   </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span><span class="p">,</span>
+<span class="w">    </span><span class="n">max_value</span><span class="w">   </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span><span class="p">,</span>
+<span class="w">    </span><span class="n">sum_value</span><span class="w">   </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span><span class="p">,</span>
+<span class="w">    </span><span class="k">count</span><span class="w">       </span><span class="nb">BIGINT</span><span class="p">,</span>
+<span class="w">    </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">series_id</span><span class="p">,</span><span class="w"> </span><span class="n">bucket</span><span class="p">)</span>
+<span class="p">);</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">create_hypertable</span><span class="p">(</span><span class="s1">&#39;metrics_1h&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;bucket&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">chunk_time_interval</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;1 week&#39;</span><span class="p">);</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">add_retention_policy</span><span class="p">(</span><span class="s1">&#39;metrics_1h&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;5 years&#39;</span><span class="p">);</span>
+
+<span class="c1">-- Alert rules</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">alert_rules</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">200</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">metric_name</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">200</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">aggregation</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">filters</span><span class="w">         </span><span class="n">JSONB</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">group_by</span><span class="w">        </span><span class="nb">TEXT</span><span class="p">[],</span>
+<span class="w">    </span><span class="k">operator</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">5</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">   </span><span class="c1">-- &#39;&gt;&#39;, &#39;&lt;&#39;, &#39;&gt;=&#39;, &#39;&lt;=&#39;, &#39;==&#39;</span>
+<span class="w">    </span><span class="n">threshold</span><span class="w">       </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">window_seconds</span><span class="w">  </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">severity</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">notify_channels</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">[]</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">is_enabled</span><span class="w">      </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">TRUE</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Alert incidents</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">alert_incidents</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">rule_id</span><span class="w">         </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">alert_rules</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;firing&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">triggered_value</span><span class="w"> </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span><span class="p">,</span>
+<span class="w">    </span><span class="n">triggered_at</span><span class="w">    </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">resolved_at</span><span class="w">     </span><span class="k">TIMESTAMP</span><span class="p">,</span>
+<span class="w">    </span><span class="n">notified</span><span class="w">        </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">FALSE</span>
+<span class="p">);</span>
+
+<span class="c1">-- Dashboard definitions</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">dashboards</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">title</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">200</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">owner_id</span><span class="w">        </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">layout</span><span class="w">          </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- Grid layout with widget positions</span>
+<span class="w">    </span><span class="n">widgets</span><span class="w">         </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- Array of widget configs (queries, chart types)</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">updated_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Step 9: Alerting Engine</h2>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">AlertEngine</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">queryService</span><span class="p">,</span><span class="w"> </span><span class="nx">notifier</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">queryService</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">queryService</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">notifier</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">notifier</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">evaluationIntervalMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">30000</span><span class="p">;</span><span class="w"> </span><span class="c1">// Evaluate every 30 seconds</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">start</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">setInterval</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">evaluateAllRules</span><span class="p">(),</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">evaluationIntervalMs</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">evaluateAllRules</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">rules</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">alertRule</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">isEnabled</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// Evaluate rules in parallel with concurrency limit</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">CONCURRENCY</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">20</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">rules</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">CONCURRENCY</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">batch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">rules</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">CONCURRENCY</span><span class="p">);</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">(</span><span class="nx">batch</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">rule</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">evaluateRule</span><span class="p">(</span><span class="nx">rule</span><span class="p">)));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">evaluateRule</span><span class="p">(</span><span class="nx">rule</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">endTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">();</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">startTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">endTime</span><span class="p">.</span><span class="nx">getTime</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">windowSeconds</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">);</span>
+
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">queryService</span><span class="p">.</span><span class="nx">execute</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">metric</span><span class="o">:</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">metricName</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">aggregation</span><span class="o">:</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">aggregation</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">filters</span><span class="o">:</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">filters</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">groupBy</span><span class="o">:</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">groupBy</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">        </span><span class="nx">startTime</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">endTime</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">granularity</span><span class="o">:</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">rule</span><span class="p">.</span><span class="nx">windowSeconds</span><span class="si">}</span><span class="sb">s`</span><span class="p">,</span><span class="w"> </span><span class="c1">// Single bucket for the window</span>
+<span class="w">      </span><span class="p">});</span>
+
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">series</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">result</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">series</span><span class="p">.</span><span class="nx">datapoints</span><span class="p">[</span><span class="mf">0</span><span class="p">]</span><span class="o">?</span><span class="p">.[</span><span class="mf">1</span><span class="p">];</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">value</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="kc">undefined</span><span class="p">)</span><span class="w"> </span><span class="k">continue</span><span class="p">;</span>
+
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">isTriggered</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">checkCondition</span><span class="p">(</span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">operator</span><span class="p">,</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">threshold</span><span class="p">);</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">isTriggered</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">fireAlert</span><span class="p">(</span><span class="nx">rule</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">series</span><span class="p">.</span><span class="nx">tags</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">resolveAlert</span><span class="p">(</span><span class="nx">rule</span><span class="p">,</span><span class="w"> </span><span class="nx">series</span><span class="p">.</span><span class="nx">tags</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`Failed to evaluate rule </span><span class="si">${</span><span class="nx">rule</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">:`</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">checkCondition</span><span class="p">(</span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">operator</span><span class="p">,</span><span class="w"> </span><span class="nx">threshold</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">operator</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;&gt;&#39;</span><span class="o">:</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">value</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">threshold</span><span class="p">;</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;&lt;&#39;</span><span class="o">:</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">value</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">threshold</span><span class="p">;</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;&gt;=&#39;</span><span class="o">:</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">value</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">threshold</span><span class="p">;</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;&lt;=&#39;</span><span class="o">:</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">value</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">threshold</span><span class="p">;</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;==&#39;</span><span class="o">:</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">abs</span><span class="p">(</span><span class="nx">value</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">threshold</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">0.001</span><span class="p">;</span>
+<span class="w">      </span><span class="k">default</span><span class="o">:</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">fireAlert</span><span class="p">(</span><span class="nx">rule</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">tags</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Check if already firing (avoid duplicate alerts)</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">alertIncident</span><span class="p">.</span><span class="nx">findFirst</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ruleId</span><span class="o">:</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;firing&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">existing</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">incident</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">alertIncident</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">ruleId</span><span class="o">:</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;firing&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">triggeredValue</span><span class="o">:</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">});</span>
+
+<span class="w">      </span><span class="c1">// Send notification</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">notifier</span><span class="p">.</span><span class="nx">send</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">channels</span><span class="o">:</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">notifyChannels</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">severity</span><span class="o">:</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">severity</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">title</span><span class="o">:</span><span class="w"> </span><span class="sb">`Alert: </span><span class="si">${</span><span class="nx">rule</span><span class="p">.</span><span class="nx">name</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">rule</span><span class="p">.</span><span class="nx">metricName</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">rule</span><span class="p">.</span><span class="nx">operator</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">rule</span><span class="p">.</span><span class="nx">threshold</span><span class="si">}</span><span class="sb"> (current: </span><span class="si">${</span><span class="nx">value</span><span class="p">.</span><span class="nx">toFixed</span><span class="p">(</span><span class="mf">2</span><span class="p">)</span><span class="si">}</span><span class="sb">)`</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">tags</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">incidentId</span><span class="o">:</span><span class="w"> </span><span class="nx">incident</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">resolveAlert</span><span class="p">(</span><span class="nx">rule</span><span class="p">,</span><span class="w"> </span><span class="nx">tags</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">incident</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">alertIncident</span><span class="p">.</span><span class="nx">findFirst</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ruleId</span><span class="o">:</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;firing&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">incident</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">alertIncident</span><span class="p">.</span><span class="nx">update</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">incident</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;resolved&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">resolvedAt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">()</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">});</span>
+
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">notifier</span><span class="p">.</span><span class="nx">send</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">channels</span><span class="o">:</span><span class="w"> </span><span class="nx">rule</span><span class="p">.</span><span class="nx">notifyChannels</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">severity</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;info&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">title</span><span class="o">:</span><span class="w"> </span><span class="sb">`Resolved: </span><span class="si">${</span><span class="nx">rule</span><span class="p">.</span><span class="nx">name</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="sb">`Alert resolved after </span><span class="si">${</span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">((</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">incident</span><span class="p">.</span><span class="nx">triggeredAt</span><span class="p">.</span><span class="nx">getTime</span><span class="p">())</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1000</span><span class="p">)</span><span class="si">}</span><span class="sb">s`</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">tags</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 10: Scaling Strategies</h2>
+<h3>Ingestion Scaling</h3>
+<div class="highlight"><pre><span></span><code>┌───────────┐     ┌──────────────────────┐     ┌───────────────┐
+│ 100K      │     │  Kafka (partitioned  │     │ Write Workers │
+│ Agents    │────&gt;│  by series_id hash)  │────&gt;│ (50 instances)│
+│           │     │                      │     │               │
+│           │     │  Partition 0         │     │ Writer 0-2    │
+│           │     │  Partition 1         │     │ Writer 3-5    │
+│           │     │  ...                 │     │ ...           │
+│           │     │  Partition 99        │     │ Writer 48-49  │
+└───────────┘     └──────────────────────┘     └───────────────┘
+</code></pre></div>
+
+<h3>Query Scaling</h3>
+<p>Shard the time-series database by time range and by series_id:</p>
+<div class="highlight"><pre><span></span><code>Time-based sharding:
+  Shard A: Last 24 hours (hot, SSD, in-memory cache)
+  Shard B: 1-7 days ago (warm, SSD)
+  Shard C: 7-30 days ago (cold, HDD)
+  Shard D: 30+ days (archive, compressed, HDD)
+
+Series-based sharding:
+  Shard 1: series_id % 10 == 0 (hash-based distribution)
+  Shard 2: series_id % 10 == 1
+  ...
+</code></pre></div>
+
+<h3>Cardinality Management</h3>
+<p>High cardinality (too many unique tag combinations) is the biggest operational challenge:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Enforce cardinality limits</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">CardinalityGuard</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">redis</span><span class="p">,</span><span class="w"> </span><span class="nx">maxPerMetric</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">100000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">maxPerMetric</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">maxPerMetric</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">checkAndRecord</span><span class="p">(</span><span class="nx">metricName</span><span class="p">,</span><span class="w"> </span><span class="nx">tagsHash</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`cardinality:</span><span class="si">${</span><span class="nx">metricName</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">current</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">scard</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">current</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">maxPerMetric</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">isMember</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">sismember</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">tagsHash</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">isMember</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// New series would exceed limit - drop it</span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">warn</span><span class="p">(</span><span class="sb">`Cardinality limit reached for </span><span class="si">${</span><span class="nx">metricName</span><span class="si">}</span><span class="sb">: </span><span class="si">${</span><span class="nx">current</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">sadd</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">tagsHash</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 11: Trade-offs and Decisions</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TSDB</td>
+<td>TimescaleDB (PostgreSQL)</td>
+<td>ClickHouse</td>
+<td>TimescaleDB for familiarity; ClickHouse for extreme scale</td>
+</tr>
+<tr>
+<td>Ingestion buffer</td>
+<td>Kafka</td>
+<td>Redis Streams</td>
+<td>Kafka for durability and replay; Redis Streams for simplicity</td>
+</tr>
+<tr>
+<td>Agent protocol</td>
+<td>HTTP JSON</td>
+<td>StatsD (UDP)</td>
+<td>HTTP for reliability; StatsD for lowest overhead</td>
+</tr>
+<tr>
+<td>Compression</td>
+<td>Gorilla (Facebook)</td>
+<td>Delta-of-delta</td>
+<td>Gorilla achieves 12x compression on time-series data</td>
+</tr>
+<tr>
+<td>Alerting</td>
+<td>Push (stream processing)</td>
+<td>Pull (periodic polling)</td>
+<td>Pull is simpler; push has lower detection latency</td>
+</tr>
+</tbody>
+</table>
+<h3>Compression Techniques</h3>
+<p>Time-series data compresses extremely well because consecutive timestamps and values are similar:</p>
+<ul>
+<li><strong>Delta-of-delta for timestamps</strong>: If interval is regular (10s), store only the deviation from expected</li>
+<li><strong>XOR encoding for values</strong>: Store XOR of consecutive values (often just a few bits differ)</li>
+<li><strong>Gorilla compression</strong>: Facebook's algorithm achieves 12x compression on real-world metrics</li>
+</ul>
+<h2>Summary</h2>
+<p>A metrics and monitoring system ingests millions of data points per second from agents running on monitored hosts. Data flows through a message buffer (Kafka), gets written in batches to a time-series database (TimescaleDB or ClickHouse), and is progressively downsampled from high-resolution (10s) to lower resolution (1m, 1h) for long-term storage. A query engine supports multi-dimensional aggregation for dashboard rendering, while an alerting engine periodically evaluates rules against recent data and triggers notifications. The biggest operational challenges are managing time-series cardinality and scaling write throughput.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Metrics Agent and Collector</div>
+                    <div class="exercise-desc"><p>Create a MetricsAgent class that collects CPU, memory, and custom application metrics, buffers them, and sends them in batches to a collector Express server. The collector should store metrics in a PostgreSQL table and expose a simple query endpoint.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use os.cpus() and os.freemem() for system metrics. Buffer data points in an array and flush every 10 seconds via HTTP POST. Use COPY for efficient batch inserts.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Time-Series Downsampling</div>
+                    <div class="exercise-desc"><p>Write a downsampler that reads raw 10-second metrics from a PostgreSQL table, computes 1-minute rollups (avg, min, max, count), and writes them to a rollup table. Run it periodically and verify the rollups match expected values.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use time_bucket('1 minute', timestamp) if using TimescaleDB, or date_trunc('minute', timestamp) for standard PostgreSQL. GROUP BY the bucket and series_id.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build an Alert Evaluator</div>
+                    <div class="exercise-desc"><p>Create an alerting engine that evaluates rules defined in a database against recent metric values. When a threshold is breached, create an incident and log a notification. When the value returns to normal, resolve the incident.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Query the last N minutes of data for each alert rule's metric. Compare the aggregated value against the threshold. Track incident state to avoid duplicate alerts.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Dashboard Query API</div>
+                    <div class="exercise-desc"><p>Build a query API that accepts a metric name, time range, granularity, and tag filters, then returns time-series data points. Automatically select the appropriate rollup table based on the time range (raw for &lt;1h, 1m for &lt;24h, 1h for &gt;24h).</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a routing function: if (timeRange &lt; 1 hour) query metrics_raw; else if (timeRange &lt; 24 hours) query metrics_1m; else query metrics_1h.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Ingestion pipeline falls behind, causing stale dashboards and delayed alerts</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Dashboards show data gaps or delays. Alerts fire minutes after the actual threshold breach. Kafka consumer lag metric is growing continuously.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Write workers cannot keep up with the incoming data rate. Kafka consumer lag grows, meaning metrics are ingested but not yet written to the TSDB.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Scale write workers horizontally (more consumer instances with more Kafka partitions). Use batch inserts instead of individual writes. Pre-aggregate on the agent side (send 1-minute rollups instead of raw points). Monitor Kafka consumer lag as a key operational metric.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Query latency degrades as the number of unique time series grows (high cardinality explosion)</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Dashboard queries that were fast become increasingly slow over days/weeks. Series registry table grows to hundreds of millions of rows. Memory usage on TSDB nodes keeps climbing.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> A tag with unbounded values (like user_id, request_id, or full URL path) creates millions of unique time series, making index lookups and aggregation slow.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Enforce cardinality limits per metric (e.g., max 100K unique series). Reject or drop metrics that exceed the limit. Educate users to avoid high-cardinality tags. Use pre-aggregation for high-cardinality dimensions.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Alerts are flapping (firing and resolving rapidly in alternation)</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The metric value oscillates around the threshold, causing the alert to fire and resolve on every evaluation cycle. This floods notification channels with noise.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement hysteresis: use a higher threshold to fire and a lower threshold to resolve (or vice versa). Add a minimum firing duration (e.g., must be above threshold for 3 consecutive evaluations). Support 'for' clauses like Prometheus (e.g., fire only if condition is true for 5 minutes).
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://www.vldb.org/pvldb/vol8/p1816-teller.pdf" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag paper">paper</div>
+                    <div class="resource-title">Gorilla: A Fast, Scalable, In-Memory Time Series Database (Facebook)</div>
+                    
+                    <div class="resource-note">Facebook's paper on in-memory time-series storage with aggressive compression, foundational to modern TSDB design</div>
+                    
+                </a>
+                
+                <a href="https://prometheus.io/docs/introduction/overview/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Prometheus Architecture Overview</div>
+                    
+                    <div class="resource-note">Prometheus is the de facto open-source metrics system; understanding its architecture is essential</div>
+                    
+                </a>
+                
+                <a href="https://docs.timescale.com/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">TimescaleDB Documentation</div>
+                    
+                    <div class="resource-note">PostgreSQL extension for time-series data with automatic partitioning, compression, and continuous aggregates</div>
+                    
+                </a>
+                
+                <a href="https://sre.google/sre-book/monitoring-distributed-systems/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Monitoring and Observability - Google SRE Book</div>
+                    
+                    <div class="resource-note">Google's approach to monitoring, including the four golden signals and alerting philosophy</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.4.4-js.html" class="btn">&larr; Design a Content Delivery Network (CDN)</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

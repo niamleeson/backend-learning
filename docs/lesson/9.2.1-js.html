@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a File Storage System (Dropbox) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Storage & Data Systems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.2.1</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a File Storage System (Dropbox)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of Dropbox like a post office with lockers. When you upload a file, the clerk (API) does not personally store the package -- they give you a locker number (presigned URL) and you put it in the locker (S3) yourself. To sync, each device keeps a receipt number (cursor). They ask: 'What happened after receipt #4527?' The clerk replies with a list of new packages, moves, and deletions. Chunking is like sending a large parcel in multiple boxes -- if one gets lost in transit, you only resend that box.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a File Storage System (Dropbox)</h1>
+<h2>Introduction</h2>
+<p>A cloud file storage system allows users to upload, download, sync, and share files across devices. Think Dropbox, Google Drive, or OneDrive. This is a classic system design problem that tests your understanding of large-scale object storage, metadata management, chunked uploads, deduplication, and synchronization protocols.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li><strong>Upload files</strong>: Users can upload files of any size (up to 10 GB)</li>
+<li><strong>Download files</strong>: Users can download files to any device</li>
+<li><strong>Sync across devices</strong>: Changes on one device reflect on all others</li>
+<li><strong>File versioning</strong>: Keep history of file changes, allow rollback</li>
+<li><strong>Sharing</strong>: Share files/folders with other users via links or permissions</li>
+<li><strong>Offline editing</strong>: Users can edit files offline and sync when reconnected</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li><strong>Availability</strong>: 99.9% uptime (less than 8.76 hours of downtime per year)</li>
+<li><strong>Durability</strong>: 99.999999999% (eleven 9s) -- no data loss</li>
+<li><strong>Latency</strong>: Uploads should start immediately; downloads &lt; 200ms TTFB for small files</li>
+<li><strong>Consistency</strong>: Eventual consistency for sync, strong consistency for metadata</li>
+<li><strong>Scalability</strong>: Support 500M users, 100M DAU</li>
+</ul>
+<h2>Step 2: Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Users:             500M total, 100M DAU
+Avg files/user:    200 files
+Avg file size:     500 KB
+Total storage:     500M * 200 * 500KB = 50 PB
+Daily uploads:     100M * 2 files/day = 200M files/day
+Upload throughput: 200M * 500KB / 86400 = ~1.16 TB/s (peak: ~3 TB/s)
+Read:Write ratio:  3:1 (more downloads than uploads)
+
+Metadata per file: ~1KB (name, path, size, timestamps, permissions)
+Metadata storage:  500M * 200 * 1KB = 100 TB
+
+API requests:      ~10K uploads/sec, ~30K downloads/sec (avg)
+</code></pre></div>
+
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────────────────┐
+│                              Clients                                │
+│         (Desktop App, Mobile App, Web Browser, CLI)                 │
+└──────────────┬───────────────────────────────────┬──────────────────┘
+               │                                   │
+               ▼                                   ▼
+┌──────────────────────────┐         ┌─────────────────────────────┐
+│     API Gateway /        │         │   Notification Service      │
+│     Load Balancer        │         │   (WebSocket / Long Poll)   │
+└──────────┬───────────────┘         └──────────────┬──────────────┘
+           │                                        │
+           ▼                                        │
+┌──────────────────────────┐                        │
+│     Upload / Download    │                        │
+│     Service              │                        │
+│  (chunking, dedup,       │                        │
+│   presigned URLs)        │                        │
+└─────┬────────────┬───────┘                        │
+      │            │                                │
+      ▼            ▼                                ▼
+┌───────────┐  ┌────────────────┐   ┌───────────────────────────────┐
+│  Object   │  │   Metadata     │   │       Sync Service            │
+│  Storage  │  │   Service      │   │   (conflict resolution,       │
+│  (S3)     │  │                │   │    change propagation)        │
+└───────────┘  └──────┬─────────┘   └───────────────────────────────┘
+                      │
+              ┌───────┴──────────┐
+              │                  │
+              ▼                  ▼
+        ┌──────────┐     ┌─────────────┐
+        │PostgreSQL│     │   Redis     │
+        │(metadata)│     │  (cache,    │
+        │          │     │   locks)    │
+        └──────────┘     └─────────────┘
+</code></pre></div>
+
+<h2>Step 4: API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// Initiate a file upload (returns presigned URL for chunked upload)</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/files/upload/init&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">fileName</span><span class="p">,</span><span class="w"> </span><span class="nx">fileSize</span><span class="p">,</span><span class="w"> </span><span class="nx">parentFolderId</span><span class="p">,</span><span class="w"> </span><span class="nx">checksum</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Check for deduplication</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">metadataService</span><span class="p">.</span><span class="nx">findByChecksum</span><span class="p">(</span><span class="nx">checksum</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;duplicate&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">fileId</span><span class="o">:</span><span class="w"> </span><span class="nx">existing</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Calculate chunks</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">CHUNK_SIZE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">4</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="p">;</span><span class="w"> </span><span class="c1">// 4MB chunks</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">totalChunks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">ceil</span><span class="p">(</span><span class="nx">fileSize</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">CHUNK_SIZE</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">upload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">uploadService</span><span class="p">.</span><span class="nx">initiate</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">fileName</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">fileSize</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">parentFolderId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">totalChunks</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">checksum</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Generate presigned URLs for each chunk</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">chunkUrls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">(</span>
+<span class="w">    </span><span class="nb">Array</span><span class="p">.</span><span class="kr">from</span><span class="p">({</span><span class="w"> </span><span class="nx">length</span><span class="o">:</span><span class="w"> </span><span class="nx">totalChunks</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">(</span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span>
+<span class="w">      </span><span class="nx">storageService</span><span class="p">.</span><span class="nx">getPresignedUploadUrl</span><span class="p">(</span><span class="nx">upload</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="p">)</span>
+<span class="w">    </span><span class="p">)</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">uploadId</span><span class="o">:</span><span class="w"> </span><span class="nx">upload</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="nx">CHUNK_SIZE</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">totalChunks</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">chunkUrls</span><span class="p">,</span><span class="w"> </span><span class="c1">// Client uploads directly to S3</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Complete upload after all chunks are uploaded</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/files/upload/:uploadId/complete&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">uploadId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkChecksums</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">uploadService</span><span class="p">.</span><span class="nx">complete</span><span class="p">(</span><span class="nx">uploadId</span><span class="p">,</span><span class="w"> </span><span class="nx">chunkChecksums</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">syncService</span><span class="p">.</span><span class="nx">notifyDevices</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;FILE_CREATED&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">file</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">file</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Download a file (returns presigned download URL)</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/files/:fileId/download&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">metadataService</span><span class="p">.</span><span class="nx">getFile</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">fileId</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">file</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;File not found&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">downloadUrl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">storageService</span><span class="p">.</span><span class="nx">getPresignedDownloadUrl</span><span class="p">(</span><span class="nx">file</span><span class="p">.</span><span class="nx">storageKey</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">downloadUrl</span><span class="p">,</span><span class="w"> </span><span class="nx">expiresIn</span><span class="o">:</span><span class="w"> </span><span class="mf">3600</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Get sync delta (changes since last sync)</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/sync/delta&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">cursor</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span><span class="w"> </span><span class="c1">// Last sync timestamp or sequence number</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">changes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">syncService</span><span class="p">.</span><span class="nx">getChangesSince</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">cursor</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">changes</span><span class="p">,</span><span class="w">        </span><span class="c1">// Array of file/folder change events</span>
+<span class="w">    </span><span class="nx">cursor</span><span class="o">:</span><span class="w"> </span><span class="nx">changes</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">changes</span><span class="p">[</span><span class="nx">changes</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">].</span><span class="nx">sequence</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="nx">cursor</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">hasMore</span><span class="o">:</span><span class="w"> </span><span class="nx">changes</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Share a file/folder</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/files/:fileId/share&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">targetUserId</span><span class="p">,</span><span class="w"> </span><span class="nx">permission</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span><span class="w"> </span><span class="c1">// &#39;view&#39; | &#39;edit&#39;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">share</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">sharingService</span><span class="p">.</span><span class="nx">share</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">fileId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">fileId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">ownerId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">targetUserId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">permission</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">share</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// List file versions</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/files/:fileId/versions&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">versions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">metadataService</span><span class="p">.</span><span class="nx">getVersions</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">fileId</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">versions</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 5: Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Users table</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">email</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">display_name</span><span class="w">  </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">storage_used</span><span class="w">  </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">storage_limit</span><span class="w"> </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">2147483648</span><span class="p">,</span><span class="w">  </span><span class="c1">-- 2GB free tier</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- File/Folder metadata</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">files</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">owner_id</span><span class="w">        </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">parent_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">files</span><span class="p">(</span><span class="n">id</span><span class="p">),</span><span class="w">       </span><span class="c1">-- NULL for root</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_folder</span><span class="w">       </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">FALSE</span><span class="p">,</span>
+<span class="w">  </span><span class="k">size</span><span class="w">            </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">mime_type</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">127</span><span class="p">),</span>
+<span class="w">  </span><span class="n">checksum</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">),</span><span class="w">                      </span><span class="c1">-- SHA-256</span>
+<span class="w">  </span><span class="n">storage_key</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">),</span><span class="w">                     </span><span class="c1">-- S3 object key</span>
+<span class="w">  </span><span class="n">current_version</span><span class="w"> </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_deleted</span><span class="w">      </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">FALSE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="p">(</span><span class="n">owner_id</span><span class="p">,</span><span class="w"> </span><span class="n">parent_id</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_files_owner</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">files</span><span class="p">(</span><span class="n">owner_id</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_files_parent</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">files</span><span class="p">(</span><span class="n">parent_id</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_files_checksum</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">files</span><span class="p">(</span><span class="n">checksum</span><span class="p">);</span>
+
+<span class="c1">-- File versions for history</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">file_versions</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">          </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">file_id</span><span class="w">     </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">files</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="k">version</span><span class="w">     </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="k">size</span><span class="w">        </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">checksum</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">storage_key</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_by</span><span class="w">  </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">  </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="p">(</span><span class="n">file_id</span><span class="p">,</span><span class="w"> </span><span class="k">version</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- Chunk tracking for resumable uploads</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">upload_chunks</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">          </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">upload_id</span><span class="w">   </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">chunk_index</span><span class="w"> </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="k">size</span><span class="w">        </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">checksum</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">storage_key</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">uploaded_at</span><span class="w"> </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="p">(</span><span class="n">upload_id</span><span class="p">,</span><span class="w"> </span><span class="n">chunk_index</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- Sharing permissions</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">shares</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">           </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">file_id</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">files</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">owner_id</span><span class="w">     </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">shared_with</span><span class="w">  </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span><span class="w">       </span><span class="c1">-- NULL for public link</span>
+<span class="w">  </span><span class="n">permission</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;view&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">link_token</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">expires_at</span><span class="w">   </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">   </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Sync journal for change tracking</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">sync_journal</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">          </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span><span class="w">              </span><span class="c1">-- monotonic sequence</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">     </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">file_id</span><span class="w">     </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">files</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">action</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">               </span><span class="c1">-- CREATE, UPDATE, DELETE, MOVE</span>
+<span class="w">  </span><span class="n">metadata</span><span class="w">    </span><span class="n">JSONB</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">  </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_sync_user_seq</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">sync_journal</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Step 6: Deep Dive -- Chunked Upload and Deduplication</h2>
+<h3>Chunked Uploads</h3>
+<p>Large files are split into fixed-size chunks (typically 4 MB). This enables:
+- <strong>Resumable uploads</strong>: If the connection drops, only the incomplete chunk needs re-uploading
+- <strong>Parallel uploads</strong>: Multiple chunks can upload concurrently
+- <strong>Deduplication</strong>: Identical chunks are stored only once</p>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">ChunkedUploadService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">storageClient</span><span class="p">,</span><span class="w"> </span><span class="nx">metadataDb</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">storage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">storageClient</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">metadataDb</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">CHUNK_SIZE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">4</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="p">;</span><span class="w"> </span><span class="c1">// 4MB</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">initiateUpload</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">fileName</span><span class="p">,</span><span class="w"> </span><span class="nx">fileSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">totalChunks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">ceil</span><span class="p">(</span><span class="nx">fileSize</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">CHUNK_SIZE</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">uploadId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomUUID</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">      </span><span class="sb">`INSERT INTO uploads (id, user_id, file_name, file_size, total_chunks, status)</span>
+<span class="sb">       VALUES ($1, $2, $3, $4, $5, &#39;in_progress&#39;)`</span><span class="p">,</span>
+<span class="w">      </span><span class="p">[</span><span class="nx">uploadId</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">fileName</span><span class="p">,</span><span class="w"> </span><span class="nx">fileSize</span><span class="p">,</span><span class="w"> </span><span class="nx">totalChunks</span><span class="p">]</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">uploadId</span><span class="p">,</span><span class="w"> </span><span class="nx">totalChunks</span><span class="p">,</span><span class="w"> </span><span class="nx">chunkSize</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">CHUNK_SIZE</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">uploadChunk</span><span class="p">(</span><span class="nx">uploadId</span><span class="p">,</span><span class="w"> </span><span class="nx">chunkIndex</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">checksum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">createHash</span><span class="p">(</span><span class="s1">&#39;sha256&#39;</span><span class="p">).</span><span class="nx">update</span><span class="p">(</span><span class="nx">data</span><span class="p">).</span><span class="nx">digest</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Deduplication: check if this chunk already exists</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">      </span><span class="s1">&#39;SELECT storage_key FROM chunks WHERE checksum = $1&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="p">[</span><span class="nx">checksum</span><span class="p">]</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">storageKey</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="p">.</span><span class="nx">rows</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">storageKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">existing</span><span class="p">.</span><span class="nx">rows</span><span class="p">[</span><span class="mf">0</span><span class="p">].</span><span class="nx">storage_key</span><span class="p">;</span><span class="w"> </span><span class="c1">// Reuse existing chunk</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">storageKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`chunks/</span><span class="si">${</span><span class="nx">checksum</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">storage</span><span class="p">.</span><span class="nx">putObject</span><span class="p">(</span><span class="nx">storageKey</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">      </span><span class="sb">`INSERT INTO upload_chunks (upload_id, chunk_index, size, checksum, storage_key)</span>
+<span class="sb">       VALUES ($1, $2, $3, $4, $5)</span>
+<span class="sb">       ON CONFLICT (upload_id, chunk_index) DO NOTHING`</span><span class="p">,</span>
+<span class="w">      </span><span class="p">[</span><span class="nx">uploadId</span><span class="p">,</span><span class="w"> </span><span class="nx">chunkIndex</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">length</span><span class="p">,</span><span class="w"> </span><span class="nx">checksum</span><span class="p">,</span><span class="w"> </span><span class="nx">storageKey</span><span class="p">]</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">chunkIndex</span><span class="p">,</span><span class="w"> </span><span class="nx">checksum</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">completeUpload</span><span class="p">(</span><span class="nx">uploadId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">chunks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">      </span><span class="s1">&#39;SELECT * FROM upload_chunks WHERE upload_id = $1 ORDER BY chunk_index&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="p">[</span><span class="nx">uploadId</span><span class="p">]</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Create a manifest that references all chunks</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">manifest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">chunks</span><span class="p">.</span><span class="nx">rows</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">c</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">index</span><span class="o">:</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">chunk_index</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">storageKey</span><span class="o">:</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">storage_key</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">size</span><span class="o">:</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">size</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}));</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">fileChecksum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">computeFileChecksum</span><span class="p">(</span><span class="nx">chunks</span><span class="p">.</span><span class="nx">rows</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">manifest</span><span class="p">,</span><span class="w"> </span><span class="nx">checksum</span><span class="o">:</span><span class="w"> </span><span class="nx">fileChecksum</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Sync Protocol</h3>
+<p>Dropbox uses a delta-sync protocol. The client maintains a cursor (sequence number), and the server returns all changes since that cursor:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">SyncService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">db</span><span class="p">,</span><span class="w"> </span><span class="nx">notificationService</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">db</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">notify</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">notificationService</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">recordChange</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">fileId</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="p">,</span><span class="w"> </span><span class="nx">metadata</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">      </span><span class="sb">`INSERT INTO sync_journal (user_id, file_id, action, metadata)</span>
+<span class="sb">       VALUES ($1, $2, $3, $4) RETURNING id`</span><span class="p">,</span>
+<span class="w">      </span><span class="p">[</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">fileId</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">metadata</span><span class="p">)]</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Notify other devices in real-time</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">notify</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;SYNC_UPDATE&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">sequence</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">[</span><span class="mf">0</span><span class="p">].</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">[</span><span class="mf">0</span><span class="p">].</span><span class="nx">id</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getChangesSince</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">cursor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">      </span><span class="sb">`SELECT id, file_id, action, metadata, created_at</span>
+<span class="sb">       FROM sync_journal</span>
+<span class="sb">       WHERE user_id = $1 AND id &gt; $2</span>
+<span class="sb">       ORDER BY id ASC</span>
+<span class="sb">       LIMIT $3`</span><span class="p">,</span>
+<span class="w">      </span><span class="p">[</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">cursor</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">]</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 7: Scaling Strategies</h2>
+<ol>
+<li><strong>Object Storage</strong>: Use S3 or equivalent for virtually unlimited file storage with 11 nines durability</li>
+<li><strong>Metadata Sharding</strong>: Shard the metadata database by <code>user_id</code> to distribute load</li>
+<li><strong>CDN for Downloads</strong>: Cache frequently accessed files at edge locations</li>
+<li><strong>Presigned URLs</strong>: Offload bandwidth from your API servers to S3 directly</li>
+<li><strong>Async Processing</strong>: Thumbnail generation, virus scanning, and indexing run in background workers via BullMQ</li>
+<li><strong>Compression</strong>: Compress chunks before storage to reduce costs (delta compression for file versions)</li>
+<li><strong>Block-Level Deduplication</strong>: At the chunk level, only store unique blocks across all users</li>
+</ol>
+<div class="highlight"><pre><span></span><code>Scaling the Metadata Layer:
+
+┌───────────────────────────────────────────────┐
+│                API Gateway                     │
+└────────────┬──────────────┬───────────────────┘
+             │              │
+     ┌───────▼──────┐ ┌────▼────────┐
+     │  Shard 1     │ │  Shard 2    │
+     │  Users A-M   │ │  Users N-Z  │
+     │  (Primary)   │ │  (Primary)  │
+     │     │        │ │     │       │
+     │     ▼        │ │     ▼       │
+     │  Replica 1   │ │  Replica 1  │
+     │  Replica 2   │ │  Replica 2  │
+     └──────────────┘ └─────────────┘
+</code></pre></div>
+
+<h2>Step 8: Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Upload approach</td>
+<td>Direct to API server</td>
+<td>Presigned URL to S3</td>
+<td>Presigned URL (offloads bandwidth)</td>
+</tr>
+<tr>
+<td>Chunk size</td>
+<td>Small (1 MB)</td>
+<td>Large (8 MB)</td>
+<td>4 MB (balance between overhead and resume granularity)</td>
+</tr>
+<tr>
+<td>Sync model</td>
+<td>Polling</td>
+<td>WebSocket push</td>
+<td>WebSocket + long-polling fallback</td>
+</tr>
+<tr>
+<td>Dedup scope</td>
+<td>Per-user</td>
+<td>Global (cross-user)</td>
+<td>Per-user initially, global later (privacy concerns)</td>
+</tr>
+<tr>
+<td>Consistency</td>
+<td>Strong everywhere</td>
+<td>Eventual for sync</td>
+<td>Eventual sync + strong metadata writes</td>
+</tr>
+<tr>
+<td>Versioning</td>
+<td>Full file copies</td>
+<td>Delta encoding</td>
+<td>Delta for text, full for binary</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Why Presigned URLs?</strong> Your API servers become a bottleneck if every byte of file data flows through them. With presigned URLs, clients upload and download directly from S3 while your servers only handle metadata operations. This reduces API server bandwidth from terabytes to megabytes.</p>
+<p><strong>Why Eventual Consistency for Sync?</strong> With millions of devices syncing simultaneously, enforcing strong consistency on every sync check would create enormous contention. Eventual consistency with conflict detection provides a better user experience.</p>
+<p><strong>Conflict Resolution</strong>: When two devices edit the same file offline, you cannot merge binary files. The typical strategy is to keep both versions and let the user choose ("conflicted copy"). For text files, operational transform or CRDT-based merging is possible.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Chunked Upload Service</div>
+                    <div class="exercise-desc"><p>Implement a Node.js service that accepts a file, splits it into 1 MB chunks, computes SHA-256 for each chunk, and uploads them to a local directory. Implement deduplication: if a chunk with the same hash exists, skip the write. Build a reassembly endpoint that reconstructs the original file from chunks.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>node:crypto</code> for hashing and <code>node:fs/promises</code> for file I/O. Store chunk metadata in a Map or SQLite. Use <code>createReadStream</code> with <code>highWaterMark</code> to read in chunks.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Delta Sync</div>
+                    <div class="exercise-desc"><p>Build a sync service with a PostgreSQL-backed journal. Clients POST file changes and GET deltas using a cursor. Write a test that simulates two clients syncing through the server, verifying they converge to the same state.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a BIGSERIAL column as the cursor. Return changes WHERE id &gt; cursor ORDER BY id LIMIT 100. The client stores the last received id.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Presigned URL Flow</div>
+                    <div class="exercise-desc"><p>Using the AWS SDK (@aws-sdk/s3-request-presigner), implement the full presigned URL upload flow: (1) client requests an upload URL, (2) client uploads directly to S3, (3) client notifies your server of completion, (4) server verifies the upload exists in S3 and records metadata.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>getSignedUrl</code> with <code>PutObjectCommand</code>. Set URL expiry to 15 minutes. Use <code>HeadObjectCommand</code> to verify the upload on completion.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Large file uploads fail intermittently on slow connections</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Single-request uploads time out or consume too much memory when buffering the entire file.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement chunked uploads. Split files into 4 MB chunks, upload each independently with retry logic. Use presigned URLs so clients upload directly to object storage. Track chunk completion server-side and reassemble only on final confirmation.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Users see stale file listings after editing on another device</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The sync mechanism relies on polling with a long interval, or the notification channel (WebSocket) has silently disconnected.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use WebSocket push notifications with heartbeat pings to detect disconnections. Implement automatic reconnection with exponential backoff. On reconnect, immediately fetch the delta using the last known cursor.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Storage costs are growing faster than user growth</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> No deduplication -- multiple users storing the same files (e.g., common documents, OS files) results in redundant storage.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement content-addressable storage at the chunk level. Use SHA-256 of chunk content as the storage key. Before writing a chunk, check if it already exists. Maintain a reference count and only delete chunks when the count reaches zero.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://dropbox.tech/infrastructure/magic-pocket-infrastructure" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">How Dropbox Stores Your Files</div>
+                    
+                    <div class="resource-note">Dropbox's custom storage infrastructure that replaced S3</div>
+                    
+                </a>
+                
+                <a href="https://dataintensive.net/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Designing Data-Intensive Applications - Chapter 3</div>
+                    
+                    <div class="resource-note">Martin Kleppmann's coverage of storage engines and data structures</div>
+                    
+                </a>
+                
+                <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">AWS S3 Presigned URLs Documentation</div>
+                    
+                    <div class="resource-note">Official guide to generating and using presigned URLs</div>
+                    
+                </a>
+                
+                <a href="https://www.youtube.com/watch?v=U0xTu6E2CT8" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag video">video</div>
+                    <div class="resource-title">System Design Interview - File Storage Deep Dive</div>
+                    
+                    <div class="resource-note">Walkthrough of designing Google Drive in a system design interview</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/9.2.2-js.html" class="btn">Design a Video Streaming Platform (YouTube) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

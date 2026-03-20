@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Food Delivery System (DoorDash) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            E-Commerce & Marketplace
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.3.5</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a Food Delivery System (DoorDash)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a food delivery platform as a three-way coordination problem, like an air traffic control tower. The customer is the departing passenger, the restaurant is the terminal kitchen, and the driver is the airplane. The dispatch engine is the control tower that must decide which plane to assign to which gate, considering where each plane is right now, how fast it is moving, which direction it is heading, and how long the food will take to prepare. The live tracking map is like the flight tracker -- it shows the customer exactly where their food is. The state machine (PLACED, PREPARING, PICKED_UP, DELIVERED) is like the flight status board (BOARDING, DEPARTED, IN FLIGHT, LANDED). Everything must happen within a tight time window because, unlike a package, food cannot sit on a shelf for days.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Food Delivery System (DoorDash)</h1>
+<h2>Introduction</h2>
+<p>A food delivery system like DoorDash connects three distinct user types -- customers, restaurants, and delivery drivers -- in a real-time, location-aware marketplace. The technical challenges include real-time order tracking, driver dispatch optimization, dynamic ETA calculation, geospatial queries, and managing the complex state machine of an order as it moves through multiple stages. Unlike pure e-commerce, food delivery has hard time constraints: food quality degrades rapidly, so efficiency in matching, routing, and delivery is paramount.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li><strong>Customer</strong>: Browse nearby restaurants, view menus, place orders, track delivery in real-time, rate experience</li>
+<li><strong>Restaurant</strong>: Manage menu, receive orders, update preparation status, set availability hours</li>
+<li><strong>Driver</strong>: Go online/offline, receive delivery offers, navigate to pickup/dropoff, confirm pickup/delivery</li>
+<li><strong>Order Management</strong>: Create, pay, assign driver, track through lifecycle</li>
+<li><strong>ETA Estimation</strong>: Estimated time for food preparation, pickup, and delivery</li>
+<li><strong>Search &amp; Discovery</strong>: Search restaurants by cuisine, filters, ratings, delivery time</li>
+<li><strong>Promotions</strong>: Coupons, surge pricing, restaurant promotions</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li><strong>Latency</strong>: Nearby restaurants load &lt; 300ms, driver assignment &lt; 30s</li>
+<li><strong>Availability</strong>: 99.99% uptime during meal rush hours</li>
+<li><strong>Real-time</strong>: Driver location updates every 5 seconds, order status push notifications</li>
+<li><strong>Scale</strong>: 10M+ orders/day, 2M active drivers, 500K restaurants</li>
+</ul>
+<h2>Step 2: Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Assumptions:
+- 50M registered customers, 10M DAU
+- 500K restaurants
+- 2M registered drivers, 500K active during peak
+- 10M orders/day, 70% during lunch (11-2) and dinner (5-9)
+- Peak: 7M orders in 7 hours = ~280 orders/sec
+
+Traffic:
+- Restaurant search: 10M * 3 searches/day = 30M/day = ~350 QPS
+- Peak search: ~1,000 QPS
+- Order creation: ~280 TPS peak
+- Driver location updates: 500K drivers * 1 update/5s = 100K updates/sec
+- Order tracking: 1M active orders * 1 check/10s = 100K QPS
+
+Storage:
+- Restaurant data: 500K * 20KB = ~10GB
+- Menu items: 500K * 50 items * 2KB = ~50GB
+- Orders: 10M/day * 5KB * 365 = ~18TB/year
+- Driver locations: 100K updates/sec * 100 bytes = ~10MB/sec (time-series)
+- Images: 500K restaurants * 60 images = ~15TB (CDN)
+
+Bandwidth:
+- Driver location ingestion: ~10MB/sec
+- Location push to customers (tracking): ~5MB/sec
+</code></pre></div>
+
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌────────────┐  ┌────────────┐  ┌────────────┐
+│  Customer  │  │ Restaurant │  │   Driver   │
+│    App     │  │   App/Tab  │  │    App     │
+└─────┬──────┘  └─────┬──────┘  └─────┬──────┘
+      │               │               │
+      │          ┌────┴────┐          │
+      └──────────┤  API    ├──────────┘
+                 │ Gateway │
+                 └────┬────┘
+                      │
+    ┌─────────┬───────┼────────┬──────────┐
+    │         │       │        │          │
+┌───┴───┐ ┌──┴──┐ ┌──┴──┐ ┌──┴───┐ ┌────┴────┐
+│Search │ │Order│ │Drvr │ │Track │ │Payment  │
+│Service│ │Svc  │ │Svc  │ │Svc   │ │Service  │
+└───┬───┘ └──┬──┘ └──┬──┘ └──┬───┘ └─────────┘
+    │        │       │       │
+┌───┴───┐ ┌──┴──┐ ┌──┴──┐ ┌──┴───┐
+│Elastic│ │Order│ │Redis │ │Redis │
+│Search │ │ DB  │ │(Geo) │ │(PubSub│
+└───────┘ └─────┘ └─────┘ └──────┘
+
+         ┌──────────────┐   ┌──────────────┐
+         │  Dispatch    │   │  ETA         │
+         │  Engine      │   │  Service     │
+         │  (Matching)  │   │  (ML model)  │
+         └──────┬───────┘   └──────────────┘
+                │
+         ┌──────┴───────┐
+         │  Kafka       │
+         │  (Events)    │
+         └──────────────┘
+</code></pre></div>
+
+<h2>Step 4: API Design</h2>
+<h3>Restaurant Search</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// GET /api/restaurants?lat=37.78&amp;lng=-122.41&amp;cuisine=italian</span>
+<span class="c1">//   &amp;maxDeliveryTime=30&amp;minRating=4.0&amp;sort=relevance&amp;page=1</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/restaurants&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">lat</span><span class="p">,</span><span class="w"> </span><span class="nx">lng</span><span class="p">,</span><span class="w"> </span><span class="nx">cuisine</span><span class="p">,</span><span class="w"> </span><span class="nx">query</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">maxDeliveryTime</span><span class="p">,</span><span class="w"> </span><span class="nx">minRating</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">sort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;relevance&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">20</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">lat</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="nx">lng</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Location required&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">maxDistance</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;5km&#39;</span><span class="p">;</span><span class="w"> </span><span class="c1">// 5km delivery radius</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">searchBody</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">from</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">page</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">size</span><span class="o">:</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">query</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">bool</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">must</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">          </span><span class="p">{</span><span class="w"> </span><span class="nx">term</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;OPEN&#39;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="p">...(</span><span class="nx">query</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nx">multi_match</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">query</span><span class="p">,</span><span class="w"> </span><span class="nx">fields</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;name^3&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;cuisine&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;menuItems&#39;</span><span class="p">],</span>
+<span class="w">          </span><span class="p">}</span><span class="w"> </span><span class="p">}]</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">[]),</span>
+<span class="w">        </span><span class="p">],</span>
+<span class="w">        </span><span class="nx">filter</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">          </span><span class="p">{</span><span class="w"> </span><span class="nx">geo_distance</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">distance</span><span class="o">:</span><span class="w"> </span><span class="nx">maxDistance</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">location</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">lat</span><span class="o">:</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">lat</span><span class="p">),</span><span class="w"> </span><span class="nx">lon</span><span class="o">:</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">lng</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="p">...(</span><span class="nx">cuisine</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nx">term</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">cuisine</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}]</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">[]),</span>
+<span class="w">          </span><span class="p">...(</span><span class="nx">minRating</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nx">range</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">rating</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">gte</span><span class="o">:</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">minRating</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}]</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">[]),</span>
+<span class="w">        </span><span class="p">],</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">sort</span><span class="o">:</span><span class="w"> </span><span class="nx">sort</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;distance&#39;</span>
+<span class="w">      </span><span class="o">?</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nx">_geo_distance</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">location</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">lat</span><span class="o">:</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">lat</span><span class="p">),</span><span class="w"> </span><span class="nx">lon</span><span class="o">:</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">lng</span><span class="p">)</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="nx">order</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;asc&#39;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}]</span>
+<span class="w">      </span><span class="o">:</span><span class="w"> </span><span class="nx">sort</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;rating&#39;</span>
+<span class="w">        </span><span class="o">?</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nx">rating</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;desc&#39;</span><span class="w"> </span><span class="p">}]</span>
+<span class="w">        </span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;_score&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">elasticsearch</span><span class="p">.</span><span class="nx">search</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">index</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;restaurants&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nx">searchBody</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Enrich with real-time data (delivery time estimates, open status)</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">restaurants</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">results</span><span class="p">.</span><span class="nx">hits</span><span class="p">.</span><span class="nx">hits</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">hit</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">restaurant</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">hit</span><span class="p">.</span><span class="nx">_id</span><span class="p">,</span><span class="w"> </span><span class="p">...</span><span class="nx">hit</span><span class="p">.</span><span class="nx">_source</span><span class="w"> </span><span class="p">};</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">eta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">etaService</span><span class="p">.</span><span class="nx">getRestaurantETA</span><span class="p">(</span>
+<span class="w">        </span><span class="nx">restaurant</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">lat</span><span class="p">),</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">lng</span><span class="p">)</span>
+<span class="w">      </span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="p">...</span><span class="nx">restaurant</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">estimatedDeliveryTime</span><span class="o">:</span><span class="w"> </span><span class="nx">eta</span><span class="p">.</span><span class="nx">totalMinutes</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">deliveryFee</span><span class="o">:</span><span class="w"> </span><span class="nx">calculateDeliveryFee</span><span class="p">(</span><span class="nx">eta</span><span class="p">.</span><span class="nx">distanceKm</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">distance</span><span class="o">:</span><span class="w"> </span><span class="nx">hit</span><span class="p">.</span><span class="nx">sort</span><span class="o">?</span><span class="p">.[</span><span class="mf">0</span><span class="p">],</span>
+<span class="w">      </span><span class="p">};</span>
+<span class="w">    </span><span class="p">})</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Filter by max delivery time if specified</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">filtered</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">maxDeliveryTime</span>
+<span class="w">    </span><span class="o">?</span><span class="w"> </span><span class="nx">restaurants</span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">estimatedDeliveryTime</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">maxDeliveryTime</span><span class="p">))</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="nx">restaurants</span><span class="p">;</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">filtered</span><span class="p">,</span><span class="w"> </span><span class="nx">meta</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">page</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span><span class="w"> </span><span class="nx">total</span><span class="o">:</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">hits</span><span class="p">.</span><span class="nx">total</span><span class="p">.</span><span class="nx">value</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Order Placement</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/orders</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/orders&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">restaurantId</span><span class="p">,</span><span class="w"> </span><span class="nx">items</span><span class="p">,</span><span class="w"> </span><span class="nx">deliveryAddress</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">paymentMethodId</span><span class="p">,</span><span class="w"> </span><span class="nx">specialInstructions</span><span class="p">,</span><span class="w"> </span><span class="nx">tip</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 1. Validate restaurant is open and items are available</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">restaurant</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">restaurantService</span><span class="p">.</span><span class="nx">getRestaurant</span><span class="p">(</span><span class="nx">restaurantId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">restaurant</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">restaurant</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;OPEN&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Restaurant is closed&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 2. Calculate pricing</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">menuItems</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">menuItem</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="ow">in</span><span class="o">:</span><span class="w"> </span><span class="nx">items</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">i</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">i</span><span class="p">.</span><span class="nx">menuItemId</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">subtotal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">items</span><span class="p">.</span><span class="nx">reduce</span><span class="p">((</span><span class="nx">sum</span><span class="p">,</span><span class="w"> </span><span class="nx">item</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">menuItem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">menuItems</span><span class="p">.</span><span class="nx">find</span><span class="p">(</span><span class="nx">m</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">item</span><span class="p">.</span><span class="nx">menuItemId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">menuItem</span><span class="p">)</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Item </span><span class="si">${</span><span class="nx">item</span><span class="p">.</span><span class="nx">menuItemId</span><span class="si">}</span><span class="sb"> not found`</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">sum</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">menuItem</span><span class="p">.</span><span class="nx">price</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">item</span><span class="p">.</span><span class="nx">quantity</span><span class="p">;</span>
+<span class="w">  </span><span class="p">},</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">deliveryFee</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">calculateDeliveryFee</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">getDistance</span><span class="p">(</span><span class="nx">restaurant</span><span class="p">,</span><span class="w"> </span><span class="nx">deliveryAddress</span><span class="p">)</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">serviceFee</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">subtotal</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">0.15</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">taxRate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.0875</span><span class="p">;</span><span class="w"> </span><span class="c1">// example tax</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">tax</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">subtotal</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">serviceFee</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">taxRate</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">total</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">subtotal</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">deliveryFee</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">serviceFee</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">tax</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="nx">tip</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 3. Create order</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">order</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">restaurantId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;PLACED&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">subtotal</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">deliveryFee</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">serviceFee</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">tax</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">tip</span><span class="o">:</span><span class="w"> </span><span class="nx">tip</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">total</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">deliveryAddress</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">deliveryAddress</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">specialInstructions</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">items</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">create</span><span class="o">:</span><span class="w"> </span><span class="nx">items</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">item</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="kd">const</span><span class="w"> </span><span class="nx">menuItem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">menuItems</span><span class="p">.</span><span class="nx">find</span><span class="p">(</span><span class="nx">m</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">item</span><span class="p">.</span><span class="nx">menuItemId</span><span class="p">);</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">menuItemId</span><span class="o">:</span><span class="w"> </span><span class="nx">item</span><span class="p">.</span><span class="nx">menuItemId</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">quantity</span><span class="o">:</span><span class="w"> </span><span class="nx">item</span><span class="p">.</span><span class="nx">quantity</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">price</span><span class="o">:</span><span class="w"> </span><span class="nx">menuItem</span><span class="p">.</span><span class="nx">price</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">customizations</span><span class="o">:</span><span class="w"> </span><span class="nx">item</span><span class="p">.</span><span class="nx">customizations</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">{},</span>
+<span class="w">          </span><span class="p">};</span>
+<span class="w">        </span><span class="p">}),</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">include</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">items</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// 4. Process payment</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">payment</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">paymentService</span><span class="p">.</span><span class="nx">charge</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="nx">total</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">currency</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;USD&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">paymentMethodId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">metadata</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// 5. Notify restaurant</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">kafka</span><span class="p">.</span><span class="nx">produce</span><span class="p">(</span><span class="s1">&#39;order.events&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;order.placed&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">restaurantId</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// 6. Start dispatch process (find a driver)</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">dispatchQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;find-driver&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">restaurantLocation</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">lat</span><span class="o">:</span><span class="w"> </span><span class="nx">restaurant</span><span class="p">.</span><span class="nx">latitude</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">lng</span><span class="o">:</span><span class="w"> </span><span class="nx">restaurant</span><span class="p">.</span><span class="nx">longitude</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">deliveryLocation</span><span class="o">:</span><span class="w"> </span><span class="nx">deliveryAddress</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// 7. Calculate initial ETA</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">eta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">etaService</span><span class="p">.</span><span class="nx">calculateOrderETA</span><span class="p">(</span><span class="nx">order</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="p">...</span><span class="nx">order</span><span class="p">,</span><span class="w"> </span><span class="nx">estimatedDeliveryTime</span><span class="o">:</span><span class="w"> </span><span class="nx">eta</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Driver Location Updates</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/drivers/location (called every 5 seconds from driver app)</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/drivers/location&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticateDriver</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">latitude</span><span class="p">,</span><span class="w"> </span><span class="nx">longitude</span><span class="p">,</span><span class="w"> </span><span class="nx">heading</span><span class="p">,</span><span class="w"> </span><span class="nx">speed</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">driverId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">driver</span><span class="p">.</span><span class="nx">id</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 1. Update driver location in Redis using geospatial index</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">geoadd</span><span class="p">(</span><span class="s1">&#39;drivers:active&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">longitude</span><span class="p">,</span><span class="w"> </span><span class="nx">latitude</span><span class="p">,</span><span class="w"> </span><span class="nx">driverId</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 2. Store full location data for ETA calculation</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">hset</span><span class="p">(</span><span class="sb">`driver:</span><span class="si">${</span><span class="nx">driverId</span><span class="si">}</span><span class="sb">:location`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">lat</span><span class="o">:</span><span class="w"> </span><span class="nx">latitude</span><span class="p">.</span><span class="nx">toString</span><span class="p">(),</span>
+<span class="w">    </span><span class="nx">lng</span><span class="o">:</span><span class="w"> </span><span class="nx">longitude</span><span class="p">.</span><span class="nx">toString</span><span class="p">(),</span>
+<span class="w">    </span><span class="nx">heading</span><span class="o">:</span><span class="w"> </span><span class="nx">heading</span><span class="p">.</span><span class="nx">toString</span><span class="p">(),</span>
+<span class="w">    </span><span class="nx">speed</span><span class="o">:</span><span class="w"> </span><span class="nx">speed</span><span class="p">.</span><span class="nx">toString</span><span class="p">(),</span>
+<span class="w">    </span><span class="nx">updatedAt</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">().</span><span class="nx">toString</span><span class="p">(),</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// 3. If driver has an active order, broadcast to customer</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">activeOrderId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`driver:</span><span class="si">${</span><span class="nx">driverId</span><span class="si">}</span><span class="sb">:activeOrder`</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">activeOrderId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="sb">`order:</span><span class="si">${</span><span class="nx">activeOrderId</span><span class="si">}</span><span class="sb">:tracking`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">driverId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">latitude</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">longitude</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">heading</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">speed</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span>
+<span class="w">    </span><span class="p">}));</span>
+
+<span class="w">    </span><span class="c1">// Update ETA</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">eta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">etaService</span><span class="p">.</span><span class="nx">updateDriverETA</span><span class="p">(</span><span class="nx">activeOrderId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">lat</span><span class="o">:</span><span class="w"> </span><span class="nx">latitude</span><span class="p">,</span><span class="w"> </span><span class="nx">lng</span><span class="o">:</span><span class="w"> </span><span class="nx">longitude</span><span class="p">,</span><span class="w"> </span><span class="nx">speed</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="sb">`order:</span><span class="si">${</span><span class="nx">activeOrderId</span><span class="si">}</span><span class="sb">:eta`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">eta</span><span class="w"> </span><span class="p">}));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">204</span><span class="p">).</span><span class="nx">send</span><span class="p">();</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Real-Time Order Tracking (WebSocket)</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">WebSocketServer</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ws&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">wss</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebSocketServer</span><span class="p">({</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">8080</span><span class="w"> </span><span class="p">});</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">subscriber</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+
+<span class="nx">wss</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;connection&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">ws</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">orderId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URL</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;http://localhost&#39;</span><span class="p">).</span><span class="nx">searchParams</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;orderId&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">orderId</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">ws</span><span class="p">.</span><span class="nx">close</span><span class="p">();</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">trackingChannel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`order:</span><span class="si">${</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">:tracking`</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">statusChannel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`order:</span><span class="si">${</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">:status`</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">etaChannel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`order:</span><span class="si">${</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">:eta`</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">handler</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">channel</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="nx">trackingChannel</span><span class="p">,</span><span class="w"> </span><span class="nx">statusChannel</span><span class="p">,</span><span class="w"> </span><span class="nx">etaChannel</span><span class="p">].</span><span class="nx">includes</span><span class="p">(</span><span class="nx">channel</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">ws</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">&#39;:&#39;</span><span class="p">).</span><span class="nx">pop</span><span class="p">(),</span><span class="w"> </span><span class="c1">// &#39;tracking&#39;, &#39;status&#39;, or &#39;eta&#39;</span>
+<span class="w">        </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">message</span><span class="p">),</span>
+<span class="w">      </span><span class="p">}));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="nx">subscriber</span><span class="p">.</span><span class="nx">subscribe</span><span class="p">(</span><span class="nx">trackingChannel</span><span class="p">,</span><span class="w"> </span><span class="nx">statusChannel</span><span class="p">,</span><span class="w"> </span><span class="nx">etaChannel</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">subscriber</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;message&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">handler</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">ws</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">subscriber</span><span class="p">.</span><span class="nx">unsubscribe</span><span class="p">(</span><span class="nx">trackingChannel</span><span class="p">,</span><span class="w"> </span><span class="nx">statusChannel</span><span class="p">,</span><span class="w"> </span><span class="nx">etaChannel</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">subscriber</span><span class="p">.</span><span class="nx">removeListener</span><span class="p">(</span><span class="s1">&#39;message&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">handler</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 5: Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Restaurants</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">restaurants</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">owner_id</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">name</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">300</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cuisine</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">),</span>
+<span class="w">    </span><span class="n">description</span><span class="w">   </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">phone</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">),</span>
+<span class="w">    </span><span class="n">latitude</span><span class="w">      </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">7</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">longitude</span><span class="w">     </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">7</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">address</span><span class="w">       </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">rating</span><span class="w">        </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">review_count</span><span class="w">  </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">avg_prep_time</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span><span class="w">  </span><span class="c1">-- minutes</span>
+<span class="w">    </span><span class="n">status</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;CLOSED&#39;</span><span class="p">,</span><span class="w"> </span><span class="c1">-- OPEN, CLOSED, PAUSED</span>
+<span class="w">    </span><span class="n">opening_hours</span><span class="w"> </span><span class="n">JSONB</span><span class="p">,</span><span class="w">  </span><span class="c1">-- { &quot;mon&quot;: {&quot;open&quot;: &quot;09:00&quot;, &quot;close&quot;: &quot;22:00&quot;}, ... }</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Menu Items</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">menu_items</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">restaurant_id</span><span class="w">   </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">restaurants</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">category</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">),</span><span class="w">     </span><span class="c1">-- Appetizers, Mains, Drinks, etc.</span>
+<span class="w">    </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">300</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">description</span><span class="w">     </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">price</span><span class="w">           </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">image_url</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">500</span><span class="p">),</span>
+<span class="w">    </span><span class="n">is_available</span><span class="w">    </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">true</span><span class="p">,</span>
+<span class="w">    </span><span class="n">customizations</span><span class="w">  </span><span class="n">JSONB</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;[]&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">-- [{&quot;name&quot;: &quot;Size&quot;, &quot;options&quot;: [{&quot;name&quot;: &quot;Large&quot;, &quot;price&quot;: 2.00}]}]</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_menu_restaurant</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">menu_items</span><span class="p">(</span><span class="n">restaurant_id</span><span class="p">,</span><span class="w"> </span><span class="n">is_available</span><span class="p">);</span>
+
+<span class="c1">-- Drivers</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">drivers</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">user_id</span><span class="w">         </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">vehicle_type</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">),</span><span class="w">  </span><span class="c1">-- CAR, BIKE, SCOOTER</span>
+<span class="w">    </span><span class="n">license_plate</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">),</span>
+<span class="w">    </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;OFFLINE&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">-- OFFLINE, AVAILABLE, EN_ROUTE_PICKUP, AT_RESTAURANT, EN_ROUTE_DELIVERY</span>
+<span class="w">    </span><span class="n">current_order_id</span><span class="w"> </span><span class="n">UUID</span><span class="p">,</span>
+<span class="w">    </span><span class="n">rating</span><span class="w">          </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">5</span><span class="p">.</span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">total_deliveries</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Orders</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">                    </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">user_id</span><span class="w">               </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">restaurant_id</span><span class="w">         </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">restaurants</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">driver_id</span><span class="w">             </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">drivers</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">status</span><span class="w">                </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">30</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;PLACED&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">-- PLACED, ACCEPTED, PREPARING, READY_FOR_PICKUP,</span>
+<span class="w">    </span><span class="c1">-- DRIVER_ASSIGNED, DRIVER_EN_ROUTE_PICKUP, PICKED_UP,</span>
+<span class="w">    </span><span class="c1">-- EN_ROUTE_DELIVERY, DELIVERED, CANCELLED</span>
+<span class="w">    </span><span class="n">subtotal</span><span class="w">              </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">delivery_fee</span><span class="w">          </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">service_fee</span><span class="w">           </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tax</span><span class="w">                   </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tip</span><span class="w">                   </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">total</span><span class="w">                 </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">delivery_address</span><span class="w">      </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">special_instructions</span><span class="w">  </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">estimated_delivery_at</span><span class="w"> </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">    </span><span class="n">placed_at</span><span class="w">             </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">accepted_at</span><span class="w">           </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">    </span><span class="n">picked_up_at</span><span class="w">          </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">    </span><span class="n">delivered_at</span><span class="w">          </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cancelled_at</span><span class="w">          </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cancellation_reason</span><span class="w">   </span><span class="nb">TEXT</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_orders_user</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">orders</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">placed_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_orders_restaurant</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">orders</span><span class="p">(</span><span class="n">restaurant_id</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_orders_driver</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">orders</span><span class="p">(</span><span class="n">driver_id</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_orders_active</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">orders</span><span class="p">(</span><span class="n">status</span><span class="p">)</span>
+<span class="w">    </span><span class="k">WHERE</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">IN</span><span class="w"> </span><span class="p">(</span><span class="s1">&#39;DELIVERED&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;CANCELLED&#39;</span><span class="p">);</span>
+
+<span class="c1">-- Order Items</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">order_items</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">order_id</span><span class="w">        </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">orders</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">menu_item_id</span><span class="w">    </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">menu_items</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">quantity</span><span class="w">        </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">price</span><span class="w">           </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">customizations</span><span class="w">  </span><span class="n">JSONB</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Step 6: Deep Dive - Driver Dispatch</h2>
+<p>The dispatch engine is the heart of the system. It must efficiently match orders with nearby available drivers.</p>
+<div class="highlight"><pre><span></span><code>Dispatch Algorithm:
+
+1. Get order&#39;s restaurant location
+2. Find available drivers within radius (start 2km, expand to 5km)
+3. Score each driver:
+   - Distance to restaurant (closer = better)
+   - Driver rating
+   - Vehicle type match
+   - Current heading (already going that direction?)
+4. Offer to best-scoring driver
+5. Driver has 30 seconds to accept
+6. If declined/timeout, offer to next driver
+7. After 3 rejections, expand radius and try again
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">DispatchEngine</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">findDriver</span><span class="p">(</span><span class="nx">orderId</span><span class="p">,</span><span class="w"> </span><span class="nx">restaurantLocation</span><span class="p">,</span><span class="w"> </span><span class="nx">deliveryLocation</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">maxAttempts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">radius</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">2</span><span class="p">;</span><span class="w"> </span><span class="c1">// km</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">attempt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">attempt</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">maxAttempts</span><span class="p">;</span><span class="w"> </span><span class="nx">attempt</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Find nearby available drivers using Redis geospatial</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">nearbyDrivers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">georadius</span><span class="p">(</span>
+<span class="w">        </span><span class="s1">&#39;drivers:active&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">restaurantLocation</span><span class="p">.</span><span class="nx">lng</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">restaurantLocation</span><span class="p">.</span><span class="nx">lat</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">radius</span><span class="p">,</span>
+<span class="w">        </span><span class="s1">&#39;km&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="s1">&#39;WITHDIST&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="s1">&#39;ASC&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="s1">&#39;COUNT&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">20</span>
+<span class="w">      </span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// Filter to only available drivers</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">availableDrivers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">driverId</span><span class="p">,</span><span class="w"> </span><span class="nx">distance</span><span class="p">]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">nearbyDrivers</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">driverStatus</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">hget</span><span class="p">(</span><span class="sb">`driver:</span><span class="si">${</span><span class="nx">driverId</span><span class="si">}</span><span class="sb">:status`</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;status&#39;</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">driverStatus</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;AVAILABLE&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="kd">const</span><span class="w"> </span><span class="nx">driverData</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">hgetall</span><span class="p">(</span><span class="sb">`driver:</span><span class="si">${</span><span class="nx">driverId</span><span class="si">}</span><span class="sb">:location`</span><span class="p">);</span>
+<span class="w">          </span><span class="nx">availableDrivers</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span>
+<span class="w">            </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">driverId</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">distance</span><span class="o">:</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">distance</span><span class="p">),</span>
+<span class="w">            </span><span class="p">...</span><span class="nx">driverData</span><span class="p">,</span>
+<span class="w">          </span><span class="p">});</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">availableDrivers</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">radius</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nx">radius</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1.5</span><span class="p">,</span><span class="w"> </span><span class="mf">10</span><span class="p">);</span><span class="w"> </span><span class="c1">// expand radius</span>
+<span class="w">        </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="c1">// Score and sort drivers</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">scored</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">availableDrivers</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">driver</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">        </span><span class="p">...</span><span class="nx">driver</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">score</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">scoreDriver</span><span class="p">(</span><span class="nx">driver</span><span class="p">,</span><span class="w"> </span><span class="nx">restaurantLocation</span><span class="p">,</span><span class="w"> </span><span class="nx">deliveryLocation</span><span class="p">),</span>
+<span class="w">      </span><span class="p">})).</span><span class="nx">sort</span><span class="p">((</span><span class="nx">a</span><span class="p">,</span><span class="w"> </span><span class="nx">b</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">score</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">score</span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// Offer to drivers in order</span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">driver</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">scored</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="mf">3</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">accepted</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">offerToDriver</span><span class="p">(</span><span class="nx">driver</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">orderId</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">accepted</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="nx">driver</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="nx">radius</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nx">radius</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1.5</span><span class="p">,</span><span class="w"> </span><span class="mf">10</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span><span class="w"> </span><span class="c1">// No driver found</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">scoreDriver</span><span class="p">(</span><span class="nx">driver</span><span class="p">,</span><span class="w"> </span><span class="nx">restaurantLoc</span><span class="p">,</span><span class="w"> </span><span class="nx">deliveryLoc</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">score</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">100</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Distance penalty: -10 per km</span>
+<span class="w">    </span><span class="nx">score</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="nx">driver</span><span class="p">.</span><span class="nx">distance</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">10</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Heading bonus: driver moving toward restaurant gets +15</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">isHeadingToward</span><span class="p">(</span><span class="nx">driver</span><span class="p">,</span><span class="w"> </span><span class="nx">restaurantLoc</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">score</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mf">15</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">max</span><span class="p">(</span><span class="nx">score</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">offerToDriver</span><span class="p">(</span><span class="nx">driverId</span><span class="p">,</span><span class="w"> </span><span class="nx">orderId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Send push notification to driver</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="sb">`driver:</span><span class="si">${</span><span class="nx">driverId</span><span class="si">}</span><span class="sb">:offers`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">orderId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;delivery_offer&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">expiresIn</span><span class="o">:</span><span class="w"> </span><span class="mf">30</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}));</span>
+
+<span class="w">    </span><span class="c1">// Wait for response (30 second timeout)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">resolve</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">setTimeout</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">resolve</span><span class="p">(</span><span class="kc">false</span><span class="p">),</span><span class="w"> </span><span class="mf">30000</span><span class="p">);</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`driver:</span><span class="si">${</span><span class="nx">driverId</span><span class="si">}</span><span class="sb">:response:</span><span class="si">${</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">sub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+<span class="w">      </span><span class="nx">sub</span><span class="p">.</span><span class="nx">subscribe</span><span class="p">(</span><span class="nx">channel</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">sub</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;message&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">ch</span><span class="p">,</span><span class="w"> </span><span class="nx">msg</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">clearTimeout</span><span class="p">(</span><span class="nx">timeout</span><span class="p">);</span>
+<span class="w">        </span><span class="nx">sub</span><span class="p">.</span><span class="nx">unsubscribe</span><span class="p">(</span><span class="nx">channel</span><span class="p">);</span>
+<span class="w">        </span><span class="nx">sub</span><span class="p">.</span><span class="nx">disconnect</span><span class="p">();</span>
+<span class="w">        </span><span class="nx">resolve</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">msg</span><span class="p">).</span><span class="nx">accepted</span><span class="p">);</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">isHeadingToward</span><span class="p">(</span><span class="nx">driver</span><span class="p">,</span><span class="w"> </span><span class="nx">target</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">bearing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">calculateBearing</span><span class="p">(</span>
+<span class="w">      </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">driver</span><span class="p">.</span><span class="nx">lat</span><span class="p">),</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">driver</span><span class="p">.</span><span class="nx">lng</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">target</span><span class="p">.</span><span class="nx">lat</span><span class="p">,</span><span class="w"> </span><span class="nx">target</span><span class="p">.</span><span class="nx">lng</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">headingDiff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">abs</span><span class="p">(</span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">driver</span><span class="p">.</span><span class="nx">heading</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">bearing</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">headingDiff</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">45</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">headingDiff</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">315</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">calculateBearing</span><span class="p">(</span><span class="nx">lat1</span><span class="p">,</span><span class="w"> </span><span class="nx">lng1</span><span class="p">,</span><span class="w"> </span><span class="nx">lat2</span><span class="p">,</span><span class="w"> </span><span class="nx">lng2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">dLng</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">lng2</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">lng1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">sin</span><span class="p">(</span><span class="nx">dLng</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">cos</span><span class="p">(</span><span class="nx">lat2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">cos</span><span class="p">(</span><span class="nx">lat1</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">sin</span><span class="p">(</span><span class="nx">lat2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">)</span><span class="w"> </span><span class="o">-</span>
+<span class="w">              </span><span class="nb">Math</span><span class="p">.</span><span class="nx">sin</span><span class="p">(</span><span class="nx">lat1</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">cos</span><span class="p">(</span><span class="nx">lat2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">cos</span><span class="p">(</span><span class="nx">dLng</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="nb">Math</span><span class="p">.</span><span class="nx">atan2</span><span class="p">(</span><span class="nx">y</span><span class="p">,</span><span class="w"> </span><span class="nx">x</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">180</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">360</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mf">360</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 7: Order State Machine</h2>
+<div class="highlight"><pre><span></span><code>┌────────┐     ┌──────────┐     ┌───────────┐     ┌─────────────────┐
+│ PLACED │────&gt;│ ACCEPTED │────&gt;│ PREPARING │────&gt;│ READY_FOR_PICKUP│
+└───┬────┘     └──────────┘     └───────────┘     └────────┬────────┘
+    │                                                      │
+    │ cancel                                               │
+    ▼                                                      ▼
+┌──────────┐                                    ┌──────────────────┐
+│CANCELLED │                                    │DRIVER_EN_ROUTE   │
+└──────────┘                                    │  _PICKUP         │
+                                                └────────┬─────────┘
+                                                         │
+                                                         ▼
+                                                ┌────────────────┐
+                                                │   PICKED_UP    │
+                                                └────────┬───────┘
+                                                         │
+                                                         ▼
+                                                ┌────────────────────┐
+                                                │EN_ROUTE_DELIVERY   │
+                                                └────────┬───────────┘
+                                                         │
+                                                         ▼
+                                                ┌────────────────┐
+                                                │   DELIVERED    │
+                                                └────────────────┘
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// Order state machine</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">ORDER_TRANSITIONS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">PLACED</span><span class="o">:</span><span class="w">              </span><span class="p">[</span><span class="s1">&#39;ACCEPTED&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;CANCELLED&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">ACCEPTED</span><span class="o">:</span><span class="w">            </span><span class="p">[</span><span class="s1">&#39;PREPARING&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;CANCELLED&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">PREPARING</span><span class="o">:</span><span class="w">           </span><span class="p">[</span><span class="s1">&#39;READY_FOR_PICKUP&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;CANCELLED&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">READY_FOR_PICKUP</span><span class="o">:</span><span class="w">    </span><span class="p">[</span><span class="s1">&#39;DRIVER_EN_ROUTE_PICKUP&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">DRIVER_EN_ROUTE_PICKUP</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;PICKED_UP&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">PICKED_UP</span><span class="o">:</span><span class="w">           </span><span class="p">[</span><span class="s1">&#39;EN_ROUTE_DELIVERY&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">EN_ROUTE_DELIVERY</span><span class="o">:</span><span class="w">   </span><span class="p">[</span><span class="s1">&#39;DELIVERED&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">DELIVERED</span><span class="o">:</span><span class="w">           </span><span class="p">[],</span>
+<span class="w">  </span><span class="nx">CANCELLED</span><span class="o">:</span><span class="w">           </span><span class="p">[],</span>
+<span class="p">};</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">updateOrderStatus</span><span class="p">(</span><span class="nx">orderId</span><span class="p">,</span><span class="w"> </span><span class="nx">newStatus</span><span class="p">,</span><span class="w"> </span><span class="nx">metadata</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">order</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span><span class="w"> </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">orderId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">order</span><span class="p">)</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Order not found&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">allowedTransitions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ORDER_TRANSITIONS</span><span class="p">[</span><span class="nx">order</span><span class="p">.</span><span class="nx">status</span><span class="p">];</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">allowedTransitions</span><span class="o">?</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="nx">newStatus</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Cannot transition from </span><span class="si">${</span><span class="nx">order</span><span class="p">.</span><span class="nx">status</span><span class="si">}</span><span class="sb"> to </span><span class="si">${</span><span class="nx">newStatus</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">timestampField</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">ACCEPTED</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;acceptedAt&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">PICKED_UP</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;pickedUpAt&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">DELIVERED</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;deliveredAt&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">CANCELLED</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;cancelledAt&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}[</span><span class="nx">newStatus</span><span class="p">];</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">updateData</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="nx">newStatus</span><span class="p">,</span>
+<span class="w">    </span><span class="p">...(</span><span class="nx">timestampField</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">[</span><span class="nx">timestampField</span><span class="p">]</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">()</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="p">...(</span><span class="nx">metadata</span><span class="p">.</span><span class="nx">driverId</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">driverId</span><span class="o">:</span><span class="w"> </span><span class="nx">metadata</span><span class="p">.</span><span class="nx">driverId</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="p">...(</span><span class="nx">metadata</span><span class="p">.</span><span class="nx">cancellationReason</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">cancellationReason</span><span class="o">:</span><span class="w"> </span><span class="nx">metadata</span><span class="p">.</span><span class="nx">cancellationReason</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">updated</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">order</span><span class="p">.</span><span class="nx">update</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">orderId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">updateData</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Broadcast status change</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="sb">`order:</span><span class="si">${</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">:status`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="nx">newStatus</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">(),</span>
+<span class="w">    </span><span class="p">...</span><span class="nx">metadata</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}));</span>
+
+<span class="w">  </span><span class="c1">// Emit event for downstream processing</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">kafka</span><span class="p">.</span><span class="nx">produce</span><span class="p">(</span><span class="s1">&#39;order.events&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="sb">`order.</span><span class="si">${</span><span class="nx">newStatus</span><span class="p">.</span><span class="nx">toLowerCase</span><span class="p">()</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">orderId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">updated</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">updated</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 8: Scaling Strategies</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────┐
+│              Scaling Strategy                          │
+├──────────────────────────────────────────────────────┤
+│ Location Data:  Redis Cluster with GEOADD/GEORADIUS  │
+│                 Sharded by geographic region          │
+│                                                      │
+│ Order DB:       Postgres with read replicas           │
+│                 Partitioned by date (monthly)         │
+│                 Sharded by city for active orders     │
+│                                                      │
+│ Tracking:       Redis Pub/Sub for real-time pushes   │
+│                 WebSocket servers per region           │
+│                                                      │
+│ Search:         Elasticsearch per city/region         │
+│                 CDN for restaurant images              │
+│                                                      │
+│ Dispatch:       Regional dispatch engines             │
+│                 Independent per city                  │
+│                                                      │
+│ Events:         Kafka partitioned by city             │
+│                 Separate topics per event type        │
+└──────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>Step 9: ETA Estimation</h2>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">ETAService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">calculateOrderETA</span><span class="p">(</span><span class="nx">orderId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">order</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">orderId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">include</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">restaurant</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">deliveryAddress</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">order</span><span class="p">.</span><span class="nx">deliveryAddress</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 1. Restaurant prep time (from historical data + current queue)</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">prepTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">estimatePrepTime</span><span class="p">(</span><span class="nx">order</span><span class="p">.</span><span class="nx">restaurantId</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 2. Driver to restaurant time</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">driverToRestaurant</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">driverId</span>
+<span class="w">      </span><span class="o">?</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">estimateTravelTime</span><span class="p">(</span>
+<span class="w">          </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getDriverLocation</span><span class="p">(</span><span class="nx">order</span><span class="p">.</span><span class="nx">driverId</span><span class="p">),</span>
+<span class="w">          </span><span class="p">{</span><span class="w"> </span><span class="nx">lat</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">restaurant</span><span class="p">.</span><span class="nx">latitude</span><span class="p">,</span><span class="w"> </span><span class="nx">lng</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">restaurant</span><span class="p">.</span><span class="nx">longitude</span><span class="w"> </span><span class="p">}</span>
+<span class="w">        </span><span class="p">)</span>
+<span class="w">      </span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">;</span><span class="w"> </span><span class="c1">// assume 5 min if no driver assigned yet</span>
+
+<span class="w">    </span><span class="c1">// 3. Restaurant to delivery address time</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">restaurantToCustomer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">estimateTravelTime</span><span class="p">(</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nx">lat</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">restaurant</span><span class="p">.</span><span class="nx">latitude</span><span class="p">,</span><span class="w"> </span><span class="nx">lng</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">restaurant</span><span class="p">.</span><span class="nx">longitude</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">deliveryAddress</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Pickup happens when both prep and driver arrival are complete</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">pickupReady</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">max</span><span class="p">(</span><span class="nx">prepTime</span><span class="p">,</span><span class="w"> </span><span class="nx">driverToRestaurant</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">totalETA</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">pickupReady</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">restaurantToCustomer</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">3</span><span class="p">;</span><span class="w"> </span><span class="c1">// +3 min buffer</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">prepTime</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">driverToRestaurant</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">restaurantToCustomer</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">totalMinutes</span><span class="o">:</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">round</span><span class="p">(</span><span class="nx">totalETA</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">estimatedDeliveryAt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">totalETA</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60000</span><span class="p">),</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">estimatePrepTime</span><span class="p">(</span><span class="nx">restaurantId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Use historical average + current queue depth</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">avgPrepTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`restaurant:</span><span class="si">${</span><span class="nx">restaurantId</span><span class="si">}</span><span class="sb">:avgPrepTime`</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">activeOrders</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">order</span><span class="p">.</span><span class="nx">count</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">restaurantId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="ow">in</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;ACCEPTED&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;PREPARING&#39;</span><span class="p">]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">basePrepTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">avgPrepTime</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">20</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">basePrepTime</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="nx">activeOrders</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">3</span><span class="p">);</span><span class="w"> </span><span class="c1">// +3 min per active order</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">estimateTravelTime</span><span class="p">(</span><span class="kr">from</span><span class="p">,</span><span class="w"> </span><span class="nx">to</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Use Haversine distance + traffic factor</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">distanceKm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">haversineDistance</span><span class="p">(</span>
+<span class="w">      </span><span class="kr">from</span><span class="p">.</span><span class="nx">lat</span><span class="p">,</span><span class="w"> </span><span class="kr">from</span><span class="p">.</span><span class="nx">lng</span><span class="p">,</span><span class="w"> </span><span class="nx">to</span><span class="p">.</span><span class="nx">lat</span><span class="p">,</span><span class="w"> </span><span class="nx">to</span><span class="p">.</span><span class="nx">lng</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">avgSpeedKmPerHour</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">25</span><span class="p">;</span><span class="w"> </span><span class="c1">// urban average</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="nx">distanceKm</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">avgSpeedKmPerHour</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="p">;</span><span class="w"> </span><span class="c1">// convert to minutes</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">haversineDistance</span><span class="p">(</span><span class="nx">lat1</span><span class="p">,</span><span class="w"> </span><span class="nx">lng1</span><span class="p">,</span><span class="w"> </span><span class="nx">lat2</span><span class="p">,</span><span class="w"> </span><span class="nx">lng2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">R</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">6371</span><span class="p">;</span><span class="w"> </span><span class="c1">// Earth&#39;s radius in km</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">dLat</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">lat2</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">lat1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">dLng</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">lng2</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">lng1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">sin</span><span class="p">(</span><span class="nx">dLat</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">2</span><span class="p">)</span><span class="w"> </span><span class="o">**</span><span class="w"> </span><span class="mf">2</span><span class="w"> </span><span class="o">+</span>
+<span class="w">              </span><span class="nb">Math</span><span class="p">.</span><span class="nx">cos</span><span class="p">(</span><span class="nx">lat1</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">cos</span><span class="p">(</span><span class="nx">lat2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">)</span><span class="w"> </span><span class="o">*</span>
+<span class="w">              </span><span class="nb">Math</span><span class="p">.</span><span class="nx">sin</span><span class="p">(</span><span class="nx">dLng</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">2</span><span class="p">)</span><span class="w"> </span><span class="o">**</span><span class="w"> </span><span class="mf">2</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">R</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">atan2</span><span class="p">(</span><span class="nb">Math</span><span class="p">.</span><span class="nx">sqrt</span><span class="p">(</span><span class="nx">a</span><span class="p">),</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">sqrt</span><span class="p">(</span><span class="mf">1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">a</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 10: Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Driver location store</td>
+<td>PostgreSQL + PostGIS</td>
+<td>Redis GEOADD</td>
+<td>Redis (100K writes/sec, ephemeral)</td>
+</tr>
+<tr>
+<td>Order tracking</td>
+<td>Polling (GET every 5s)</td>
+<td>WebSocket push</td>
+<td>WebSocket (real-time, less traffic)</td>
+</tr>
+<tr>
+<td>Dispatch model</td>
+<td>Assign nearest driver</td>
+<td>Score-based matching</td>
+<td>Score-based (better ETAs, fairness)</td>
+</tr>
+<tr>
+<td>ETA calculation</td>
+<td>Simple distance/speed</td>
+<td>ML model with traffic</td>
+<td>Start simple, add ML over time</td>
+</tr>
+<tr>
+<td>Regional architecture</td>
+<td>Global monolith</td>
+<td>Regional isolation</td>
+<td>Regional (lower latency, failure isolation)</td>
+</tr>
+<tr>
+<td>Menu storage</td>
+<td>Relational (Postgres)</td>
+<td>Document (MongoDB)</td>
+<td>Postgres with JSONB for customizations</td>
+</tr>
+</tbody>
+</table>
+<h2>Summary</h2>
+<p>A food delivery system is a real-time, three-sided marketplace requiring geospatial services, real-time tracking, intelligent dispatch, and complex order state management. The core components are: Redis geospatial indexes for driver location (handles 100K updates/sec), a dispatch engine that scores drivers based on distance and heading, WebSocket connections for live order tracking, and a state machine ensuring valid order transitions. Regional architecture is essential -- each city operates somewhat independently, reducing cross-region latency. The ETA service combines restaurant prep time, driver travel time, and traffic conditions to provide accurate delivery estimates.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Geospatial Driver Finder</div>
+                    <div class="exercise-desc"><p>Use Redis GEOADD and GEORADIUS to build a driver location service. Seed 1000 random driver locations within a city. Implement: add/update driver location, find nearest N drivers within a radius, and filter by availability status. Benchmark query performance with different numbers of drivers.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>redis.geoadd('drivers', longitude, latitude, driverId)</code> to add locations. Use <code>redis.georadius('drivers', lng, lat, radius, 'km', 'WITHDIST', 'ASC', 'COUNT', 10)</code> to find nearby drivers. Store availability in a separate hash.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Order State Machine</div>
+                    <div class="exercise-desc"><p>Implement a robust order state machine with Express endpoints for each transition. Enforce valid transitions (e.g., cannot go from PLACED to DELIVERED). Log all transitions. Write tests that verify: valid transitions succeed, invalid transitions return 400, and concurrent transition attempts are handled correctly.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Define a transition map as a constant object. Use database optimistic locking (check current status in WHERE clause of UPDATE) to prevent race conditions. Emit events on each transition.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Real-Time Order Tracking</div>
+                    <div class="exercise-desc"><p>Build a WebSocket server that pushes driver location updates and order status changes to connected customers. Use Redis Pub/Sub to distribute updates across multiple WebSocket server instances. Test with a simulated driver that moves along a path, updating location every 5 seconds.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the <code>ws</code> library for WebSocket. Subscribe to Redis channels per order ID. Simulate driver movement by incrementing lat/lng values along a pre-defined route array.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">ETA Estimation Service</div>
+                    <div class="exercise-desc"><p>Build an ETA service that estimates delivery time based on: restaurant prep time (from historical data), driver distance to restaurant (Haversine formula), and restaurant to customer distance. Test accuracy by comparing estimated vs actual delivery times with simulated data.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the Haversine formula for distance calculation. Assume 25 km/h average urban speed. Add a buffer for restaurant queue depth. Compare with actual timestamps to calculate mean absolute error.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Drivers receiving delivery offers for restaurants that are far away, leading to high decline rates</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Average driver acceptance rate below 50%. Orders waiting more than 10 minutes for driver assignment. Driver complaints about unprofitable long-distance pickups.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The dispatch engine uses a fixed radius that is too large, or the scoring algorithm does not sufficiently weight distance. High decline rates mean orders wait longer for a driver, degrading customer experience.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Start with a small radius (2km) and gradually expand. Weight distance heavily in the scoring formula. Consider the driver's current heading -- a driver 3km away but heading toward the restaurant is better than one 1km away heading the opposite direction. Track acceptance rates per radius and tune dynamically.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Real-time tracking showing stale or jumping driver positions</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Location updates from the driver app are inconsistent due to GPS drift, cellular connectivity gaps, or the app being backgrounded by the OS. The client interpolates incorrectly between infrequent updates.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement client-side location smoothing (interpolate between known points). Detect anomalous jumps (> 500m in 5 seconds) and discard them. Use Kalman filtering on the server side to smooth GPS data. Show a wider accuracy circle when confidence is low. Fall back to road-snapping using a routing API.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">ETA estimates are consistently inaccurate during peak hours</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The ETA model uses static average speeds that do not account for traffic, weather, or restaurant being overwhelmed during dinner rush. Restaurant prep times increase as order volume rises but the model does not adapt.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use dynamic prep time that increases with the restaurant's active order count. Incorporate real-time traffic data from a mapping API. Track historical ETA accuracy and apply correction factors by time of day and day of week. Add a restaurant-specific queue depth multiplier. Always show a range (e.g., '25-35 min') rather than a precise number.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://doordash.engineering/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag blog">blog</div>
+                    <div class="resource-title">DoorDash Engineering Blog</div>
+                    
+                    <div class="resource-note">Technical deep dives on dispatch optimization, real-time tracking, and scaling a food delivery platform</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/commands/?group=geo" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Geospatial Commands</div>
+                    
+                    <div class="resource-note">Official documentation for GEOADD, GEORADIUS, and other geospatial commands used for driver location</div>
+                    
+                </a>
+                
+                <a href="https://dataintensive.net/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Designing Data-Intensive Applications (Chapter 2: Data Models)</div>
+                    
+                    <div class="resource-note">Covers geospatial indexing, time-series data, and the data modeling challenges present in delivery systems</div>
+                    
+                </a>
+                
+                <a href="https://www.uber.com/blog/h3/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Uber's Dispatch System (H3 Geospatial Index)</div>
+                    
+                    <div class="resource-note">Uber's hexagonal hierarchical spatial index -- a more advanced approach to geospatial partitioning used in ride-sharing and delivery</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.3.4-js.html" class="btn">&larr; Design a Ticket Booking System (Ticketmaster)</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

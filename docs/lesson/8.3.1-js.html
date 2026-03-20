@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BullMQ: Jobs, Workers, Queues, and Scheduling - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-js.html">System Design & Scalability</a> &rsaquo;
+            Message Queues & Async Processing
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.3.1</span>
+                <span>~3h</span>
+            </div>
+            <h1>BullMQ: Jobs, Workers, Queues, and Scheduling</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>BullMQ is like a restaurant's order ticket system. Waiters (API endpoints) write order tickets (jobs) and hang them on the rail (Redis queue). Cooks (workers) pull tickets and prepare dishes independently. If a dish fails, the ticket goes back on the rail for another attempt.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>BullMQ: Jobs, Workers, Queues, and Scheduling</h1>
+<h2>Introduction</h2>
+<p>BullMQ is the premier job queue library for Node.js, built on top of Redis. It enables you to offload time-consuming tasks — sending emails, processing images, generating reports — from your request handlers into background workers. This pattern is essential for building responsive, scalable backend systems.</p>
+<h2>Why Message Queues?</h2>
+<div class="highlight"><pre><span></span><code>Without Queue (Synchronous):
+User ──&gt; API ──&gt; Send Email (3s) ──&gt; Generate PDF (5s) ──&gt; Response (8s total)
+
+With Queue (Asynchronous):
+User ──&gt; API ──&gt; Enqueue Jobs ──&gt; Response (50ms)
+                      │
+                      ▼
+              Background Workers:
+              Worker 1: Send Email (3s)
+              Worker 2: Generate PDF (5s)
+</code></pre></div>
+
+<h2>BullMQ Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────┐     ┌───────────┐     ┌──────────────┐
+│ Producer │────&gt;│   Redis   │────&gt;│   Worker(s)  │
+│ (API)    │     │  (Queue)  │     │  (Consumers) │
+└──────────┘     └───────────┘     └──────────────┘
+     │                                    │
+     │  add job to queue                  │  process jobs
+     │                                    │
+     ▼                                    ▼
+  Job States: waiting ──&gt; active ──&gt; completed
+                                 └──&gt; failed ──&gt; waiting (retry)
+</code></pre></div>
+
+<h2>Setup</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Queue</span><span class="p">,</span><span class="w"> </span><span class="nx">Worker</span><span class="p">,</span><span class="w"> </span><span class="nx">QueueScheduler</span><span class="p">,</span><span class="w"> </span><span class="nx">QueueEvents</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bullmq&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="c1">// Shared Redis connection config</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">REDIS_HOST</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;localhost&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">REDIS_PORT</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">6379</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">maxRetriesPerRequest</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="c1">// Required for BullMQ</span>
+<span class="p">};</span>
+
+<span class="c1">// Create a queue</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">emailQueue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;email&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="p">});</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">pdfQueue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;pdf-generation&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+
+<h2>Adding Jobs (Producer)</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// Simple job</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">emailQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;welcome-email&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">to</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user@example.com&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">subject</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Welcome!&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">template</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;welcome&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Alice&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+
+<span class="c1">// Job with options</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">emailQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;order-confirmation&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">to</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user@example.com&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;ORD-123&#39;</span><span class="p">,</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">priority</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w">                    </span><span class="c1">// Lower = higher priority</span>
+<span class="w">  </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">5000</span><span class="p">,</span><span class="w">                    </span><span class="c1">// Delay 5 seconds before processing</span>
+<span class="w">  </span><span class="nx">attempts</span><span class="o">:</span><span class="w"> </span><span class="mf">3</span><span class="p">,</span><span class="w">                    </span><span class="c1">// Retry up to 3 times</span>
+<span class="w">  </span><span class="nx">backoff</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;exponential&#39;</span><span class="p">,</span><span class="w">          </span><span class="c1">// exponential or fixed</span>
+<span class="w">    </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span><span class="w">                  </span><span class="c1">// Initial delay: 1s, then 2s, 4s</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">removeOnComplete</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">age</span><span class="o">:</span><span class="w"> </span><span class="mf">3600</span><span class="p">,</span><span class="w">                    </span><span class="c1">// Keep completed jobs for 1 hour</span>
+<span class="w">    </span><span class="nx">count</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span><span class="w">                  </span><span class="c1">// Keep last 1000 completed jobs</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">removeOnFail</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">age</span><span class="o">:</span><span class="w"> </span><span class="mf">86400</span><span class="p">,</span><span class="w">                   </span><span class="c1">// Keep failed jobs for 24 hours</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">});</span>
+
+<span class="c1">// Bulk add</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">emailQueue</span><span class="p">.</span><span class="nx">addBulk</span><span class="p">([</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;digest&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="nx">opts</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">priority</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;digest&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="mf">2</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="nx">opts</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">priority</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;digest&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="mf">3</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="nx">opts</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">priority</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="p">]);</span>
+</code></pre></div>
+
+<h3>From Express Route</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/orders&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Create order in DB (fast)</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">order</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Offload slow tasks to queues</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">([</span>
+<span class="w">    </span><span class="nx">emailQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;order-confirmation&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}),</span>
+<span class="w">    </span><span class="nx">pdfQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;invoice&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}),</span>
+<span class="w">    </span><span class="nx">emailQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;notify-warehouse&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">items</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">items</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">60000</span><span class="w"> </span><span class="p">}),</span><span class="w"> </span><span class="c1">// Wait 1 min (allow cancellation window)</span>
+<span class="w">  </span><span class="p">]);</span>
+
+<span class="w">  </span><span class="c1">// Respond immediately</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">order</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Order placed successfully&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Processing Jobs (Worker)</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// worker.js - Run as a separate process</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Worker</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bullmq&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">emailWorker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;email&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Processing job </span><span class="si">${</span><span class="nx">job</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">: </span><span class="si">${</span><span class="nx">job</span><span class="p">.</span><span class="nx">name</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">name</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;welcome-email&#39;</span><span class="o">:</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">sendWelcomeEmail</span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;order-confirmation&#39;</span><span class="o">:</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">sendOrderConfirmation</span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;notify-warehouse&#39;</span><span class="o">:</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">notifyWarehouse</span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="k">default</span><span class="o">:</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Unknown job name: </span><span class="si">${</span><span class="nx">job</span><span class="p">.</span><span class="nx">name</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Return value stored in job.returnvalue</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">sent</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">()</span><span class="w"> </span><span class="p">};</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">connection</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">concurrency</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span><span class="w">           </span><span class="c1">// Process 5 jobs simultaneously</span>
+<span class="w">  </span><span class="nx">limiter</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">max</span><span class="o">:</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span><span class="w">                </span><span class="c1">// Max 100 jobs</span>
+<span class="w">    </span><span class="nx">duration</span><span class="o">:</span><span class="w"> </span><span class="mf">60000</span><span class="p">,</span><span class="w">         </span><span class="c1">// Per 60 seconds (rate limiting)</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">});</span>
+
+<span class="c1">// Event handlers</span>
+<span class="nx">emailWorker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;completed&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">,</span><span class="w"> </span><span class="nx">result</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Job </span><span class="si">${</span><span class="nx">job</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb"> completed:`</span><span class="p">,</span><span class="w"> </span><span class="nx">result</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">emailWorker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;failed&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`Job </span><span class="si">${</span><span class="nx">job</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb"> failed:`</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Alert if final retry</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">attemptsMade</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">opts</span><span class="p">.</span><span class="nx">attempts</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">alertOps</span><span class="p">(</span><span class="sb">`Email job permanently failed: </span><span class="si">${</span><span class="nx">job</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="nx">emailWorker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;error&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Worker error:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Job Progress and Events</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// Worker reporting progress</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">pdfWorker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;pdf-generation&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">orderId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">updateProgress</span><span class="p">(</span><span class="mf">10</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">orderData</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetchOrderData</span><span class="p">(</span><span class="nx">orderId</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">updateProgress</span><span class="p">(</span><span class="mf">30</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">html</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">renderTemplate</span><span class="p">(</span><span class="nx">orderData</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">updateProgress</span><span class="p">(</span><span class="mf">60</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pdf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">generatePDF</span><span class="p">(</span><span class="nx">html</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">updateProgress</span><span class="p">(</span><span class="mf">90</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">uploadToS3</span><span class="p">(</span><span class="nx">pdf</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">updateProgress</span><span class="p">(</span><span class="mf">100</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">pdfUrl</span><span class="o">:</span><span class="w"> </span><span class="nx">url</span><span class="w"> </span><span class="p">};</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="p">});</span>
+
+<span class="c1">// Monitoring with QueueEvents</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">queueEvents</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">QueueEvents</span><span class="p">(</span><span class="s1">&#39;pdf-generation&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="p">});</span>
+
+<span class="nx">queueEvents</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;progress&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">jobId</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Job </span><span class="si">${</span><span class="nx">jobId</span><span class="si">}</span><span class="sb"> progress: </span><span class="si">${</span><span class="nx">data</span><span class="si">}</span><span class="sb">%`</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">queueEvents</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;completed&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">jobId</span><span class="p">,</span><span class="w"> </span><span class="nx">returnvalue</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Job </span><span class="si">${</span><span class="nx">jobId</span><span class="si">}</span><span class="sb"> completed:`</span><span class="p">,</span><span class="w"> </span><span class="nx">returnvalue</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">queueEvents</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;failed&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">jobId</span><span class="p">,</span><span class="w"> </span><span class="nx">failedReason</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`Job </span><span class="si">${</span><span class="nx">jobId</span><span class="si">}</span><span class="sb"> failed:`</span><span class="p">,</span><span class="w"> </span><span class="nx">failedReason</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// API endpoint to check job status</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/jobs/:jobId&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">job</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pdfQueue</span><span class="p">.</span><span class="nx">getJob</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">jobId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Job not found&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">getState</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">name</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">state</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">progress</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">progress</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">result</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">returnvalue</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">failedReason</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">failedReason</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">attemptsMade</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">attemptsMade</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">timestamp</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Job Flows (Parent-Child)</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">FlowProducer</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bullmq&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">flowProducer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">FlowProducer</span><span class="p">({</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="p">});</span>
+
+<span class="c1">// Create a job flow: parent waits for all children</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">flow</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">flowProducer</span><span class="p">.</span><span class="nx">add</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;process-order&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">queueName</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;orders&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;ORD-123&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">children</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;validate-payment&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">queueName</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;payments&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;ORD-123&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="mf">99.99</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;check-inventory&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">queueName</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;inventory&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;ORD-123&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">items</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;PROD-1&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;PROD-2&#39;</span><span class="p">]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;generate-invoice&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">queueName</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;pdf-generation&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;ORD-123&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="p">});</span>
+
+<span class="c1">// Parent job only runs after ALL children complete</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">orderWorker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;orders&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Access children results</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">childrenValues</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">getChildrenValues</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;All children completed:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">childrenValues</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Finalize order processing</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">order</span><span class="p">.</span><span class="nx">update</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">orderId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;PROCESSED&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+
+<h2>Queue Dashboard (Bull Board)</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">createBullBoard</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@bull-board/api&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">BullMQAdapter</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@bull-board/api/bullMQAdapter&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ExpressAdapter</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@bull-board/express&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">serverAdapter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">ExpressAdapter</span><span class="p">();</span>
+<span class="nx">serverAdapter</span><span class="p">.</span><span class="nx">setBasePath</span><span class="p">(</span><span class="s1">&#39;/admin/queues&#39;</span><span class="p">);</span>
+
+<span class="nx">createBullBoard</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">queues</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="ow">new</span><span class="w"> </span><span class="nx">BullMQAdapter</span><span class="p">(</span><span class="nx">emailQueue</span><span class="p">),</span>
+<span class="w">    </span><span class="ow">new</span><span class="w"> </span><span class="nx">BullMQAdapter</span><span class="p">(</span><span class="nx">pdfQueue</span><span class="p">),</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nx">serverAdapter</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="s1">&#39;/admin/queues&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">serverAdapter</span><span class="p">.</span><span class="nx">getRouter</span><span class="p">());</span>
+<span class="c1">// Visit http://localhost:3000/admin/queues for the dashboard</span>
+</code></pre></div>
+
+<h2>NestJS Integration</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// queue.module.ts</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">BullModule</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/bullmq&#39;</span><span class="p">;</span>
+
+<span class="err">@</span><span class="nx">Module</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">imports</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="nx">BullModule</span><span class="p">.</span><span class="nx">forRoot</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;localhost&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">6379</span><span class="p">,</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">}),</span>
+<span class="w">    </span><span class="nx">BullModule</span><span class="p">.</span><span class="nx">registerQueue</span><span class="p">({</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;email&#39;</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nx">providers</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">EmailProcessor</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">exports</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">BullModule</span><span class="p">],</span>
+<span class="p">})</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">QueueModule</span><span class="w"> </span><span class="p">{}</span>
+
+<span class="c1">// email.processor.ts</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Processor</span><span class="p">,</span><span class="w"> </span><span class="nx">WorkerHost</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/bullmq&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Job</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bullmq&#39;</span><span class="p">;</span>
+
+<span class="err">@</span><span class="nx">Processor</span><span class="p">(</span><span class="s1">&#39;email&#39;</span><span class="p">)</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">EmailProcessor</span><span class="w"> </span><span class="k">extends</span><span class="w"> </span><span class="nx">WorkerHost</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">process</span><span class="p">(</span><span class="nx">job</span><span class="o">:</span><span class="w"> </span><span class="nx">Job</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">name</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;welcome&#39;</span><span class="o">:</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">sendWelcome</span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;reset-password&#39;</span><span class="o">:</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">sendPasswordReset</span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// order.service.ts</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">InjectQueue</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/bullmq&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Queue</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bullmq&#39;</span><span class="p">;</span>
+
+<span class="err">@</span><span class="nx">Injectable</span><span class="p">()</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">OrderService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="err">@</span><span class="nx">InjectQueue</span><span class="p">(</span><span class="s1">&#39;email&#39;</span><span class="p">)</span><span class="w"> </span><span class="kr">private</span><span class="w"> </span><span class="nx">emailQueue</span><span class="o">:</span><span class="w"> </span><span class="nx">Queue</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">createOrder</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">prisma</span><span class="p">.</span><span class="nx">order</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">emailQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;order-confirmation&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">order</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Not handling worker crashes</strong>: Use <code>autorun: true</code> (default) and handle the <code>error</code> event. BullMQ automatically re-adds active jobs that crash.</li>
+<li><strong>Forgetting removeOnComplete</strong>: Without it, Redis memory grows unbounded with completed job data.</li>
+<li><strong>Running workers in the API process</strong>: Workers should be separate processes so CPU-heavy jobs don't block request handling.</li>
+<li><strong>Not setting maxRetriesPerRequest to null</strong>: BullMQ requires this ioredis option or connections fail.</li>
+</ol>
+<h2>Summary</h2>
+<p>BullMQ provides robust background job processing for Node.js via Redis. Producers add jobs to queues, workers process them asynchronously with retry logic, rate limiting, and priority ordering. Use job flows for complex multi-step workflows, QueueEvents for monitoring, and Bull Board for visual management. Always run workers as separate processes from your API server.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Email Queue System</div>
+                    <div class="exercise-desc"><p>Build an Express API that accepts email requests and processes them through BullMQ. Include welcome emails, password resets, and order confirmations with different priorities and retry strategies.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Create separate job names for each email type. Use priority: 1 for password resets, priority: 5 for welcome emails. Set 3 retries with exponential backoff.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Job Progress Tracking</div>
+                    <div class="exercise-desc"><p>Create a PDF generation queue where jobs report progress. Build an API endpoint that returns job status and a simple polling client that shows progress updates.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>job.updateProgress(percent)</code> in the worker. Create GET <code>/api/jobs/:id</code> that returns state and progress. Client polls every 2 seconds.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Flow Producer Pipeline</div>
+                    <div class="exercise-desc"><p>Implement an order processing pipeline using FlowProducer with parent-child jobs: validate payment, check inventory, generate invoice. Parent job runs only after all children complete.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use FlowProducer.add() with children array. In parent worker, call job.getChildrenValues() to get results.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Rate-Limited API Calls</div>
+                    <div class="exercise-desc"><p>Build a worker that calls an external API with rate limiting (max 10 requests per second). Use BullMQ's built-in limiter to respect the API rate limit.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Set worker limiter: { max: 10, duration: 1000 }. This ensures no more than 10 jobs process per second.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Jobs stuck in 'active' state and never complete</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Dashboard shows growing number of active jobs. No completed or failed events firing.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Worker process crashed while processing a job. The job remains in active state because no worker acknowledged completion or failure.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> BullMQ automatically moves stalled jobs back to waiting. Ensure `stalledInterval` is set (default 30s). Check worker error handlers and ensure async functions don't silently swallow errors.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Redis memory growing unbounded</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Completed and failed jobs are kept in Redis forever. With high job throughput, this consumes all available memory.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Set removeOnComplete and removeOnFail options when adding jobs. Use age-based AND count-based limits.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>await queue.add('job', data, {\n  removeOnComplete: { age: 3600, count: 1000 },\n  removeOnFail: { age: 86400, count: 5000 },\n});</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Worker not processing jobs despite jobs being in queue</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> ioredis connection configured with maxRetriesPerRequest (default 20), which BullMQ requires to be null.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Set maxRetriesPerRequest: null in the Redis connection options passed to BullMQ.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>const connection = { host: 'localhost', port: 6379, maxRetriesPerRequest: null };</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://docs.bullmq.io/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">BullMQ Documentation</div>
+                    
+                </a>
+                
+                <a href="https://github.com/felixmosh/bull-board" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag tool">tool</div>
+                    <div class="resource-title">Bull Board Dashboard</div>
+                    
+                </a>
+                
+                <a href="https://docs.nestjs.com/techniques/queues" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">NestJS BullMQ Integration</div>
+                    
+                </a>
+                
+                <a href="https://docs.bullmq.io/patterns/producer-consumer" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Background Jobs Best Practices</div>
+                    
+                    <div class="resource-note">Official BullMQ patterns and best practices</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/8.3.2-js.html" class="btn">RabbitMQ: Exchanges, Queues, and Routing &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-js.html">&larr; Back to System Design & Scalability</a>
+        </div>
+    </div>
+</body>
+</html>

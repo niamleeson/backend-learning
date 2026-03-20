@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design an Online Code Editor (Replit) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Social & Real-Time Systems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.5.3</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design an Online Code Editor (Replit)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of an online code editor like a shared art studio where each artist (user) gets their own private booth (sandbox container) with supplies (CPU, memory, packages). The canvas (editor) is visible to collaborators through a magic mirror (CRDT replication) that shows everyone's brushstrokes in real-time without conflicts. The building manager (Kubernetes) assigns booths on demand, cleans up after artists leave, and adds more floors to the building when it gets crowded.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design an Online Code Editor (Replit)</h1>
+<h2>Introduction</h2>
+<p>An online code editor allows users to write, run, and share code entirely in the browser — no local setup required. Platforms like Replit, CodeSandbox, and StackBlitz handle millions of users running code in dozens of programming languages. This is a fascinating system design problem because it combines real-time collaboration, remote code execution in sandboxed environments, file system management, and terminal streaming.</p>
+<p>In a system design interview, this problem tests your understanding of container orchestration, WebSocket-based real-time communication, sandboxed execution, and resource management.</p>
+<h2>Requirements</h2>
+<h3>Functional Requirements</h3>
+<ol>
+<li><strong>Create projects (repls)</strong> — Users create projects with a chosen language/template</li>
+<li><strong>File editor</strong> — Create, edit, rename, delete files with syntax highlighting</li>
+<li><strong>Code execution</strong> — Run code and see output in a terminal panel</li>
+<li><strong>Terminal access</strong> — Full interactive terminal (shell) connected to the sandbox</li>
+<li><strong>Real-time collaboration</strong> — Multiple users edit the same project simultaneously (cursors, selections)</li>
+<li><strong>Package management</strong> — Install dependencies (npm install, pip install)</li>
+<li><strong>Share and embed</strong> — Share projects via URL, embed in websites</li>
+<li><strong>Version history</strong> — View and restore previous versions of files</li>
+<li><strong>Persistent storage</strong> — Projects persist across sessions</li>
+</ol>
+<h3>Non-Functional Requirements</h3>
+<ol>
+<li><strong>Low latency editing</strong> — Keystrokes must appear in &lt;50ms (local-first)</li>
+<li><strong>Execution isolation</strong> — User code cannot affect other users or the host system</li>
+<li><strong>Resource limits</strong> — CPU, memory, disk, and network limits per sandbox</li>
+<li><strong>Scalability</strong> — Support 100K concurrent active sandboxes</li>
+<li><strong>High availability</strong> — 99.9% uptime for the editor; execution environments can be recreated</li>
+</ol>
+<h2>Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Registered users:              10 million
+Daily active users:            500,000
+Concurrent editing sessions:   100,000
+Concurrent running sandboxes:  50,000
+
+Sandbox resources (per user):
+  - CPU: 0.5 vCPU
+  - Memory: 512 MB
+  - Disk: 1 GB
+  - Network: 10 Mbps
+
+Total compute for 50K sandboxes:
+  - CPU: 50K * 0.5 = 25,000 vCPUs
+  - Memory: 50K * 512MB = 25 TB
+  - Disk: 50K * 1GB = 50 TB (mostly SSD)
+
+File operations:
+  - File saves: 100K users * 1 save/10s = 10,000 writes/sec
+  - File reads: 100K * 1 read/5s = 20,000 reads/sec
+
+WebSocket messages:
+  - Keystrokes: 100K users * 5 keystrokes/sec = 500,000 msg/sec
+  - Terminal output: 50K sandboxes * 2 msg/sec = 100,000 msg/sec
+  - Total: ~600,000 WebSocket messages/sec
+
+Storage:
+  - Avg project size: 10 MB
+  - Total projects: 50M projects * 10MB = 500 TB
+  - Use object storage (S3) for cold projects, SSD for active
+</code></pre></div>
+
+<h2>High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────────┐
+│                     Client (Browser)                          │
+│  ┌──────────┐  ┌──────────────┐  ┌────────────────────────┐  │
+│  │  Monaco   │  │  Terminal    │  │  Collaboration         │  │
+│  │  Editor   │  │  (xterm.js)  │  │  (CRDT / OT engine)   │  │
+│  └────┬──────┘  └──────┬───────┘  └──────────┬────────────┘  │
+│       │                │                      │               │
+└───────┼────────────────┼──────────────────────┼───────────────┘
+        │  WebSocket     │  WebSocket            │  WebSocket
+        │                │                      │
+┌───────▼────────────────▼──────────────────────▼───────────────┐
+│                  API Gateway / Load Balancer                    │
+└──────────┬─────────────┬──────────────────────┬───────────────┘
+           │             │                      │
+     ┌─────▼─────┐ ┌────▼──────┐ ┌─────────────▼──────────┐
+     │  Project   │ │ Execution │ │  Collaboration          │
+     │  Service   │ │ Service   │ │  Service                │
+     │            │ │           │ │  (CRDT sync)            │
+     └─────┬──────┘ └────┬──────┘ └────────────┬────────────┘
+           │             │                      │
+     ┌─────▼─────┐ ┌────▼──────────────┐  ┌────▼─────────┐
+     │PostgreSQL │ │ Container          │  │ Redis        │
+     │(Projects, │ │ Orchestrator       │  │ (Presence,   │
+     │ Users,    │ │ (K8s / Firecracker)│  │  CRDT state, │
+     │ Versions) │ │                    │  │  Pub/Sub)    │
+     └───────────┘ │  ┌──────┐ ┌─────┐ │  └──────────────┘
+                   │  │Sandbox│ │Sand.│ │
+     ┌───────────┐ │  │  VM 1 │ │VM 2 │ │
+     │    S3     │ │  └──────┘ └─────┘ │
+     │ (Project  │ └────────────────────┘
+     │  files)   │
+     └───────────┘
+</code></pre></div>
+
+<h2>API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// Create a new project (repl)</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/projects&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// POST /api/v1/projects</span>
+<span class="w">  </span><span class="c1">// Body: { name, language, template?, description? }</span>
+<span class="w">  </span><span class="c1">// Response: { project_id, name, language, url, sandbox_url }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">project</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">projectService</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">owner_id</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">name</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">language</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">language</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">template</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">template</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;blank&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">project</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Get project metadata and file tree</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/projects/:projectId&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Response: { id, name, language, files: [...], collaborators, created_at }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">project</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">projectService</span><span class="p">.</span><span class="nx">getWithFileTree</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">projectId</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">project</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// File operations</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/projects/:projectId/files/*&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// GET /api/v1/projects/:id/files/src/index.js</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">filePath</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">[</span><span class="mf">0</span><span class="p">];</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">content</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fileService</span><span class="p">.</span><span class="nx">readFile</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">projectId</span><span class="p">,</span><span class="w"> </span><span class="nx">filePath</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">path</span><span class="o">:</span><span class="w"> </span><span class="nx">filePath</span><span class="p">,</span><span class="w"> </span><span class="nx">content</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="nx">router</span><span class="p">.</span><span class="nx">put</span><span class="p">(</span><span class="s1">&#39;/projects/:projectId/files/*&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// PUT /api/v1/projects/:id/files/src/index.js</span>
+<span class="w">  </span><span class="c1">// Body: { content: string }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">filePath</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">[</span><span class="mf">0</span><span class="p">];</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">fileService</span><span class="p">.</span><span class="nx">writeFile</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">projectId</span><span class="p">,</span><span class="w"> </span><span class="nx">filePath</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">content</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">204</span><span class="p">).</span><span class="nx">send</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/projects/:projectId/files&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Body: { path, content?, type: &#39;file&#39; | &#39;directory&#39; }</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">fileService</span><span class="p">.</span><span class="nx">createFile</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">projectId</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">send</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="nx">router</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="s1">&#39;/projects/:projectId/files/*&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">filePath</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">[</span><span class="mf">0</span><span class="p">];</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">fileService</span><span class="p">.</span><span class="nx">deleteFile</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">projectId</span><span class="p">,</span><span class="w"> </span><span class="nx">filePath</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">204</span><span class="p">).</span><span class="nx">send</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="c1">// Execute code / start sandbox</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/projects/:projectId/run&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// POST /api/v1/projects/:id/run</span>
+<span class="w">  </span><span class="c1">// Body: { command?: string } (optional, defaults to language-specific run command)</span>
+<span class="w">  </span><span class="c1">// Response: { sandbox_id, websocket_url }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">sandbox</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">executionService</span><span class="p">.</span><span class="nx">startSandbox</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">projectId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">command</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">sandbox_id</span><span class="o">:</span><span class="w"> </span><span class="nx">sandbox</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">websocket_url</span><span class="o">:</span><span class="w"> </span><span class="sb">`wss://exec.example.com/ws/</span><span class="si">${</span><span class="nx">sandbox</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Stop sandbox</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/projects/:projectId/stop&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">executionService</span><span class="p">.</span><span class="nx">stopSandbox</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">projectId</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">204</span><span class="p">).</span><span class="nx">send</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="c1">// Version history</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/projects/:projectId/versions&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Response: { versions: [{ id, timestamp, message, author }] }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">versions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">versionService</span><span class="p">.</span><span class="nx">listVersions</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">projectId</span><span class="p">,</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">cursor</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">cursor</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">20</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">versions</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Collaboration: add collaborator</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/projects/:projectId/collaborators&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Body: { user_id, permission: &#39;read&#39; | &#39;write&#39; | &#39;admin&#39; }</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">projectService</span><span class="p">.</span><span class="nx">addCollaborator</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">projectId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">user_id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">permission</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">send</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="c1">// Share / fork</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/projects/:projectId/fork&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">forked</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">projectService</span><span class="p">.</span><span class="nx">fork</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">projectId</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">forked</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="k">export</span><span class="w"> </span><span class="k">default</span><span class="w"> </span><span class="nx">router</span><span class="p">;</span>
+</code></pre></div>
+
+<h2>Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Users</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">username</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">email</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">plan</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;free&#39;</span><span class="p">,</span><span class="w">  </span><span class="c1">-- free, pro, teams</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Projects (Repls)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">projects</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">owner_id</span><span class="w">        </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">slug</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="k">language</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">32</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">description</span><span class="w">     </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_public</span><span class="w">       </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">true</span><span class="p">,</span>
+<span class="w">  </span><span class="n">forked_from</span><span class="w">     </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">projects</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">storage_bucket</span><span class="w">  </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">   </span><span class="c1">-- S3 path for project files</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">(</span><span class="n">owner_id</span><span class="p">,</span><span class="w"> </span><span class="n">slug</span><span class="p">)</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_project_owner</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">projects</span><span class="p">(</span><span class="n">owner_id</span><span class="p">,</span><span class="w"> </span><span class="n">updated_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_project_language</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">projects</span><span class="p">(</span><span class="k">language</span><span class="p">,</span><span class="w"> </span><span class="n">is_public</span><span class="p">);</span>
+
+<span class="c1">-- Collaborators</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">collaborators</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">project_id</span><span class="w">      </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">projects</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">DELETE</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">permission</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;write&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">project_id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- File versions (snapshots)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">file_versions</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">project_id</span><span class="w">      </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">projects</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">DELETE</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">file_path</span><span class="w">       </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">content_hash</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">    </span><span class="c1">-- SHA-256 of content</span>
+<span class="w">  </span><span class="n">size_bytes</span><span class="w">      </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">author_id</span><span class="w">       </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_file_version</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">file_versions</span><span class="p">(</span><span class="n">project_id</span><span class="p">,</span><span class="w"> </span><span class="n">file_path</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+
+<span class="c1">-- Project snapshots (point-in-time versions)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">project_snapshots</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">project_id</span><span class="w">      </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">projects</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">DELETE</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">author_id</span><span class="w">       </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">message</span><span class="w">         </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">file_manifest</span><span class="w">   </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">   </span><span class="c1">-- { &quot;src/index.js&quot;: &quot;hash1&quot;, &quot;package.json&quot;: &quot;hash2&quot; }</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_snapshot_project</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">project_snapshots</span><span class="p">(</span><span class="n">project_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+
+<span class="c1">-- Sandbox sessions (active execution environments)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">sandbox_sessions</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">project_id</span><span class="w">      </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">projects</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">container_id</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">128</span><span class="p">),</span>
+<span class="w">  </span><span class="n">node_hostname</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">128</span><span class="p">),</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;starting&#39;</span><span class="p">,</span><span class="w"> </span><span class="c1">-- starting, running, stopped, crashed</span>
+<span class="w">  </span><span class="n">cpu_limit</span><span class="w">       </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">.</span><span class="mi">50</span><span class="p">,</span>
+<span class="w">  </span><span class="n">memory_limit_mb</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">512</span><span class="p">,</span>
+<span class="w">  </span><span class="n">started_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">stopped_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_sandbox_project</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">sandbox_sessions</span><span class="p">(</span><span class="n">project_id</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Core Implementation: Sandbox Execution</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">KubeConfig</span><span class="p">,</span><span class="w"> </span><span class="nx">CoreV1Api</span><span class="p">,</span><span class="w"> </span><span class="nx">AppsV1Api</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@kubernetes/client-node&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">ExecutionService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">kc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">KubeConfig</span><span class="p">();</span>
+<span class="w">    </span><span class="nx">kc</span><span class="p">.</span><span class="nx">loadFromDefault</span><span class="p">();</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">k8sCore</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">kc</span><span class="p">.</span><span class="nx">makeApiClient</span><span class="p">(</span><span class="nx">CoreV1Api</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">startSandbox</span><span class="p">(</span><span class="nx">projectId</span><span class="p">,</span><span class="w"> </span><span class="nx">command</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Check if sandbox already running</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getActiveSandbox</span><span class="p">(</span><span class="nx">projectId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">existing</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Create a sandboxed container (pod) for this project</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">sandboxId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`sandbox-</span><span class="si">${</span><span class="nx">projectId</span><span class="si">}</span><span class="sb">-</span><span class="si">${</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">project</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">projectService</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">projectId</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">podSpec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">apiVersion</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;v1&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">kind</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Pod&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">metadata</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="nx">sandboxId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">labels</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">app</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sandbox&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">project</span><span class="o">:</span><span class="w"> </span><span class="nx">projectId</span><span class="p">.</span><span class="nx">toString</span><span class="p">(),</span>
+<span class="w">          </span><span class="nx">language</span><span class="o">:</span><span class="w"> </span><span class="nx">project</span><span class="p">.</span><span class="nx">language</span><span class="p">,</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">spec</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">containers</span><span class="o">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">          </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sandbox&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">image</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getImage</span><span class="p">(</span><span class="nx">project</span><span class="p">.</span><span class="nx">language</span><span class="p">),</span>
+<span class="w">          </span><span class="nx">resources</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">limits</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">cpu</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;500m&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">memory</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;512Mi&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">            </span><span class="nx">requests</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">cpu</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;100m&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">memory</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;128Mi&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="p">},</span>
+<span class="w">          </span><span class="c1">// Mount project files from S3/PVC</span>
+<span class="w">          </span><span class="nx">volumeMounts</span><span class="o">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">            </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;project-files&#39;</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">mountPath</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;/workspace&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="p">}],</span>
+<span class="w">          </span><span class="c1">// Security: no root, no network escalation</span>
+<span class="w">          </span><span class="nx">securityContext</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">runAsNonRoot</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">runAsUser</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">readOnlyRootFilesystem</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">allowPrivilegeEscalation</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">          </span><span class="p">},</span>
+<span class="w">        </span><span class="p">}],</span>
+<span class="w">        </span><span class="nx">volumes</span><span class="o">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">          </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;project-files&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">emptyDir</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">sizeLimit</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;1Gi&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">}],</span>
+<span class="w">        </span><span class="c1">// Auto-terminate after 1 hour of inactivity</span>
+<span class="w">        </span><span class="nx">activeDeadlineSeconds</span><span class="o">:</span><span class="w"> </span><span class="mf">3600</span><span class="p">,</span>
+<span class="w">        </span><span class="c1">// Restrict network access</span>
+<span class="w">        </span><span class="nx">dnsPolicy</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;None&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">dnsConfig</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">nameservers</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;8.8.8.8&#39;</span><span class="p">],</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">k8sCore</span><span class="p">.</span><span class="nx">createNamespacedPod</span><span class="p">(</span><span class="s1">&#39;sandboxes&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">podSpec</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Sync project files to the sandbox</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">syncProjectFiles</span><span class="p">(</span><span class="nx">sandboxId</span><span class="p">,</span><span class="w"> </span><span class="nx">projectId</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Record session</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">session</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">sandbox_sessions</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">project_id</span><span class="o">:</span><span class="w"> </span><span class="nb">BigInt</span><span class="p">(</span><span class="nx">projectId</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">user_id</span><span class="o">:</span><span class="w"> </span><span class="nb">BigInt</span><span class="p">(</span><span class="nx">project</span><span class="p">.</span><span class="nx">owner_id</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">container_id</span><span class="o">:</span><span class="w"> </span><span class="nx">sandboxId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;running&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">session</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">container_id</span><span class="o">:</span><span class="w"> </span><span class="nx">sandboxId</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">getImage</span><span class="p">(</span><span class="nx">language</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">images</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">javascript</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sandbox-node:20-alpine&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">typescript</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sandbox-node:20-alpine&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">python</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sandbox-python:3.12-alpine&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">go</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sandbox-go:1.22-alpine&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">rust</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sandbox-rust:1.76-alpine&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">java</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sandbox-java:21-alpine&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="sb">`registry.example.com/</span><span class="si">${</span><span class="nx">images</span><span class="p">[</span><span class="nx">language</span><span class="p">]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">images</span><span class="p">.</span><span class="nx">javascript</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">stopSandbox</span><span class="p">(</span><span class="nx">projectId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">session</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getActiveSandbox</span><span class="p">(</span><span class="nx">projectId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">session</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Save any changed files back to S3</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">persistFiles</span><span class="p">(</span><span class="nx">session</span><span class="p">.</span><span class="nx">container_id</span><span class="p">,</span><span class="w"> </span><span class="nx">projectId</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Delete the pod</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">k8sCore</span><span class="p">.</span><span class="nx">deleteNamespacedPod</span><span class="p">(</span><span class="nx">session</span><span class="p">.</span><span class="nx">container_id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;sandboxes&#39;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">sandbox_sessions</span><span class="p">.</span><span class="nx">update</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">session</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;stopped&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">stopped_at</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">()</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Real-Time Collaboration with CRDT</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="nx">Y</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;yjs&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">WebSocketServer</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ws&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">pub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">sub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+
+<span class="c1">// Each project has a Yjs document</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">docs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">getOrCreateDoc</span><span class="p">(</span><span class="nx">projectId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">docs</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">projectId</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">ydoc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Y</span><span class="p">.</span><span class="nx">Doc</span><span class="p">();</span>
+<span class="w">    </span><span class="nx">docs</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">projectId</span><span class="p">,</span><span class="w"> </span><span class="nx">ydoc</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">docs</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">projectId</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">wss</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebSocketServer</span><span class="p">({</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">8081</span><span class="w"> </span><span class="p">});</span>
+
+<span class="nx">wss</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;connection&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">ws</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">projectId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">extractProjectId</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">url</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">authenticateWS</span><span class="p">(</span><span class="nx">req</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">ydoc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getOrCreateDoc</span><span class="p">(</span><span class="nx">projectId</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Send current document state to new client</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">stateVector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">Y</span><span class="p">.</span><span class="nx">encodeStateAsUpdate</span><span class="p">(</span><span class="nx">ydoc</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">ws</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sync&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nb">Array</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">stateVector</span><span class="p">)</span><span class="w"> </span><span class="p">}));</span>
+
+<span class="w">  </span><span class="c1">// Broadcast presence (cursor position, user info)</span>
+<span class="w">  </span><span class="nx">pub</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="sb">`collab:</span><span class="si">${</span><span class="nx">projectId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;presence&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">user_id</span><span class="o">:</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;joined&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}));</span>
+
+<span class="w">  </span><span class="nx">ws</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;message&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">message</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">message</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Apply CRDT update from client</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">update</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Uint8Array</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">Y</span><span class="p">.</span><span class="nx">applyUpdate</span><span class="p">(</span><span class="nx">ydoc</span><span class="p">,</span><span class="w"> </span><span class="nx">update</span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// Broadcast to other clients in this project</span>
+<span class="w">      </span><span class="nx">pub</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="sb">`collab:</span><span class="si">${</span><span class="nx">projectId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nb">Array</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">update</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">sender</span><span class="o">:</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">      </span><span class="p">}));</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;cursor&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Broadcast cursor position</span>
+<span class="w">      </span><span class="nx">pub</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="sb">`collab:</span><span class="si">${</span><span class="nx">projectId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;cursor&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">user_id</span><span class="o">:</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">file</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">file</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">position</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">position</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">selection</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">selection</span><span class="p">,</span>
+<span class="w">      </span><span class="p">}));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">ws</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">pub</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="sb">`collab:</span><span class="si">${</span><span class="nx">projectId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;presence&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">user_id</span><span class="o">:</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;left&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}));</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Subscribe to updates from other collaboration servers</span>
+<span class="nx">sub</span><span class="p">.</span><span class="nx">psubscribe</span><span class="p">(</span><span class="s1">&#39;collab:*&#39;</span><span class="p">);</span>
+<span class="nx">sub</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;pmessage&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">pattern</span><span class="p">,</span><span class="w"> </span><span class="nx">channel</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">projectId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">&#39;:&#39;</span><span class="p">)[</span><span class="mf">1</span><span class="p">];</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">message</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Forward to all WebSocket clients for this project (except sender)</span>
+<span class="w">  </span><span class="nx">wss</span><span class="p">.</span><span class="nx">clients</span><span class="p">.</span><span class="nx">forEach</span><span class="p">((</span><span class="nx">client</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">client</span><span class="p">.</span><span class="nx">projectId</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">projectId</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">userId</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">sender</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">client</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Scaling Strategies</h2>
+<h3>Container Orchestration</h3>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────┐
+│  Kubernetes Cluster for Sandboxes                     │
+│                                                       │
+│  Node Pool 1 (CPU-optimized):                        │
+│    - 100 nodes * 32 vCPU = 3,200 sandboxes           │
+│                                                       │
+│  Node Pool 2 (Memory-optimized):                     │
+│    - 50 nodes * 256GB RAM = Java/heavy workloads     │
+│                                                       │
+│  Auto-scaling:                                        │
+│    - Pod HPA: scale sandbox pods based on demand     │
+│    - Cluster autoscaler: add/remove nodes            │
+│                                                       │
+│  Security:                                            │
+│    - Network policies: sandbox cannot reach other pods│
+│    - Resource quotas per namespace                    │
+│    - gVisor / Firecracker for kernel isolation        │
+└──────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>File Storage Architecture</h3>
+<div class="highlight"><pre><span></span><code>Active project (user is editing):
+  Browser ←→ WebSocket ←→ CRDT Doc (memory) ←→ Periodic save to S3
+
+Cold project (not active):
+  Files stored in S3, loaded on-demand when user opens project
+
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Browser │───&gt;│  File Server  │───&gt;│   S3     │
+│  (Monaco)│    │  (in-memory   │    │  (durable│
+│          │&lt;───│   buffer)     │&lt;───│  storage)│
+└──────────┘    └──────────────┘    └──────────┘
+                      │
+                      ▼
+               ┌──────────────┐
+               │  Sandbox PVC │  (mounted filesystem
+               │  (ephemeral) │   for code execution)
+               └──────────────┘
+</code></pre></div>
+
+<h2>Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Isolation</strong></td>
+<td>Docker containers</td>
+<td>Firecracker microVMs</td>
+</tr>
+<tr>
+<td></td>
+<td>Faster startup (~1s), shared kernel</td>
+<td>Stronger isolation, ~125ms boot, more overhead</td>
+</tr>
+<tr>
+<td><strong>Collaboration</strong></td>
+<td>OT (Operational Transform)</td>
+<td>CRDT (Yjs)</td>
+</tr>
+<tr>
+<td></td>
+<td>Requires central server, simpler</td>
+<td>Peer-to-peer capable, handles offline, complex merge</td>
+</tr>
+<tr>
+<td><strong>File storage</strong></td>
+<td>S3 + local cache</td>
+<td>NFS shared volume</td>
+</tr>
+<tr>
+<td></td>
+<td>Cheap, scalable, higher latency</td>
+<td>Low latency, expensive, single point of failure</td>
+</tr>
+<tr>
+<td><strong>Editor</strong></td>
+<td>Monaco (VS Code engine)</td>
+<td>CodeMirror 6</td>
+</tr>
+<tr>
+<td></td>
+<td>Feature-rich, heavier (~2MB)</td>
+<td>Lighter, more customizable, mobile-friendly</td>
+</tr>
+<tr>
+<td><strong>Sandbox lifecycle</strong></td>
+<td>Always-on per project</td>
+<td>On-demand (spin up on access)</td>
+</tr>
+<tr>
+<td></td>
+<td>Instant access, expensive</td>
+<td>Cold start delay (2-5s), much cheaper</td>
+</tr>
+</tbody>
+</table>
+<h2>Summary</h2>
+<p>An online code editor requires three core subsystems: a real-time collaborative editor (using CRDTs like Yjs for conflict-free merging), a sandboxed execution environment (Kubernetes pods or Firecracker microVMs with strict resource limits and network isolation), and a file management layer (S3 for durable storage with in-memory caching for active sessions). WebSocket connections handle bidirectional communication for keystrokes, terminal output, and cursor presence. The biggest scaling challenge is managing hundreds of thousands of concurrent sandboxes — Kubernetes cluster autoscaling with pod preemption for inactive users is the standard approach. Security is paramount: user code must be fully isolated from the host and other users via container security contexts, network policies, and optional kernel-level isolation with gVisor.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Code Execution Sandbox</div>
+                    <div class="exercise-desc"><p>Create a Node.js service that receives code (JavaScript), spawns it in a child_process with resource limits (timeout, memory), captures stdout/stderr, and returns the result. Prevent dangerous operations like file system access and network calls.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use child_process.fork() with a timeout. Use Node.js --max-old-space-size flag for memory limits. Create a restricted execution wrapper using vm2 or isolated-vm npm packages.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Real-Time Collaboration with Yjs</div>
+                    <div class="exercise-desc"><p>Build a minimal collaborative text editor using Yjs and WebSocket. Two browser tabs should be able to edit the same document simultaneously with changes appearing in real-time. Display remote cursors with different colors.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use y-websocket for the server transport layer and y-monaco or y-codemirror for editor binding. Use awareness protocol for cursor positions.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">File Versioning System</div>
+                    <div class="exercise-desc"><p>Implement a file versioning system that stores content-addressable file snapshots (SHA-256 hash as key, content as value in S3). Create project snapshots as a manifest of file hashes. Support listing versions and restoring to any snapshot.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Hash file content with crypto.createHash('sha256'). Store content in S3 with the hash as key (automatic deduplication). Store manifests in PostgreSQL with JSONB.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Terminal Streaming over WebSocket</div>
+                    <div class="exercise-desc"><p>Build a WebSocket server that spawns a shell process (bash) in a container and streams the PTY (pseudo-terminal) output to a connected browser client using xterm.js. Handle bidirectional I/O: user input from browser to shell, shell output to browser.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the node-pty npm package to create a pseudo-terminal. Pipe pty.onData to WebSocket send, and WebSocket messages to pty.write.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Sandbox cold start takes 5+ seconds, making the run button feel slow</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Pulling container images, initializing the filesystem, and installing dependencies on every sandbox creation adds significant latency.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Pre-warm a pool of generic sandbox containers (one per language) that are already running and waiting for assignment. When a user clicks 'Run', assign an idle container from the pool and sync project files into it. Replenish the pool asynchronously. For frequently used templates (Node.js, Python), keep 100+ pre-warmed containers. This reduces cold start from 5s to under 500ms.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">CRDT document grows unboundedly in memory for long-lived editing sessions</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Yjs stores the full history of operations for conflict resolution. Long editing sessions with many edits create large CRDT documents (100MB+) that consume excessive server memory.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Periodically compact the CRDT document by creating a fresh snapshot. Every N operations or every M minutes, encode the current state, create a new Y.Doc from that state, and replace the old document. Persist the snapshot to S3. On reconnection, clients load the latest snapshot rather than replaying the full history.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Users can escape the sandbox and access host resources</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Standard Docker containers share the host kernel, and privilege escalation vulnerabilities can allow container escape.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Layer multiple isolation mechanisms: (1) Run containers with non-root user and drop all capabilities, (2) Use seccomp profiles to restrict system calls, (3) Apply AppArmor/SELinux profiles, (4) Use gVisor (user-space kernel) or Firecracker microVMs for kernel-level isolation, (5) Network policies to prevent sandbox-to-sandbox communication. Defense in depth is essential.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://blog.replit.com/nix" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Replit Engineering Blog: How We Run User Code</div>
+                    
+                    <div class="resource-note">How Replit uses Nix for reproducible sandbox environments</div>
+                    
+                </a>
+                
+                <a href="https://docs.yjs.dev/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Yjs: A CRDT Framework for Shared Editing</div>
+                    
+                    <div class="resource-note">Official documentation for the Yjs CRDT library used in collaborative editors</div>
+                    
+                </a>
+                
+                <a href="https://firecracker-microvm.github.io/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Firecracker: Lightweight Virtualization for Serverless</div>
+                    
+                    <div class="resource-note">AWS's open-source microVM technology used for secure sandbox isolation</div>
+                    
+                </a>
+                
+                <a href="https://microsoft.github.io/monaco-editor/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Monaco Editor Documentation</div>
+                    
+                    <div class="resource-note">The VS Code editor component used in most online code editors</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.5.2-js.html" class="btn">&larr; Design a Ride-Sharing Service (Uber)</a>
+            
+            
+            <a href="/backend-learning/lesson/9.5.4-js.html" class="btn">Design a Real-Time Collaborative Editor (Google Docs) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

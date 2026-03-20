@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connection Pooling with PgBouncer - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-js.html">System Design & Scalability</a> &rsaquo;
+            Database Scaling
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.4.3</span>
+                <span>~2h</span>
+            </div>
+            <h1>Connection Pooling with PgBouncer</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Connection pooling is like a car-sharing service. Instead of everyone buying their own car (connection) that sits idle 90% of the time, a shared pool of cars serves everyone. PgBouncer is like adding a parking garage (external pooler) between the apartment building (app) and the highway (database) — residents don't each need a parking spot at the highway.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Connection Pooling with PgBouncer</h1>
+<h2>Introduction</h2>
+<p>Every database query requires a connection. Creating a new PostgreSQL connection involves TCP handshake, TLS negotiation, authentication, and memory allocation — taking 50-100ms and consuming ~10MB of memory per connection. Connection pooling reuses existing connections, dramatically improving performance and allowing your application to handle far more concurrent requests than available database connections.</p>
+<h2>The Problem</h2>
+<div class="highlight"><pre><span></span><code>Without Pooling:
+100 concurrent requests → 100 DB connections → DB overwhelmed
+
+PostgreSQL default max_connections = 100
+Each connection: ~10MB RAM
+100 connections: ~1GB RAM just for connections
+
+With Pooling:
+100 concurrent requests → 20 DB connections (pooled) → DB handles easily
+</code></pre></div>
+
+<h2>Node.js Built-In Connection Pooling</h2>
+<p>Prisma and most Node.js database drivers include built-in connection pooling:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Prisma connection pool configuration</span>
+<span class="c1">// DATABASE_URL=&quot;postgresql://user:pass@host:5432/db?connection_limit=20&amp;pool_timeout=10&quot;</span>
+
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@prisma/client&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">datasources</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">db</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">url</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">DATABASE_URL</span><span class="p">,</span>
+<span class="w">      </span><span class="c1">// Connection pool settings are in the URL</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">log</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;query&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;info&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;warn&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;error&#39;</span><span class="p">],</span>
+<span class="p">});</span>
+
+<span class="c1">// Knex.js connection pool</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">knex</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;knex&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">knex</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">client</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;pg&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">DATABASE_URL</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">pool</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">min</span><span class="o">:</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span><span class="w">           </span><span class="c1">// Minimum connections to maintain</span>
+<span class="w">    </span><span class="nx">max</span><span class="o">:</span><span class="w"> </span><span class="mf">20</span><span class="p">,</span><span class="w">          </span><span class="c1">// Maximum connections</span>
+<span class="w">    </span><span class="nx">idleTimeoutMillis</span><span class="o">:</span><span class="w"> </span><span class="mf">30000</span><span class="p">,</span><span class="w">    </span><span class="c1">// Close idle connections after 30s</span>
+<span class="w">    </span><span class="nx">createTimeoutMillis</span><span class="o">:</span><span class="w"> </span><span class="mf">5000</span><span class="p">,</span><span class="w">   </span><span class="c1">// Max time to create new connection</span>
+<span class="w">    </span><span class="nx">acquireTimeoutMillis</span><span class="o">:</span><span class="w"> </span><span class="mf">10000</span><span class="p">,</span><span class="w"> </span><span class="c1">// Max time to acquire from pool</span>
+<span class="w">    </span><span class="nx">reapIntervalMillis</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span><span class="w">    </span><span class="c1">// How often to check for idle connections</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">});</span>
+
+<span class="c1">// pg (node-postgres) pool</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">pg</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;pg&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">pool</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">pg</span><span class="p">.</span><span class="nx">Pool</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">connectionString</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">DATABASE_URL</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">max</span><span class="o">:</span><span class="w"> </span><span class="mf">20</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">idleTimeoutMillis</span><span class="o">:</span><span class="w"> </span><span class="mf">30000</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">connectionTimeoutMillis</span><span class="o">:</span><span class="w"> </span><span class="mf">5000</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="c1">// Monitor pool events</span>
+<span class="nx">pool</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;connect&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;New connection created&#39;</span><span class="p">));</span>
+<span class="nx">pool</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;acquire&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Connection acquired&#39;</span><span class="p">));</span>
+<span class="nx">pool</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;remove&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Connection removed&#39;</span><span class="p">));</span>
+<span class="nx">pool</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;error&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Pool error:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">));</span>
+</code></pre></div>
+
+<h2>PgBouncer: External Connection Pooler</h2>
+<p>PgBouncer sits between your application and PostgreSQL, managing a shared pool of connections:</p>
+<div class="highlight"><pre><span></span><code>Without PgBouncer:
+┌──────────┐  20 conn   ┌────────────┐
+│ App 1    │────────────&gt;│            │
+└──────────┘             │            │
+┌──────────┐  20 conn   │ PostgreSQL │  60 total connections
+│ App 2    │────────────&gt;│            │
+└──────────┘             │            │
+┌──────────┐  20 conn   │            │
+│ App 3    │────────────&gt;│            │
+└──────────┘             └────────────┘
+
+With PgBouncer:
+┌──────────┐             ┌───────────┐             ┌────────────┐
+│ App 1    │──20 conn──&gt; │           │             │            │
+└──────────┘             │           │  20 conn    │            │
+┌──────────┐             │ PgBouncer │────────────&gt;│ PostgreSQL │
+│ App 2    │──20 conn──&gt; │           │  (shared)   │            │
+└──────────┘             │           │             │            │
+┌──────────┐             │           │             │            │
+│ App 3    │──20 conn──&gt; │           │             │            │
+└──────────┘             └───────────┘             └────────────┘
+                          60 app connections        20 DB connections
+</code></pre></div>
+
+<h3>PgBouncer Modes</h3>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────────┐
+│ Mode               │ Connection Reuse   │ Feature Support    │
+├────────────────────┼────────────────────┼────────────────────┤
+│ session            │ Per client session │ Full SQL support   │
+│ (default)          │ (released on       │ Prepared stmts OK  │
+│                    │  disconnect)       │                    │
+├────────────────────┼────────────────────┼────────────────────┤
+│ transaction        │ Per transaction    │ Most SQL           │
+│ (recommended)      │ (released after    │ No prepared stmts  │
+│                    │  COMMIT/ROLLBACK)  │ across txns        │
+├────────────────────┼────────────────────┼────────────────────┤
+│ statement          │ Per statement      │ No multi-statement │
+│ (most aggressive)  │ (released after    │ No transactions    │
+│                    │  each query)       │                    │
+└──────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>PgBouncer Configuration</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">; /etc/pgbouncer/pgbouncer.ini</span>
+<span class="k">[databases]</span>
+<span class="na">myapp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">host=postgres-primary port=5432 dbname=myapp</span>
+
+<span class="k">[pgbouncer]</span>
+<span class="na">listen_port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">6432</span>
+<span class="na">listen_addr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">0.0.0.0</span>
+
+<span class="c1">; Pool mode</span>
+<span class="na">pool_mode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">transaction</span>
+
+<span class="c1">; Pool sizing</span>
+<span class="na">default_pool_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">20</span>
+<span class="na">min_pool_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">5</span>
+<span class="na">max_client_conn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">200</span><span class="w">        </span><span class="c1">; Max frontend connections</span>
+<span class="na">max_db_connections</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">50</span><span class="w">      </span><span class="c1">; Max backend connections per database</span>
+
+<span class="c1">; Timeouts</span>
+<span class="na">server_idle_timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">600</span><span class="w">    </span><span class="c1">; Close idle backend connections after 10 min</span>
+<span class="na">client_idle_timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">0</span><span class="w">      </span><span class="c1">; No timeout for idle frontend connections</span>
+<span class="na">query_timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">30</span><span class="w">           </span><span class="c1">; Kill queries running longer than 30s</span>
+<span class="na">query_wait_timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">120</span><span class="w">     </span><span class="c1">; Max time to wait for a connection from pool</span>
+
+<span class="c1">; Authentication</span>
+<span class="na">auth_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">md5</span>
+<span class="na">auth_file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">/etc/pgbouncer/userlist.txt</span>
+
+<span class="c1">; Logging</span>
+<span class="na">log_connections</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">1</span>
+<span class="na">log_disconnections</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">1</span>
+<span class="na">log_pooler_errors</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">1</span>
+<span class="na">stats_period</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">60</span>
+</code></pre></div>
+
+<h3>Docker Compose with PgBouncer</h3>
+<div class="highlight"><pre><span></span><code><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;3.8&#39;</span>
+<span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">postgres</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">postgres:16</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">POSTGRES_DB</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">myapp</span>
+<span class="w">      </span><span class="nt">POSTGRES_USER</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">app</span>
+<span class="w">      </span><span class="nt">POSTGRES_PASSWORD</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">secret</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pgdata:/var/lib/postgresql/data</span>
+<span class="w">    </span><span class="c1"># Only accessible via PgBouncer, not directly</span>
+<span class="w">    </span><span class="nt">expose</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;5432&quot;</span>
+
+<span class="w">  </span><span class="nt">pgbouncer</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">edoburu/pgbouncer</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">DATABASE_URL</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">postgres://app:secret@postgres:5432/myapp</span>
+<span class="w">      </span><span class="nt">POOL_MODE</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">transaction</span>
+<span class="w">      </span><span class="nt">DEFAULT_POOL_SIZE</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">20</span>
+<span class="w">      </span><span class="nt">MAX_CLIENT_CONN</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">200</span>
+<span class="w">      </span><span class="nt">MAX_DB_CONNECTIONS</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">50</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;6432:5432&quot;</span>
+<span class="w">    </span><span class="nt">depends_on</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">postgres</span>
+
+<span class="w">  </span><span class="nt">app</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">build</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">.</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="c1"># App connects to PgBouncer, NOT directly to PostgreSQL</span>
+<span class="w">      </span><span class="nt">DATABASE_URL</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">postgres://app:secret@pgbouncer:5432/myapp</span>
+<span class="w">    </span><span class="nt">depends_on</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pgbouncer</span>
+
+<span class="nt">volumes</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">pgdata</span><span class="p">:</span>
+</code></pre></div>
+
+<h3>Connecting Node.js to PgBouncer</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// Prisma with PgBouncer</span>
+<span class="c1">// schema.prisma - add pgbouncer=true to enable compatible mode</span>
+<span class="c1">// DATABASE_URL=&quot;postgresql://app:secret@pgbouncer:6432/myapp?pgbouncer=true&amp;connection_limit=10&quot;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="p">();</span>
+
+<span class="c1">// Knex with PgBouncer</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">knex</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">client</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;pg&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;postgresql://app:secret@pgbouncer:6432/myapp&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">pool</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">min</span><span class="o">:</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">max</span><span class="o">:</span><span class="w"> </span><span class="mf">10</span><span class="p">,</span><span class="w"> </span><span class="c1">// Per-instance limit; PgBouncer manages the real pool</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Monitoring Connection Pools</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// Monitor Prisma connection pool</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">log</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">emit</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;event&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">level</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;query&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="p">});</span>
+
+<span class="nx">prisma</span><span class="p">.</span><span class="nx">$on</span><span class="p">(</span><span class="s1">&#39;query&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">.</span><span class="nx">duration</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">1000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">warn</span><span class="p">(</span><span class="sb">`Slow query (</span><span class="si">${</span><span class="nx">e</span><span class="p">.</span><span class="nx">duration</span><span class="si">}</span><span class="sb">ms): </span><span class="si">${</span><span class="nx">e</span><span class="p">.</span><span class="nx">query</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="c1">// Monitor pg Pool</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/admin/pool-stats&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">totalCount</span><span class="o">:</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">totalCount</span><span class="p">,</span><span class="w">     </span><span class="c1">// Total connections in pool</span>
+<span class="w">    </span><span class="nx">idleCount</span><span class="o">:</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">idleCount</span><span class="p">,</span><span class="w">       </span><span class="c1">// Idle connections</span>
+<span class="w">    </span><span class="nx">waitingCount</span><span class="o">:</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">waitingCount</span><span class="p">,</span><span class="w"> </span><span class="c1">// Clients waiting for connection</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// PgBouncer stats via SQL</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">getPgBouncerStats</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">pg</span><span class="p">.</span><span class="nx">Client</span><span class="p">(</span><span class="s1">&#39;postgresql://pgbouncer:6432/pgbouncer&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">connect</span><span class="p">();</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pools</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span><span class="s1">&#39;SHOW POOLS&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">stats</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span><span class="s1">&#39;SHOW STATS&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">clients</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span><span class="s1">&#39;SHOW CLIENTS&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">end</span><span class="p">();</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">pools</span><span class="o">:</span><span class="w"> </span><span class="nx">pools</span><span class="p">.</span><span class="nx">rows</span><span class="p">,</span><span class="w"> </span><span class="nx">stats</span><span class="o">:</span><span class="w"> </span><span class="nx">stats</span><span class="p">.</span><span class="nx">rows</span><span class="p">,</span><span class="w"> </span><span class="nx">clients</span><span class="o">:</span><span class="w"> </span><span class="nx">clients</span><span class="p">.</span><span class="nx">rows</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Pool Sizing Guidelines</h2>
+<div class="highlight"><pre><span></span><code>Rule of thumb for PostgreSQL:
+  max_connections = (CPU cores * 2) + effective_io_concurrency
+
+For a 4-core server: max_connections = (4 * 2) + 2 = 10
+
+PgBouncer allows many app connections mapped to fewer DB connections:
+  App instances: 10 (each with pool of 20)
+  PgBouncer max_client_conn: 200
+  PgBouncer max_db_connections: 20
+  PostgreSQL max_connections: 25 (20 + overhead)
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Too many connections</strong>: More connections != better performance. PostgreSQL performs worse with too many active connections due to context switching.</li>
+<li><strong>Prepared statements with PgBouncer transaction mode</strong>: PgBouncer in transaction mode doesn't support prepared statements across transactions. Use <code>pgbouncer=true</code> in Prisma.</li>
+<li><strong>Connection leak</strong>: Not releasing connections back to the pool (forgetting to call <code>client.release()</code> with pg). Use try/finally.</li>
+<li><strong>Pool timeout too short</strong>: Under load, pool exhaustion causes query failures. Set appropriate acquire timeout.</li>
+</ol>
+<h2>Summary</h2>
+<p>Connection pooling is essential for production Node.js applications. Application-level pooling (Prisma, Knex, pg.Pool) manages connections within a single process. PgBouncer provides external pooling that works across multiple application instances, dramatically reducing the number of PostgreSQL connections needed. Use transaction mode for the best connection reuse, and size your pool based on CPU cores rather than expected concurrent requests.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Pool Monitoring Dashboard</div>
+                    <div class="exercise-desc"><p>Create an Express endpoint that displays real-time connection pool statistics: total, idle, active, and waiting connections. Add warnings when pool utilization exceeds 80%.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use pg.Pool properties: totalCount, idleCount, waitingCount. Active = total - idle.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">PgBouncer Setup</div>
+                    <div class="exercise-desc"><p>Set up PgBouncer with Docker Compose in transaction mode. Connect a Node.js app through PgBouncer and verify connection reuse by checking pg_stat_activity.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the edoburu/pgbouncer Docker image. Query pg_stat_activity to see active connections. They should be much fewer than app connections.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Connection Leak Detector</div>
+                    <div class="exercise-desc"><p>Build a wrapper around pg.Pool that detects connection leaks: connections checked out for more than 30 seconds without being released.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Track checkout time per connection. Use setInterval to check for connections held longer than the threshold.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Application hangs under load with 'connection pool timeout' errors</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Application works fine under low load but hangs or returns errors under high load.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> All connections in the pool are in use and new queries cannot acquire a connection within the timeout period.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Increase pool size, optimize slow queries that hold connections too long, or add PgBouncer. Check for connection leaks (unreleased connections).
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Prisma errors with PgBouncer: 'prepared statement does not exist'</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> PgBouncer in transaction mode doesn't support named prepared statements across transactions, which Prisma uses by default.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Add `?pgbouncer=true` to your DATABASE_URL. This tells Prisma to use protocol-level prepared statements compatible with PgBouncer.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://www.pgbouncer.org/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">PgBouncer Documentation</div>
+                    
+                </a>
+                
+                <a href="https://www.prisma.io/docs/orm/prisma-client/setup-and-configuration/databases-connections/connection-pool" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Prisma Connection Pooling</div>
+                    
+                </a>
+                
+                <a href="https://wiki.postgresql.org/wiki/Number_Of_Database_Connections" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">PostgreSQL Connection Limits</div>
+                    
+                </a>
+                
+                <a href="https://github.com/brettwooldridge/HikariCP/wiki/About-Pool-Sizing" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Sizing Your Connection Pool</div>
+                    
+                    <div class="resource-note">HikariCP article but principles apply universally</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/8.4.2-js.html" class="btn">&larr; Sharding Strategies: Hash, Range, and Directory</a>
+            
+            
+            <a href="/backend-learning/lesson/8.4.4-js.html" class="btn">Partitioning and Query Optimization at Scale &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-js.html">&larr; Back to System Design & Scalability</a>
+        </div>
+    </div>
+</body>
+</html>

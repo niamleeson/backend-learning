@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Web Crawler (Google) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Infrastructure & Platform
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.4.3</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design a Web Crawler (Google)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>A web crawler is like a team of librarians exploring an infinite library. Each librarian (worker) picks a room (URL) from a shared to-do list (frontier), reads the books (downloads content), writes down references to other rooms (extracts links), and adds new rooms to the to-do list. A coordinator ensures no two librarians visit the same room, and everyone waits politely before re-entering any building (domain) they recently visited.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Web Crawler (Google)</h1>
+<h2>Introduction</h2>
+<p>A web crawler (also called a spider or bot) systematically browses the internet, downloading web pages and extracting links to discover new pages. Google's crawler (Googlebot) discovers and indexes billions of pages. This system design problem tests your ability to handle massive scale, politeness constraints, deduplication, distributed coordination, and storage of crawled content.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li>Crawl the web starting from a set of seed URLs</li>
+<li>Extract and follow hyperlinks from crawled pages</li>
+<li>Store the content of crawled pages for indexing</li>
+<li>Respect robots.txt rules and crawl delays</li>
+<li>Support configurable crawl depth and domain filters</li>
+<li>Detect and handle duplicate pages</li>
+<li>Re-crawl pages periodically to keep content fresh</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li><strong>Scale</strong>: Crawl 1 billion pages per day</li>
+<li><strong>Throughput</strong>: 10,000+ pages per second</li>
+<li><strong>Politeness</strong>: No more than 1 request per second per domain</li>
+<li><strong>Fault tolerance</strong>: Survive worker node failures without losing progress</li>
+<li><strong>Extensibility</strong>: Easy to add content extractors (images, PDFs, etc.)</li>
+</ul>
+<h3>Out of Scope</h3>
+<ul>
+<li>Full-text search indexing</li>
+<li>Page ranking algorithms</li>
+<li>JavaScript rendering (headless browser)</li>
+</ul>
+<h2>Step 2: Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Assumptions:
+- Target: 1 billion pages per day
+- Average page size: 100 KB (HTML only)
+- Average 50 links extracted per page
+- Average fetch time: 500ms per page
+
+Throughput:
+- 1 billion / 86,400 seconds = ~11,570 pages/second
+- Round up to 15,000 pages/second for peak headroom
+
+Bandwidth:
+- Download: 15,000 pages/s x 100 KB = 1.5 GB/s inbound
+- Daily download: 1B x 100 KB = 100 TB/day
+
+Storage:
+- Raw HTML storage: 100 TB/day
+- With compression (5x): ~20 TB/day
+- 30-day retention: 600 TB compressed
+- URL frontier (10 billion URLs): 10B x 100 bytes = 1 TB
+- URL dedup set: 10B x 8 bytes (hash) = 80 GB
+
+Compute:
+- If each worker crawls 20 pages/s: 15,000 / 20 = 750 worker instances
+- DNS resolution: cache needed to avoid DNS bottleneck
+- robots.txt cache: ~100 million domains x 1 KB = 100 GB
+</code></pre></div>
+
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────────────────────┐
+│                           WEB CRAWLER SYSTEM                            │
+│                                                                        │
+│  ┌──────────┐                                                          │
+│  │  Seed    │                                                          │
+│  │  URLs    │─────┐                                                    │
+│  └──────────┘     │                                                    │
+│                   ▼                                                    │
+│            ┌─────────────┐     ┌──────────────┐     ┌──────────────┐  │
+│            │   URL        │────&gt;│  URL         │────&gt;│  Fetcher     │  │
+│            │   Frontier   │     │  Dispatcher  │     │  Workers     │  │
+│            │   (Priority  │     │  (Politeness │     │  (HTTP GET)  │  │
+│            │    Queue)    │     │   Enforcer)  │     │              │  │
+│            └──────┬───────┘     └──────────────┘     └──────┬───────┘  │
+│                   ▲                                         │          │
+│                   │                                         ▼          │
+│                   │                                  ┌──────────────┐  │
+│                   │                                  │  Content     │  │
+│                   │                                  │  Parser      │  │
+│                   │                                  │  (Extract    │  │
+│                   │                                  │   Links)     │  │
+│                   │                                  └──────┬───────┘  │
+│                   │                                         │          │
+│                   │         ┌──────────────┐                │          │
+│                   │         │  URL         │                │          │
+│                   │◄────────│  Dedup       │◄───────────────┘          │
+│                   │         │  Filter      │                           │
+│                   │         │  (Bloom /    │     ┌──────────────┐      │
+│                   │         │   Redis Set) │     │  Content     │      │
+│                   │         └──────────────┘     │  Store       │      │
+│                   │                              │  (S3 / HDFS) │      │
+│                   │         ┌──────────────┐     └──────────────┘      │
+│                   │         │  robots.txt  │                           │
+│                   │         │  Cache       │     ┌──────────────┐      │
+│                   │         │  (Redis)     │     │  Metadata    │      │
+│                   │         └──────────────┘     │  DB          │      │
+│                   │                              │  (PostgreSQL)│      │
+│                   │                              └──────────────┘      │
+│                   │                                                    │
+│            ┌──────┴───────┐                                            │
+│            │  Re-crawl    │                                            │
+│            │  Scheduler   │                                            │
+│            └──────────────┘                                            │
+└──────────────────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>Step 4: Core Components</h2>
+<h3>URL Frontier</h3>
+<p>The URL frontier is a priority queue of URLs to be crawled. It must balance two concerns: priority (important pages first) and politeness (don't overwhelm any single domain).</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">URLFrontier</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">redis</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Add URL with priority score (lower = higher priority)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">enqueue</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">priority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">domain</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URL</span><span class="p">(</span><span class="nx">url</span><span class="p">).</span><span class="nx">hostname</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Per-domain queue for politeness</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">zadd</span><span class="p">(</span><span class="sb">`frontier:domain:</span><span class="si">${</span><span class="nx">domain</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">priority</span><span class="p">,</span><span class="w"> </span><span class="nx">url</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Global domain queue for round-robin across domains</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">sadd</span><span class="p">(</span><span class="s1">&#39;frontier:domains&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">domain</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Get next URL to crawl, respecting politeness</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">dequeue</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Round-robin across domains</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">domain</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">spop</span><span class="p">(</span><span class="s1">&#39;frontier:domains&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">domain</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Check if domain is on cooldown</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">cooldownKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`frontier:cooldown:</span><span class="si">${</span><span class="nx">domain</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">onCooldown</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">exists</span><span class="p">(</span><span class="nx">cooldownKey</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">onCooldown</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Put domain back and try another</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">sadd</span><span class="p">(</span><span class="s1">&#39;frontier:domains&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">domain</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Pop highest-priority URL from this domain</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">zpopmin</span><span class="p">(</span><span class="sb">`frontier:domain:</span><span class="si">${</span><span class="nx">domain</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="mf">1</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">results</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">results</span><span class="p">[</span><span class="mf">0</span><span class="p">];</span>
+
+<span class="w">    </span><span class="c1">// Set cooldown for this domain (1 second politeness delay)</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">cooldownKey</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;1&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;PX&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">1000</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// If domain has more URLs, put it back in the global set</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">remaining</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">zcard</span><span class="p">(</span><span class="sb">`frontier:domain:</span><span class="si">${</span><span class="nx">domain</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">remaining</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">sadd</span><span class="p">(</span><span class="s1">&#39;frontier:domains&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">domain</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">domain</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">size</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">domains</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">smembers</span><span class="p">(</span><span class="s1">&#39;frontier:domains&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">total</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">domain</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">domains</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">zcard</span><span class="p">(</span><span class="sb">`frontier:domain:</span><span class="si">${</span><span class="nx">domain</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">total</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>URL Deduplication with Bloom Filter</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">BloomFilter</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bloom-filters&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">URLDeduplicator</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Bloom filter: 10 billion items, 0.01% false positive rate</span>
+<span class="w">    </span><span class="c1">// For production, use a distributed Bloom filter (Redis BF.ADD)</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">bloomFilter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">BloomFilter</span><span class="p">.</span><span class="nx">create</span><span class="p">(</span><span class="mf">10</span><span class="nx">_000_000_000</span><span class="p">,</span><span class="w"> </span><span class="mf">0.0001</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">normalizeURL</span><span class="p">(</span><span class="nx">url</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">parsed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URL</span><span class="p">(</span><span class="nx">url</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// Remove fragments, trailing slashes, normalize</span>
+<span class="w">    </span><span class="nx">parsed</span><span class="p">.</span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">normalized</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">parsed</span><span class="p">.</span><span class="nx">toString</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">normalized</span><span class="p">.</span><span class="nx">endsWith</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">normalized</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">normalized</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="o">-</span><span class="mf">1</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">normalized</span><span class="p">.</span><span class="nx">toLowerCase</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">fingerprint</span><span class="p">(</span><span class="nx">url</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">createHash</span><span class="p">(</span><span class="s1">&#39;sha256&#39;</span><span class="p">).</span><span class="nx">update</span><span class="p">(</span><span class="nx">url</span><span class="p">).</span><span class="nx">digest</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">).</span><span class="nx">slice</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="mf">16</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">isDuplicate</span><span class="p">(</span><span class="nx">url</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">normalized</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">normalizeURL</span><span class="p">(</span><span class="nx">url</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">fp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">fingerprint</span><span class="p">(</span><span class="nx">normalized</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Fast check with Bloom filter</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">this</span><span class="p">.</span><span class="nx">bloomFilter</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">fp</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span><span class="w"> </span><span class="c1">// Definitely not seen</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Bloom filter says maybe seen - verify with Redis</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">exists</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">sismember</span><span class="p">(</span><span class="s1">&#39;crawled:urls&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">fp</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">exists</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">markCrawled</span><span class="p">(</span><span class="nx">url</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">normalized</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">normalizeURL</span><span class="p">(</span><span class="nx">url</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">fp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">fingerprint</span><span class="p">(</span><span class="nx">normalized</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">bloomFilter</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="nx">fp</span><span class="p">);</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">sadd</span><span class="p">(</span><span class="s1">&#39;crawled:urls&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">fp</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Fetcher Worker</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="nx">cheerio</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;cheerio&#39;</span><span class="p">;</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">FetcherWorker</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">frontier</span><span class="p">,</span><span class="w"> </span><span class="nx">dedup</span><span class="p">,</span><span class="w"> </span><span class="nx">contentStore</span><span class="p">,</span><span class="w"> </span><span class="nx">robotsCache</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">frontier</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">frontier</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">dedup</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">dedup</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">contentStore</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">contentStore</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">robotsCache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">robotsCache</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">userAgent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;MyBot/1.0 (+https://mybot.example.com)&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">run</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="kc">true</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">item</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">frontier</span><span class="p">.</span><span class="nx">dequeue</span><span class="p">();</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">item</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">setTimeout</span><span class="p">(</span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="mf">100</span><span class="p">));</span>
+<span class="w">        </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">crawl</span><span class="p">(</span><span class="nx">item</span><span class="p">.</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">item</span><span class="p">.</span><span class="nx">domain</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`Failed to crawl </span><span class="si">${</span><span class="nx">item</span><span class="p">.</span><span class="nx">url</span><span class="si">}</span><span class="sb">:`</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">crawl</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">domain</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Check robots.txt</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">allowed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">robotsCache</span><span class="p">.</span><span class="nx">isAllowed</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">userAgent</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">allowed</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Fetch the page</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">controller</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">AbortController</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">setTimeout</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">controller</span><span class="p">.</span><span class="nx">abort</span><span class="p">(),</span><span class="w"> </span><span class="mf">10000</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="s1">&#39;User-Agent&#39;</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">userAgent</span><span class="p">,</span>
+<span class="w">        </span><span class="s1">&#39;Accept&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;text/html&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">signal</span><span class="o">:</span><span class="w"> </span><span class="nx">controller</span><span class="p">.</span><span class="nx">signal</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">redirect</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;follow&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="nx">clearTimeout</span><span class="p">(</span><span class="nx">timeout</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">response</span><span class="p">.</span><span class="nx">ok</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">contentType</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">headers</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;content-type&#39;</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">contentType</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;text/html&#39;</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">html</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">text</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">html</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">5</span><span class="nx">_000_000</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span><span class="w"> </span><span class="c1">// Skip pages &gt; 5MB</span>
+
+<span class="w">    </span><span class="c1">// Store content</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">contentStore</span><span class="p">.</span><span class="nx">store</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">html</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">statusCode</span><span class="o">:</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">status</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">contentType</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">crawledAt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">(),</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// Mark URL as crawled</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">dedup</span><span class="p">.</span><span class="nx">markCrawled</span><span class="p">(</span><span class="nx">url</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Extract and enqueue new links</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">links</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">extractLinks</span><span class="p">(</span><span class="nx">html</span><span class="p">,</span><span class="w"> </span><span class="nx">url</span><span class="p">);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">link</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">links</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">isDup</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">dedup</span><span class="p">.</span><span class="nx">isDuplicate</span><span class="p">(</span><span class="nx">link</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">isDup</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">priority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">computePriority</span><span class="p">(</span><span class="nx">link</span><span class="p">);</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">frontier</span><span class="p">.</span><span class="nx">enqueue</span><span class="p">(</span><span class="nx">link</span><span class="p">,</span><span class="w"> </span><span class="nx">priority</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">extractLinks</span><span class="p">(</span><span class="nx">html</span><span class="p">,</span><span class="w"> </span><span class="nx">baseURL</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">$</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">cheerio</span><span class="p">.</span><span class="nx">load</span><span class="p">(</span><span class="nx">html</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">links</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Set</span><span class="p">();</span>
+
+<span class="w">    </span><span class="nx">$</span><span class="p">(</span><span class="s1">&#39;a[href]&#39;</span><span class="p">).</span><span class="nx">each</span><span class="p">((</span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">el</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">href</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">$</span><span class="p">(</span><span class="nx">el</span><span class="p">).</span><span class="nx">attr</span><span class="p">(</span><span class="s1">&#39;href&#39;</span><span class="p">);</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">absolute</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URL</span><span class="p">(</span><span class="nx">href</span><span class="p">,</span><span class="w"> </span><span class="nx">baseURL</span><span class="p">).</span><span class="nx">toString</span><span class="p">();</span>
+<span class="w">        </span><span class="c1">// Only follow HTTP/HTTPS links</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">absolute</span><span class="p">.</span><span class="nx">startsWith</span><span class="p">(</span><span class="s1">&#39;http://&#39;</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">absolute</span><span class="p">.</span><span class="nx">startsWith</span><span class="p">(</span><span class="s1">&#39;https://&#39;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">links</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="nx">absolute</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Invalid URL, skip</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">Array</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">links</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">computePriority</span><span class="p">(</span><span class="nx">url</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Higher priority for well-known domains</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">domain</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URL</span><span class="p">(</span><span class="nx">url</span><span class="p">).</span><span class="nx">hostname</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">domain</span><span class="p">.</span><span class="nx">endsWith</span><span class="p">(</span><span class="s1">&#39;.edu&#39;</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">domain</span><span class="p">.</span><span class="nx">endsWith</span><span class="p">(</span><span class="s1">&#39;.gov&#39;</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">domain</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;wikipedia&#39;</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mf">2</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// Lower priority for deep paths</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">depth</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">url</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">).</span><span class="nx">length</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nx">depth</span><span class="p">,</span><span class="w"> </span><span class="mf">10</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Robots.txt Cache</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">RobotsTxtCache</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">redis</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">TTL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">86400</span><span class="p">;</span><span class="w"> </span><span class="c1">// Cache for 24 hours</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">isAllowed</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">userAgent</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">parsed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URL</span><span class="p">(</span><span class="nx">url</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">robotsUrl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">parsed</span><span class="p">.</span><span class="nx">protocol</span><span class="si">}</span><span class="sb">//</span><span class="si">${</span><span class="nx">parsed</span><span class="p">.</span><span class="nx">host</span><span class="si">}</span><span class="sb">/robots.txt`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">cacheKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`robots:</span><span class="si">${</span><span class="nx">parsed</span><span class="p">.</span><span class="nx">host</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">rules</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">cacheKey</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">rules</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">robotsUrl</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">signal</span><span class="o">:</span><span class="w"> </span><span class="nx">AbortSignal</span><span class="p">.</span><span class="nx">timeout</span><span class="p">(</span><span class="mf">5000</span><span class="p">)</span><span class="w"> </span><span class="p">});</span>
+<span class="w">        </span><span class="nx">rules</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">ok</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">text</span><span class="p">()</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">rules</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">;</span><span class="w"> </span><span class="c1">// Allow crawling if robots.txt is inaccessible</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">cacheKey</span><span class="p">,</span><span class="w"> </span><span class="nx">rules</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">TTL</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">parseAndCheck</span><span class="p">(</span><span class="nx">rules</span><span class="p">,</span><span class="w"> </span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">userAgent</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">parseAndCheck</span><span class="p">(</span><span class="nx">robotsTxt</span><span class="p">,</span><span class="w"> </span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">userAgent</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Simplified robots.txt parsing</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URL</span><span class="p">(</span><span class="nx">url</span><span class="p">).</span><span class="nx">pathname</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">lines</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">robotsTxt</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">&#39;\n&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">relevant</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">disallowed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">line</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">lines</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">trimmed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">line</span><span class="p">.</span><span class="nx">trim</span><span class="p">();</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">trimmed</span><span class="p">.</span><span class="nx">toLowerCase</span><span class="p">().</span><span class="nx">startsWith</span><span class="p">(</span><span class="s1">&#39;user-agent:&#39;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">trimmed</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">&#39;:&#39;</span><span class="p">)[</span><span class="mf">1</span><span class="p">].</span><span class="nx">trim</span><span class="p">();</span>
+<span class="w">        </span><span class="nx">relevant</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">agent</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;*&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">userAgent</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="nx">agent</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">relevant</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">trimmed</span><span class="p">.</span><span class="nx">toLowerCase</span><span class="p">().</span><span class="nx">startsWith</span><span class="p">(</span><span class="s1">&#39;disallow:&#39;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">pattern</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">trimmed</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">&#39;:&#39;</span><span class="p">)[</span><span class="mf">1</span><span class="p">].</span><span class="nx">trim</span><span class="p">();</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">pattern</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">path</span><span class="p">.</span><span class="nx">startsWith</span><span class="p">(</span><span class="nx">pattern</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 5: Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Crawled page metadata</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">crawled_pages</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">url</span><span class="w">             </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">url_hash</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">UNIQUE</span><span class="p">,</span><span class="w"> </span><span class="c1">-- SHA-256 of normalized URL</span>
+<span class="w">    </span><span class="k">domain</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">253</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">status_code</span><span class="w">     </span><span class="nb">SMALLINT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">content_type</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">),</span>
+<span class="w">    </span><span class="n">content_hash</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">),</span><span class="w">     </span><span class="c1">-- For detecting content changes</span>
+<span class="w">    </span><span class="n">content_length</span><span class="w">  </span><span class="nb">INTEGER</span><span class="p">,</span>
+<span class="w">    </span><span class="n">storage_path</span><span class="w">    </span><span class="nb">TEXT</span><span class="p">,</span><span class="w">            </span><span class="c1">-- S3/HDFS path to stored HTML</span>
+<span class="w">    </span><span class="n">crawled_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">next_crawl_at</span><span class="w">   </span><span class="k">TIMESTAMP</span><span class="p">,</span><span class="w">       </span><span class="c1">-- For re-crawl scheduling</span>
+<span class="w">    </span><span class="n">crawl_depth</span><span class="w">     </span><span class="nb">SMALLINT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">)</span><span class="w"> </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">HASH</span><span class="w"> </span><span class="p">(</span><span class="n">url_hash</span><span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_pages_domain</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">crawled_pages</span><span class="p">(</span><span class="k">domain</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_pages_next_crawl</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">crawled_pages</span><span class="p">(</span><span class="n">next_crawl_at</span><span class="p">)</span>
+<span class="w">    </span><span class="k">WHERE</span><span class="w"> </span><span class="n">next_crawl_at</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">;</span>
+
+<span class="c1">-- Domain metadata and politeness tracking</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">domains</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="k">domain</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">253</span><span class="p">)</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">robots_txt</span><span class="w">      </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">robots_fetched</span><span class="w">  </span><span class="k">TIMESTAMP</span><span class="p">,</span>
+<span class="w">    </span><span class="n">crawl_delay_ms</span><span class="w">  </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
+<span class="w">    </span><span class="n">last_crawled</span><span class="w">    </span><span class="k">TIMESTAMP</span><span class="p">,</span>
+<span class="w">    </span><span class="n">pages_crawled</span><span class="w">   </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">avg_page_size</span><span class="w">   </span><span class="nb">INTEGER</span><span class="p">,</span>
+<span class="w">    </span><span class="n">is_blocked</span><span class="w">      </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">FALSE</span>
+<span class="p">);</span>
+
+<span class="c1">-- Crawl queue (used alongside Redis frontier for persistence)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">crawl_queue</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">url</span><span class="w">             </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">url_hash</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="k">domain</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">253</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">priority</span><span class="w">        </span><span class="nb">SMALLINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">    </span><span class="n">discovered_at</span><span class="w">   </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;pending&#39;</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_queue_status_priority</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">crawl_queue</span><span class="p">(</span><span class="n">status</span><span class="p">,</span><span class="w"> </span><span class="n">priority</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Step 6: Scaling Strategies</h2>
+<h3>Geographic Distribution</h3>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────┐
+│             Crawler Coordinator (Central)             │
+│             - URL assignment to regions               │
+│             - Global dedup                            │
+└───────┬──────────────────┬──────────────────┬────────┘
+        │                  │                  │
+        ▼                  ▼                  ▼
+ ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+ │ US Crawler   │  │ EU Crawler   │  │ Asia Crawler │
+ │ Cluster      │  │ Cluster      │  │ Cluster      │
+ │ (crawls .com,│  │ (crawls .eu, │  │ (crawls .jp, │
+ │  .org, .edu) │  │  .co.uk, .de)│  │  .cn, .kr)   │
+ └──────────────┘  └──────────────┘  └──────────────┘
+
+Benefit: Lower latency to target servers,
+         reduced cross-ocean bandwidth
+</code></pre></div>
+
+<h3>Content Deduplication</h3>
+<p>Many pages have identical content (mirrors, syndication). Use content fingerprinting:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">simhash</span><span class="p">(</span><span class="nx">text</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// SimHash for near-duplicate detection</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">tokens</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">text</span><span class="p">.</span><span class="nx">toLowerCase</span><span class="p">().</span><span class="nx">split</span><span class="p">(</span><span class="sr">/\s+/</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">hashBits</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">64</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">vector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Array</span><span class="p">(</span><span class="nx">hashBits</span><span class="p">).</span><span class="nx">fill</span><span class="p">(</span><span class="mf">0</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">token</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">tokens</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">createHash</span><span class="p">(</span><span class="s1">&#39;md5&#39;</span><span class="p">).</span><span class="nx">update</span><span class="p">(</span><span class="nx">token</span><span class="p">).</span><span class="nx">digest</span><span class="p">();</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">hashBits</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">byteIndex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">i</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">8</span><span class="p">);</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">bitIndex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mf">8</span><span class="p">;</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">bit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">hash</span><span class="p">[</span><span class="nx">byteIndex</span><span class="p">]</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="nx">bitIndex</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">vector</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">bit</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="o">-</span><span class="mf">1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">fingerprint</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">BigInt</span><span class="p">(</span><span class="mf">0</span><span class="p">);</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">hashBits</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">vector</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">fingerprint</span><span class="w"> </span><span class="o">|=</span><span class="w"> </span><span class="nb">BigInt</span><span class="p">(</span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="nb">BigInt</span><span class="p">(</span><span class="nx">i</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">fingerprint</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Two pages are near-duplicates if Hamming distance &lt; 3</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">hammingDistance</span><span class="p">(</span><span class="nx">a</span><span class="p">,</span><span class="w"> </span><span class="nx">b</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">xor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">a</span><span class="w"> </span><span class="o">^</span><span class="w"> </span><span class="nx">b</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nx">xor</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">count</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nb">Number</span><span class="p">(</span><span class="nx">xor</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mi">1n</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">xor</span><span class="w"> </span><span class="o">&gt;&gt;=</span><span class="w"> </span><span class="mi">1n</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">count</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Re-crawl Scheduling</h3>
+<p>Not all pages need to be re-crawled at the same frequency:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">function</span><span class="w"> </span><span class="nx">computeRecrawlInterval</span><span class="p">(</span><span class="nx">page</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// News sites: re-crawl every hour</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">page</span><span class="p">.</span><span class="nx">domain</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;news&#39;</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">page</span><span class="p">.</span><span class="nx">changeFrequency</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;hourly&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mf">3600</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// Frequently changing pages: daily</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">page</span><span class="p">.</span><span class="nx">contentChangedLastCrawl</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mf">24</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">3600</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// Static pages: weekly</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mf">7</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">24</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">3600</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 7: Trade-offs and Decisions</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>URL frontier</td>
+<td>Redis sorted sets</td>
+<td>Kafka partitioned by domain</td>
+<td>Redis for flexibility; Kafka for extreme throughput</td>
+</tr>
+<tr>
+<td>Content storage</td>
+<td>S3</td>
+<td>HDFS</td>
+<td>S3 for managed infrastructure; HDFS for on-prem</td>
+</tr>
+<tr>
+<td>Dedup strategy</td>
+<td>Bloom filter</td>
+<td>Redis HyperLogLog</td>
+<td>Bloom filter for exact URL dedup; SimHash for content dedup</td>
+</tr>
+<tr>
+<td>Politeness</td>
+<td>Per-domain rate limit</td>
+<td>Adaptive delay from robots.txt</td>
+<td>Both: respect robots.txt crawl-delay, minimum 1s default</td>
+</tr>
+<tr>
+<td>Link extraction</td>
+<td>Cheerio (fast, no JS)</td>
+<td>Puppeteer (full rendering)</td>
+<td>Cheerio for most pages; Puppeteer for JS-heavy sites</td>
+</tr>
+</tbody>
+</table>
+<h3>Trap Detection</h3>
+<p>Some websites generate infinite URLs (calendar pages, query parameter combinations). Detect and avoid URL traps:</p>
+<ul>
+<li>Limit crawl depth per domain</li>
+<li>Detect URL patterns that grow infinitely (e.g., /page/1, /page/2, ...)</li>
+<li>Limit total pages per domain</li>
+<li>Detect soft-404 pages (200 status but generic content)</li>
+</ul>
+<h2>Summary</h2>
+<p>A web crawler at scale requires a URL frontier with politeness enforcement, distributed fetcher workers, URL deduplication via Bloom filters, robots.txt compliance, and efficient content storage. The key challenges are scale (billions of pages), politeness (don't overwhelm target servers), deduplication (avoid re-crawling identical content), and freshness (re-crawl changing pages more frequently). Geographic distribution of crawler clusters reduces latency and bandwidth costs.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Basic Web Crawler</div>
+                    <div class="exercise-desc"><p>Create a Node.js web crawler that starts from a seed URL, fetches pages, extracts links using cheerio, and follows them up to depth 3. Implement a visited set to avoid re-crawling. Limit to a single domain. Output the site map.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a BFS approach with a queue. Track visited URLs in a Set. Use new URL(href, baseURL) to resolve relative links.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement a Politeness Layer</div>
+                    <div class="exercise-desc"><p>Extend the basic crawler to respect robots.txt rules and enforce a 1-second delay between requests to the same domain. Use a per-domain queue with timestamps to track last request time.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Fetch and parse robots.txt before crawling any domain. Use a Map<domain, lastRequestTime> and await a delay if less than 1 second has passed.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">URL Deduplication at Scale</div>
+                    <div class="exercise-desc"><p>Implement a Bloom filter-based URL deduplicator. Insert 1 million random URLs into it and measure false positive rate. Compare memory usage vs a Set-based approach.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the 'bloom-filters' npm package or implement a simple Bloom filter with multiple hash functions. A Set of 1M URLs uses ~200MB vs a Bloom filter using ~2MB.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Crawler gets stuck in URL traps (infinite URLs from the same domain)</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> The frontier grows unboundedly for certain domains. The crawler spends all its time on a few domains while ignoring others.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Calendar pages, search result pages, or dynamically generated paths create infinite URL variations (e.g., /calendar?date=2026-01-01, /calendar?date=2026-01-02, ...).
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement max URL depth per domain, detect repeating URL patterns with regex, limit pages per domain, and use URL fingerprinting that ignores query parameter values to detect structural duplicates.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">DNS resolution becomes a bottleneck at high crawl rates</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Each page fetch requires a DNS lookup, and the default system resolver cannot handle 15,000 lookups per second. DNS timeouts cause cascading slowdowns.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement an in-process DNS cache with TTL. Use a dedicated DNS resolver (like dnsmasq) on each crawler node. Pre-resolve DNS for domains in the frontier. Batch DNS lookups.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Downloaded content consumes storage faster than expected</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> No deduplication of page content across URLs, and no filtering of low-value pages (error pages, login walls, pagination duplicates).
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use content hashing (SHA-256) to detect exact duplicates and SimHash for near-duplicates. Filter out pages below a minimum content threshold. Compress stored HTML with gzip/brotli.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://nlp.stanford.edu/IR-book/html/htmledition/web-crawling-and-indexes-1.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag academic">academic</div>
+                    <div class="resource-title">Web Crawling and Indexing - Stanford InfoLab</div>
+                    
+                    <div class="resource-note">Academic treatment of web crawling from the Information Retrieval textbook</div>
+                    
+                </a>
+                
+                <a href="https://courses.cs.washington.edu/courses/cse454/10au/papers/mercator.pdf" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag paper">paper</div>
+                    <div class="resource-title">Mercator: A Scalable, Extensible Web Crawler</div>
+                    
+                    <div class="resource-note">Seminal paper on building a scalable web crawler, covers URL frontier and politeness</div>
+                    
+                </a>
+                
+                <a href="https://cheerio.js.org/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Cheerio Documentation</div>
+                    
+                    <div class="resource-note">Fast, flexible HTML parser for Node.js used for link extraction in crawlers</div>
+                    
+                </a>
+                
+                <a href="https://llimllib.github.io/bloomfilter-tutorial/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag interactive">interactive</div>
+                    <div class="resource-title">Bloom Filter - Interactive Visualization</div>
+                    
+                    <div class="resource-note">Visual explanation of how Bloom filters work, essential for URL deduplication at scale</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.4.2-js.html" class="btn">&larr; Design a Distributed Task Scheduler</a>
+            
+            
+            <a href="/backend-learning/lesson/9.4.4-js.html" class="btn">Design a Content Delivery Network (CDN) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

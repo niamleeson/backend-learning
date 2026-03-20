@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Payment System (Stripe) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            E-Commerce & Marketplace
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.3.2</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a Payment System (Stripe)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a payment system like a very meticulous accountant. Every time money moves, the accountant writes two entries in an ink-only ledger: one account goes up, another goes down. If they make a mistake, they do not erase -- they write a new correcting entry. The idempotency key is like a receipt number: if you show the same receipt twice, the accountant says 'already processed' instead of recording it again. This is exactly how banks have worked for centuries -- the digital version just needs to handle it at internet speed.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Payment System (Stripe)</h1>
+<h2>Introduction</h2>
+<p>A payment system is one of the most critical components of any commerce platform. Designing a system like Stripe involves handling money transfers between buyers, sellers, and financial institutions with absolute correctness. A single bug can mean lost money, duplicate charges, or regulatory violations. This design focuses on building a payment processing platform that handles card payments, manages merchant accounts, ensures idempotency, and maintains an audit trail.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li><strong>Payment Processing</strong>: Accept card payments, process charges, handle refunds</li>
+<li><strong>Merchant Management</strong>: Onboard merchants, manage API keys, configure webhooks</li>
+<li><strong>Payment Methods</strong>: Store and tokenize credit/debit cards securely</li>
+<li><strong>Payouts</strong>: Transfer funds from merchant balance to their bank accounts</li>
+<li><strong>Webhooks</strong>: Notify merchants of payment events asynchronously</li>
+<li><strong>Idempotency</strong>: Every payment operation must be safely retryable</li>
+<li><strong>Ledger</strong>: Maintain a complete, immutable record of all financial transactions</li>
+<li><strong>Dispute Management</strong>: Handle chargebacks and disputes</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li><strong>Consistency</strong>: Exactly-once payment processing (no double charges)</li>
+<li><strong>Availability</strong>: 99.999% uptime for payment processing</li>
+<li><strong>Latency</strong>: Process a payment in &lt; 2 seconds</li>
+<li><strong>Security</strong>: PCI DSS Level 1 compliance, encryption at rest and in transit</li>
+<li><strong>Auditability</strong>: Complete transaction history, immutable ledger</li>
+<li><strong>Regulatory</strong>: Support for different currencies, tax calculations, compliance</li>
+</ul>
+<h2>Step 2: Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Assumptions:
+- 1M merchants
+- 500M transactions/month
+- Average transaction: $50
+- Total processed: $25B/month
+- Peak: 3x average (Black Friday, holidays)
+
+Traffic:
+- Transactions: 500M/month = ~190 TPS avg
+- Peak: ~570 TPS
+- API calls (including status checks, webhooks): 10x transactions = ~1,900 TPS avg
+
+Storage:
+- Transaction record: ~2KB each
+- 500M * 2KB = 1TB/month
+- Ledger entries: 3-5 per transaction (auth, capture, settle) = ~5TB/month
+- 5-year retention: ~300TB
+
+Bandwidth:
+- Inbound: ~190 * 2KB = 380KB/s avg
+- Outbound (webhooks): ~190 * 1KB * 3 retries = 570KB/s avg
+</code></pre></div>
+
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌───────────┐      ┌──────────────┐      ┌──────────────┐
+│  Merchant │─────&gt;│  API Gateway  │─────&gt;│  Payment     │
+│  Server   │      │  (Auth, Rate  │      │  Service     │
+│           │&lt;─────│   Limit, TLS) │&lt;─────│              │
+└───────────┘      └──────────────┘      └──────┬───────┘
+                                                │
+                   ┌────────────────────────────┤
+                   │                            │
+            ┌──────┴───────┐            ┌───────┴──────┐
+            │  Idempotency │            │   Payment    │
+            │  Service     │            │   Router     │
+            │  (Redis)     │            │              │
+            └──────────────┘            └───────┬──────┘
+                                                │
+                          ┌─────────────────────┼─────────────────────┐
+                          │                     │                     │
+                   ┌──────┴──────┐      ┌───────┴──────┐     ┌───────┴──────┐
+                   │  Card       │      │  Bank        │     │  Wallet      │
+                   │  Network    │      │  Transfer    │     │  Service     │
+                   │  (Visa/MC)  │      │  (ACH/SEPA)  │     │              │
+                   └─────────────┘      └──────────────┘     └──────────────┘
+                          │
+            ┌─────────────┴─────────────┐
+            │                           │
+     ┌──────┴───────┐          ┌────────┴─────┐
+     │   Ledger     │          │   Webhook    │
+     │   Service    │          │   Service    │
+     │ (Immutable   │          │ (Async       │
+     │  append-only)│          │  delivery)   │
+     └──────┬───────┘          └────────┬─────┘
+            │                           │
+     ┌──────┴───────┐          ┌────────┴─────┐
+     │  Ledger DB   │          │  Message     │
+     │  (Postgres   │          │  Queue       │
+     │   append)    │          │  (Kafka)     │
+     └──────────────┘          └──────────────┘
+</code></pre></div>
+
+<h2>Step 4: API Design</h2>
+<h3>Payment Intent (Two-Phase Commit Pattern)</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// POST /api/payment-intents</span>
+<span class="c1">// Creates a payment intent (authorization hold)</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/payment-intents&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticateMerchant</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">amount</span><span class="p">,</span><span class="w"> </span><span class="nx">currency</span><span class="p">,</span><span class="w"> </span><span class="nx">paymentMethodId</span><span class="p">,</span><span class="w"> </span><span class="nx">metadata</span><span class="p">,</span><span class="w"> </span><span class="nx">idempotencyKey</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 1. Idempotency check</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">existingResult</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">idempotencyService</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">idempotencyKey</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existingResult</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">200</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">existingResult</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 2. Validate payment method</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">paymentMethod</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">vaultService</span><span class="p">.</span><span class="nx">getPaymentMethod</span><span class="p">(</span><span class="nx">paymentMethodId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">paymentMethod</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid payment method&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 3. Create payment intent record</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="sb">`pi_</span><span class="si">${</span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomUUID</span><span class="p">().</span><span class="nx">replace</span><span class="p">(</span><span class="sr">/-/g</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">merchantId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">merchant</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">amount</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">currency</span><span class="o">:</span><span class="w"> </span><span class="nx">currency</span><span class="p">.</span><span class="nx">toUpperCase</span><span class="p">(),</span>
+<span class="w">      </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;CREATED&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">paymentMethodId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">metadata</span><span class="o">:</span><span class="w"> </span><span class="nx">metadata</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">{},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// 4. Store idempotency result</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">idempotencyService</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">idempotencyKey</span><span class="p">,</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">,</span><span class="w"> </span><span class="mf">86400</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">paymentIntent</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// POST /api/payment-intents/:id/confirm</span>
+<span class="c1">// Actually processes the payment</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/payment-intents/:id/confirm&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticateMerchant</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">idempotencyKey</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">existingResult</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">idempotencyService</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">idempotencyKey</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existingResult</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">existingResult</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">paymentIntent</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Not found&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;CREATED&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="sb">`Cannot confirm: status is </span><span class="si">${</span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">status</span><span class="si">}</span><span class="sb">`</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 5. Process via payment processor (card network)</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">processorResult</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">paymentProcessor</span><span class="p">.</span><span class="nx">authorize</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">amount</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">currency</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">currency</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">paymentMethodToken</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">paymentMethodId</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// 6. Update status and create ledger entries atomically</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$transaction</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">tx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">updated</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">update</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="nx">processorResult</span><span class="p">.</span><span class="nx">authorized</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;SUCCEEDED&#39;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;FAILED&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">processorId</span><span class="o">:</span><span class="w"> </span><span class="nx">processorResult</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">failureReason</span><span class="o">:</span><span class="w"> </span><span class="nx">processorResult</span><span class="p">.</span><span class="nx">declineReason</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">});</span>
+
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">processorResult</span><span class="p">.</span><span class="nx">authorized</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Double-entry ledger</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">ledgerEntry</span><span class="p">.</span><span class="nx">createMany</span><span class="p">({</span>
+<span class="w">          </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">            </span><span class="p">{</span>
+<span class="w">              </span><span class="nx">paymentIntentId</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">              </span><span class="nx">accountId</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">merchantId</span><span class="p">,</span>
+<span class="w">              </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;CREDIT&#39;</span><span class="p">,</span>
+<span class="w">              </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">amount</span><span class="p">,</span>
+<span class="w">              </span><span class="nx">currency</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">currency</span><span class="p">,</span>
+<span class="w">            </span><span class="p">},</span>
+<span class="w">            </span><span class="p">{</span>
+<span class="w">              </span><span class="nx">paymentIntentId</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">              </span><span class="nx">accountId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;PLATFORM_RECEIVABLE&#39;</span><span class="p">,</span>
+<span class="w">              </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;DEBIT&#39;</span><span class="p">,</span>
+<span class="w">              </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">amount</span><span class="p">,</span>
+<span class="w">              </span><span class="nx">currency</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">currency</span><span class="p">,</span>
+<span class="w">            </span><span class="p">},</span>
+<span class="w">          </span><span class="p">],</span>
+<span class="w">        </span><span class="p">});</span>
+
+<span class="w">        </span><span class="c1">// Update merchant balance</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">merchantBalance</span><span class="p">.</span><span class="nx">update</span><span class="p">({</span>
+<span class="w">          </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">merchantId</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">merchantId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">pendingBalance</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">increment</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">amount</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">updated</span><span class="p">;</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// 7. Emit event for webhook delivery</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">kafka</span><span class="p">.</span><span class="nx">produce</span><span class="p">(</span><span class="s1">&#39;payment.events&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;SUCCEEDED&#39;</span>
+<span class="w">        </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;payment_intent.succeeded&#39;</span>
+<span class="w">        </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;payment_intent.failed&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">idempotencyService</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">idempotencyKey</span><span class="p">,</span><span class="w"> </span><span class="nx">result</span><span class="p">,</span><span class="w"> </span><span class="mf">86400</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// On error, mark as failed</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">update</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;FAILED&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">failureReason</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Payment processing failed&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Refund API</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/refunds</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/refunds&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticateMerchant</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">paymentIntentId</span><span class="p">,</span><span class="w"> </span><span class="nx">amount</span><span class="p">,</span><span class="w"> </span><span class="nx">reason</span><span class="p">,</span><span class="w"> </span><span class="nx">idempotencyKey</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">existingResult</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">idempotencyService</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">idempotencyKey</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existingResult</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">existingResult</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntentId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">paymentIntent</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;SUCCEEDED&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Cannot refund this payment&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">refundedSoFar</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">refund</span><span class="p">.</span><span class="nx">aggregate</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">paymentIntentId</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;SUCCEEDED&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">_sum</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">refundableAmount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">amount</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="nx">refundedSoFar</span><span class="p">.</span><span class="nx">_sum</span><span class="p">.</span><span class="nx">amount</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">refundAmount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">amount</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">refundableAmount</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">refundAmount</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">refundableAmount</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Refund exceeds refundable amount&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">refund</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$transaction</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">tx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">refund</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">refund</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="sb">`re_</span><span class="si">${</span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomUUID</span><span class="p">().</span><span class="nx">replace</span><span class="p">(</span><span class="sr">/-/g</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">paymentIntentId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="nx">refundAmount</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">currency</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">currency</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">reason</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;PENDING&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// Reverse ledger entries</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">ledgerEntry</span><span class="p">.</span><span class="nx">createMany</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">refundId</span><span class="o">:</span><span class="w"> </span><span class="nx">refund</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">accountId</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">merchantId</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;DEBIT&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="nx">refundAmount</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">currency</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">currency</span><span class="p">,</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">refundId</span><span class="o">:</span><span class="w"> </span><span class="nx">refund</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">accountId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;PLATFORM_RECEIVABLE&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;CREDIT&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="nx">refundAmount</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">currency</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">currency</span><span class="p">,</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">],</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">merchantBalance</span><span class="p">.</span><span class="nx">update</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">merchantId</span><span class="o">:</span><span class="w"> </span><span class="nx">paymentIntent</span><span class="p">.</span><span class="nx">merchantId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">pendingBalance</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">decrement</span><span class="o">:</span><span class="w"> </span><span class="nx">refundAmount</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">refund</span><span class="p">;</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Process refund with card network asynchronously</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">refundQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;process-refund&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">refundId</span><span class="o">:</span><span class="w"> </span><span class="nx">refund</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">idempotencyService</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">idempotencyKey</span><span class="p">,</span><span class="w"> </span><span class="nx">refund</span><span class="p">,</span><span class="w"> </span><span class="mf">86400</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">refund</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 5: Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Merchants</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">merchants</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">email</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">api_key_hash</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">webhook_url</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">500</span><span class="p">),</span>
+<span class="w">    </span><span class="n">webhook_secret</span><span class="w">  </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span>
+<span class="w">    </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;ACTIVE&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Merchant Balances (double-entry bookkeeping summary)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">merchant_balances</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">merchant_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">merchants</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">available_balance</span><span class="w"> </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">pending_balance</span><span class="w">   </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">currency</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;USD&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">updated_at</span><span class="w">        </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Payment Intents</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">payment_intents</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">                </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span><span class="w">   </span><span class="c1">-- pi_xxxx</span>
+<span class="w">    </span><span class="n">merchant_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">merchants</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">amount</span><span class="w">            </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">currency</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">status</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">30</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">-- CREATED, SUCCEEDED, FAILED, CANCELLED, REFUNDED, PARTIALLY_REFUNDED</span>
+<span class="w">    </span><span class="n">payment_method_id</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">),</span>
+<span class="w">    </span><span class="n">processor_id</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">),</span><span class="w">              </span><span class="c1">-- external processor ref</span>
+<span class="w">    </span><span class="n">failure_reason</span><span class="w">    </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">metadata</span><span class="w">          </span><span class="n">JSONB</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">        </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">updated_at</span><span class="w">        </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_pi_merchant</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">payment_intents</span><span class="p">(</span><span class="n">merchant_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_pi_status</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">payment_intents</span><span class="p">(</span><span class="n">status</span><span class="p">);</span>
+
+<span class="c1">-- Refunds</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">refunds</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">                  </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span><span class="w">  </span><span class="c1">-- re_xxxx</span>
+<span class="w">    </span><span class="n">payment_intent_id</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">payment_intents</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">amount</span><span class="w">              </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">currency</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">reason</span><span class="w">              </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">status</span><span class="w">              </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">     </span><span class="c1">-- PENDING, SUCCEEDED, FAILED</span>
+<span class="w">    </span><span class="n">processor_id</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">),</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">          </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Ledger (immutable, append-only)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">ledger_entries</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">                  </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">payment_intent_id</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">payment_intents</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">refund_id</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">refunds</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">account_id</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">    </span><span class="c1">-- merchant_id or system account</span>
+<span class="w">    </span><span class="k">type</span><span class="w">                </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">     </span><span class="c1">-- CREDIT or DEBIT</span>
+<span class="w">    </span><span class="n">amount</span><span class="w">              </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">currency</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">          </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- CRITICAL: No UPDATE or DELETE allowed on ledger</span>
+<span class="c1">-- Enforce with a trigger or application-level policy</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_ledger_account</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">ledger_entries</span><span class="p">(</span><span class="n">account_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_ledger_pi</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">ledger_entries</span><span class="p">(</span><span class="n">payment_intent_id</span><span class="p">);</span>
+
+<span class="c1">-- Idempotency Keys</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">idempotency_keys</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="k">key</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">merchant_id</span><span class="w"> </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">merchants</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">response</span><span class="w">    </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">  </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">expires_at</span><span class="w">  </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_idempotency_expires</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">idempotency_keys</span><span class="p">(</span><span class="n">expires_at</span><span class="p">);</span>
+
+<span class="c1">-- Webhook Events</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">webhook_events</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">merchant_id</span><span class="w">   </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">merchants</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">event_type</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">payload</span><span class="w">       </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">status</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;PENDING&#39;</span><span class="p">,</span><span class="w">  </span><span class="c1">-- PENDING, DELIVERED, FAILED</span>
+<span class="w">    </span><span class="n">attempts</span><span class="w">      </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">next_retry_at</span><span class="w"> </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Step 6: Deep Dive - Idempotency</h2>
+<p>Idempotency is the single most important property of a payment system. Network failures, timeouts, and retries are inevitable. A payment must succeed exactly once.</p>
+<div class="highlight"><pre><span></span><code>Problem:
+Client ──&gt; Payment Service ──&gt; Card Network
+                              (processes charge)
+           &lt;── timeout ──
+           (network issue, response lost)
+
+Client retries ──&gt; Payment Service ──&gt; Card Network
+                                      (charges AGAIN!)
+           DOUBLE CHARGE!
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// Idempotency service using Redis</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">IdempotencyService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">redis</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`idempotency:</span><span class="si">${</span><span class="nx">key</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">result</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">response</span><span class="p">,</span><span class="w"> </span><span class="nx">ttlSeconds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">86400</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">setex</span><span class="p">(</span>
+<span class="w">      </span><span class="sb">`idempotency:</span><span class="si">${</span><span class="nx">key</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">ttlSeconds</span><span class="p">,</span>
+<span class="w">      </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">response</span><span class="p">)</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Lock to prevent concurrent processing of same key</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">acquireLock</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">ttlMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">30000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">lockKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`idempotency:lock:</span><span class="si">${</span><span class="nx">key</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">lockKey</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;1&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;PX&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">ttlMs</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;NX&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;OK&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">releaseLock</span><span class="p">(</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">del</span><span class="p">(</span><span class="sb">`idempotency:lock:</span><span class="si">${</span><span class="nx">key</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage in middleware</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">idempotencyMiddleware</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">headers</span><span class="p">[</span><span class="s1">&#39;idempotency-key&#39;</span><span class="p">];</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">next</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// Check if we already have a result</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">idempotencyService</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="nx">existing</span><span class="p">.</span><span class="nx">statusCode</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">existing</span><span class="p">.</span><span class="nx">body</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Acquire lock to prevent concurrent processing</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">locked</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">idempotencyService</span><span class="p">.</span><span class="nx">acquireLock</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">locked</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">409</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Request is being processed&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Wrap res.json to capture the response</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">originalJson</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">.</span><span class="nx">bind</span><span class="p">(</span><span class="nx">res</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">body</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">idempotencyService</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">statusCode</span><span class="o">:</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">statusCode</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">body</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">idempotencyService</span><span class="p">.</span><span class="nx">releaseLock</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">originalJson</span><span class="p">(</span><span class="nx">body</span><span class="p">);</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="nx">next</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 7: Deep Dive - Double-Entry Ledger</h2>
+<div class="highlight"><pre><span></span><code>Every financial transaction creates TWO ledger entries:
+- A DEBIT from one account
+- A CREDIT to another account
+
+The sum of all debits MUST equal the sum of all credits.
+
+Payment of $100 from customer to merchant:
+┌──────────────────┬────────┬────────┐
+│ Account          │ Debit  │ Credit │
+├──────────────────┼────────┼────────┤
+│ Platform Recv.   │ $100   │        │
+│ Merchant Balance │        │ $100   │
+└──────────────────┴────────┴────────┘
+
+Refund of $100:
+┌──────────────────┬────────┬────────┐
+│ Account          │ Debit  │ Credit │
+├──────────────────┼────────┼────────┤
+│ Merchant Balance │ $100   │        │
+│ Platform Recv.   │        │ $100   │
+└──────────────────┴────────┴────────┘
+
+Platform fee of $2.90 (2.9%):
+┌──────────────────┬────────┬────────┐
+│ Account          │ Debit  │ Credit │
+├──────────────────┼────────┼────────┤
+│ Merchant Balance │ $2.90  │        │
+│ Platform Revenue │        │ $2.90  │
+└──────────────────┴────────┴────────┘
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// Ledger service -- append only, never update or delete</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">LedgerService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">prisma</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">prisma</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">recordPayment</span><span class="p">(</span><span class="nx">tx</span><span class="p">,</span><span class="w"> </span><span class="nx">paymentIntentId</span><span class="p">,</span><span class="w"> </span><span class="nx">merchantId</span><span class="p">,</span><span class="w"> </span><span class="nx">amount</span><span class="p">,</span><span class="w"> </span><span class="nx">currency</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">ledgerEntry</span><span class="p">.</span><span class="nx">createMany</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">paymentIntentId</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">accountId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;PLATFORM_RECEIVABLE&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;DEBIT&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">amount</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">currency</span><span class="p">,</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">paymentIntentId</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">accountId</span><span class="o">:</span><span class="w"> </span><span class="nx">merchantId</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;CREDIT&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">amount</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">currency</span><span class="p">,</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">],</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getBalance</span><span class="p">(</span><span class="nx">accountId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`</span>
+<span class="sb">      SELECT</span>
+<span class="sb">        COALESCE(SUM(CASE WHEN type = &#39;CREDIT&#39; THEN amount ELSE 0 END), 0) -</span>
+<span class="sb">        COALESCE(SUM(CASE WHEN type = &#39;DEBIT&#39; THEN amount ELSE 0 END), 0)</span>
+<span class="sb">        AS balance</span>
+<span class="sb">      FROM ledger_entries</span>
+<span class="sb">      WHERE account_id = </span><span class="si">${</span><span class="nx">accountId</span><span class="si">}</span>
+<span class="sb">    `</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">[</span><span class="mf">0</span><span class="p">].</span><span class="nx">balance</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">verifyIntegrity</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Total debits must equal total credits</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`</span>
+<span class="sb">      SELECT</span>
+<span class="sb">        SUM(CASE WHEN type = &#39;DEBIT&#39; THEN amount ELSE 0 END) as total_debits,</span>
+<span class="sb">        SUM(CASE WHEN type = &#39;CREDIT&#39; THEN amount ELSE 0 END) as total_credits</span>
+<span class="sb">      FROM ledger_entries</span>
+<span class="sb">    `</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">[</span><span class="mf">0</span><span class="p">].</span><span class="nx">total_debits</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">result</span><span class="p">[</span><span class="mf">0</span><span class="p">].</span><span class="nx">total_credits</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 8: Webhook Delivery</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// Webhook worker with exponential backoff retries</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Worker</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bullmq&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">webhookWorker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;webhooks&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">merchantId</span><span class="p">,</span><span class="w"> </span><span class="nx">eventType</span><span class="p">,</span><span class="w"> </span><span class="nx">payload</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">merchant</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">merchant</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">merchantId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">merchant</span><span class="o">?</span><span class="p">.</span><span class="nx">webhookUrl</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Sign the payload</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1000</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">signedPayload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">timestamp</span><span class="si">}</span><span class="sb">.</span><span class="si">${</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">payload</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">signature</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">createHmac</span><span class="p">(</span><span class="s1">&#39;sha256&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">merchant</span><span class="p">.</span><span class="nx">webhookSecret</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">signedPayload</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">digest</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">merchant</span><span class="p">.</span><span class="nx">webhookUrl</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/json&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;X-Webhook-Signature&#39;</span><span class="o">:</span><span class="w"> </span><span class="sb">`t=</span><span class="si">${</span><span class="nx">timestamp</span><span class="si">}</span><span class="sb">,v1=</span><span class="si">${</span><span class="nx">signature</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="nx">eventType</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">payload</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="nx">signal</span><span class="o">:</span><span class="w"> </span><span class="nx">AbortSignal</span><span class="p">.</span><span class="nx">timeout</span><span class="p">(</span><span class="mf">10000</span><span class="p">),</span><span class="w"> </span><span class="c1">// 10s timeout</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">response</span><span class="p">.</span><span class="nx">ok</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Webhook delivery failed: </span><span class="si">${</span><span class="nx">response</span><span class="p">.</span><span class="nx">status</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="nx">redisConnection</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">limiter</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">max</span><span class="o">:</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span><span class="w"> </span><span class="nx">duration</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="c1">// rate limit outbound webhooks</span>
+<span class="p">});</span>
+
+<span class="c1">// Retry with exponential backoff: 1min, 5min, 30min, 2hr, 24hr</span>
+<span class="nx">webhookWorker</span><span class="p">.</span><span class="nx">opts</span><span class="p">.</span><span class="nx">backoff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;exponential&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">60000</span><span class="p">,</span>
+<span class="p">};</span>
+</code></pre></div>
+
+<h2>Step 9: Scaling Strategies</h2>
+<div class="highlight"><pre><span></span><code>┌───────────────────────────────────────────────────────────┐
+│                    Scaling Strategy                        │
+├───────────────────────────────────────────────────────────┤
+│ Payment DB:   Sharded by merchant_id                      │
+│               (each shard has full ACID)                  │
+│                                                           │
+│ Ledger DB:    Append-only, partitioned by month           │
+│               (old partitions become read-only)           │
+│                                                           │
+│ Idempotency:  Redis Cluster with 24hr TTL                │
+│               (keys auto-expire)                          │
+│                                                           │
+│ Webhooks:     BullMQ with dedicated worker fleet          │
+│               (rate-limited per merchant)                  │
+│                                                           │
+│ Card Vault:   Isolated, PCI-compliant environment         │
+│               (minimal attack surface)                    │
+└───────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>Step 10: Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Payment model</td>
+<td>Synchronous (charge immediately)</td>
+<td>Two-phase (authorize then capture)</td>
+<td>Two-phase for flexibility</td>
+</tr>
+<tr>
+<td>Idempotency store</td>
+<td>Database</td>
+<td>Redis</td>
+<td>Redis (faster, TTL built-in)</td>
+</tr>
+<tr>
+<td>Ledger DB</td>
+<td>Relational (Postgres)</td>
+<td>Append-only log (Kafka)</td>
+<td>Postgres with append-only constraint</td>
+</tr>
+<tr>
+<td>Webhook delivery</td>
+<td>Synchronous</td>
+<td>Async with queue</td>
+<td>Async (never block payment on webhook)</td>
+</tr>
+<tr>
+<td>Card storage</td>
+<td>Store encrypted cards</td>
+<td>Tokenize with vault</td>
+<td>Tokenize (reduces PCI scope)</td>
+</tr>
+<tr>
+<td>Consistency</td>
+<td>Strong everywhere</td>
+<td>Strong for money, eventual for status</td>
+<td>Mixed consistency</td>
+</tr>
+</tbody>
+</table>
+<h2>Summary</h2>
+<p>A payment system demands the highest standards of correctness, security, and auditability. The core patterns are: idempotency keys (exactly-once processing), double-entry ledger (financial correctness), two-phase payment flow (authorize then capture), tokenized card storage (PCI compliance), and async webhook delivery (merchant notification). Shard by merchant for scalability. Partition the ledger by time. Never update or delete ledger entries -- only append new correcting entries.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build an Idempotency Layer</div>
+                    <div class="exercise-desc"><p>Implement an Express middleware that handles idempotency keys. Store results in Redis with a 24-hour TTL. Handle concurrent requests with the same key using Redis locks (SET NX). Write tests that verify: same key returns cached result, different keys process independently, concurrent same-key requests do not duplicate.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>redis.set(key, value, 'EX', ttl, 'NX')</code> for the lock. Use a separate key for the cached response. Wrap <code>res.json</code> to capture the response before sending.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement a Double-Entry Ledger</div>
+                    <div class="exercise-desc"><p>Build a ledger service with Prisma that records financial transactions as paired debit/credit entries. Implement balance calculation, integrity verification (total debits = total credits), and a transaction history endpoint. Test with payment and refund scenarios.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a database transaction to ensure both entries are created atomically. Add a CHECK constraint or trigger to prevent UPDATEs on the ledger table. Calculate balances by summing credits minus debits per account.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Webhook Delivery System</div>
+                    <div class="exercise-desc"><p>Build a webhook delivery system using BullMQ. Implement HMAC-SHA256 signature generation, exponential backoff retries (1min, 5min, 30min, 2hr), and a dead letter queue for permanently failed deliveries. Include a dashboard endpoint showing delivery status.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>crypto.createHmac('sha256', secret)</code> for signing. Configure BullMQ backoff with <code>{ type: 'exponential', delay: 60000 }</code>. Use <code>job.attemptsMade</code> to track retry count.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Customers are being double-charged for the same purchase</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Customer support reports of duplicate charges. Bank statements show two identical charges seconds apart. Transaction logs show two payment records with different IDs but same amount and card.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Network timeout during payment processing causes the client to retry. Without idempotency, the retry creates a second charge. The card network processes both authorizations as separate transactions.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Require idempotency keys on all payment creation endpoints. Before processing, check if the key exists in Redis. Use a distributed lock to prevent concurrent processing of the same key. Return the cached result for duplicate requests.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Ledger balance does not match actual bank account balance</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> A payment was recorded in the ledger but the bank transfer failed, or a bank transfer succeeded but the ledger entry was not created due to application crash between the two operations.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use the Saga pattern: record the ledger entry and bank transfer request in the same database transaction. Process the bank transfer asynchronously. Reconcile daily by comparing ledger totals with bank statements. Flag discrepancies for manual review.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Webhook deliveries are backing up, causing merchants to miss payment notifications</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> One merchant's webhook endpoint is slow or down, and the retry mechanism is consuming all worker capacity. Other merchants' webhooks are delayed because they share the same queue.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use separate queues or rate limits per merchant. Implement circuit breakers: after N consecutive failures, stop attempting delivery to that merchant and alert them. Use priority queues so first-attempt deliveries are not blocked by retries.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://stripe.com/docs/api/idempotent_requests" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Stripe's API Design and Idempotency</div>
+                    
+                    <div class="resource-note">Stripe's official documentation on idempotency -- the gold standard for payment API design</div>
+                    
+                </a>
+                
+                <a href="https://dataintensive.net/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Designing Data-Intensive Applications (Chapter 9: Consistency and Consensus)</div>
+                    
+                    <div class="resource-note">Covers exactly-once semantics and distributed transactions relevant to payment processing</div>
+                    
+                </a>
+                
+                <a href="https://www.pcisecuritystandards.org/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">PCI DSS Compliance Guide</div>
+                    
+                    <div class="resource-note">Required reading for anyone building systems that handle credit card data</div>
+                    
+                </a>
+                
+                <a href="https://martinfowler.com/eaaDev/EventSourcing.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Martin Fowler on Event Sourcing</div>
+                    
+                    <div class="resource-note">Event sourcing patterns directly apply to immutable financial ledgers</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.3.1-js.html" class="btn">&larr; Design an E-Commerce Platform (Amazon)</a>
+            
+            
+            <a href="/backend-learning/lesson/9.3.3-js.html" class="btn">Design a Hotel Booking System (Booking.com) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

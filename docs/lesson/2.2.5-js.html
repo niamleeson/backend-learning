@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Full-Text Search in PostgreSQL - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-2-js.html">Databases</a> &rsaquo;
+            PostgreSQL Deep Dive
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">2.2.5</span>
+                <span>~2h</span>
+            </div>
+            <h1>Full-Text Search in PostgreSQL</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Full-text search is like the difference between scanning every page of every book in a library (LIKE '%word%') and using the library's catalog system that has already indexed every word, removed filler words, and knows the root form of every term. The catalog (tsvector) takes space to maintain, but finding things is orders of magnitude faster.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Full-Text Search in PostgreSQL</h1>
+<h2>Introduction</h2>
+<p>Full-text search (FTS) in PostgreSQL lets you search natural-language text efficiently without an external search engine like Elasticsearch. For many applications, PostgreSQL's built-in FTS is more than sufficient and eliminates the complexity of maintaining a separate search infrastructure.</p>
+<h2>Core Concepts</h2>
+<div class="highlight"><pre><span></span><code>Document -&gt; tsvector: Pre-processed searchable representation
+Query   -&gt; tsquery:  Parsed search query
+
+tsvector: &#39;quick&#39; &#39;brown&#39; &#39;fox&#39; &#39;jump&#39; &#39;lazi&#39; &#39;dog&#39;
+           (stemmed, lowercased, stop words removed)
+
+tsquery:  &#39;quick &amp; fox&#39;  (search for both words)
+</code></pre></div>
+
+<h2>tsvector and tsquery</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Convert text to tsvector</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">to_tsvector</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;The quick brown fox jumps over the lazy dog&#39;</span><span class="p">);</span>
+<span class="c1">-- Result: &#39;brown&#39;:3 &#39;dog&#39;:9 &#39;fox&#39;:4 &#39;jump&#39;:5 &#39;lazi&#39;:8 &#39;quick&#39;:2</span>
+<span class="c1">-- Note: &quot;the&quot; and &quot;over&quot; removed (stop words), &quot;jumps&quot; -&gt; &quot;jump&quot; (stemming)</span>
+
+<span class="c1">-- Convert search to tsquery</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">to_tsquery</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;quick &amp; fox&#39;</span><span class="p">);</span>
+<span class="c1">-- Result: &#39;quick&#39; &amp; &#39;fox&#39;</span>
+
+<span class="c1">-- Matching</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">to_tsvector</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;The quick brown fox&#39;</span><span class="p">)</span>
+<span class="w">    </span><span class="o">@@</span><span class="w"> </span><span class="n">to_tsquery</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;quick &amp; fox&#39;</span><span class="p">);</span>
+<span class="c1">-- Result: true</span>
+</code></pre></div>
+
+<h2>Basic Full-Text Search</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Simple search</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">title</span><span class="p">,</span><span class="w"> </span><span class="n">body</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">articles</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">to_tsvector</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">title</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39; &#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">body</span><span class="p">)</span>
+<span class="w">   </span><span class="o">@@</span><span class="w"> </span><span class="n">to_tsquery</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;postgresql &amp; performance&#39;</span><span class="p">);</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">searchArticles</span><span class="p">(</span><span class="nx">searchTerm</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// plainto_tsquery is safer for user input (handles special chars)</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span><span class="sb">`</span>
+<span class="sb">    SELECT</span>
+<span class="sb">      id,</span>
+<span class="sb">      title,</span>
+<span class="sb">      ts_headline(&#39;english&#39;, body, plainto_tsquery(&#39;english&#39;, $1),</span>
+<span class="sb">        &#39;MaxWords=50, MinWords=20, StartSel=&lt;mark&gt;, StopSel=&lt;/mark&gt;&#39;</span>
+<span class="sb">      ) AS snippet,</span>
+<span class="sb">      ts_rank(</span>
+<span class="sb">        to_tsvector(&#39;english&#39;, title || &#39; &#39; || body),</span>
+<span class="sb">        plainto_tsquery(&#39;english&#39;, $1)</span>
+<span class="sb">      ) AS rank</span>
+<span class="sb">    FROM articles</span>
+<span class="sb">    WHERE to_tsvector(&#39;english&#39;, title || &#39; &#39; || body)</span>
+<span class="sb">       @@ plainto_tsquery(&#39;english&#39;, $1)</span>
+<span class="sb">    ORDER BY rank DESC</span>
+<span class="sb">    LIMIT 20</span>
+<span class="sb">  `</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="nx">searchTerm</span><span class="p">]);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Search Query Types</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- to_tsquery: strict syntax, supports operators</span>
+<span class="n">to_tsquery</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;cat &amp; dog&#39;</span><span class="p">)</span><span class="w">           </span><span class="c1">-- AND</span>
+<span class="n">to_tsquery</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;cat | dog&#39;</span><span class="p">)</span><span class="w">           </span><span class="c1">-- OR</span>
+<span class="n">to_tsquery</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;!cat&#39;</span><span class="p">)</span><span class="w">                </span><span class="c1">-- NOT</span>
+<span class="n">to_tsquery</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;cat &lt;-&gt; dog&#39;</span><span class="p">)</span><span class="w">         </span><span class="c1">-- FOLLOWED BY (phrase)</span>
+<span class="n">to_tsquery</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;super &lt;2&gt; hero&#39;</span><span class="p">)</span><span class="w">      </span><span class="c1">-- within 2 words</span>
+
+<span class="c1">-- plainto_tsquery: simple, user-friendly (treats all words as AND)</span>
+<span class="n">plainto_tsquery</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;quick brown fox&#39;</span><span class="p">)</span>
+<span class="c1">-- Result: &#39;quick&#39; &amp; &#39;brown&#39; &amp; &#39;fox&#39;</span>
+
+<span class="c1">-- phraseto_tsquery: phrase matching</span>
+<span class="n">phraseto_tsquery</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;quick brown fox&#39;</span><span class="p">)</span>
+<span class="c1">-- Result: &#39;quick&#39; &lt;-&gt; &#39;brown&#39; &lt;-&gt; &#39;fox&#39;</span>
+
+<span class="c1">-- websearch_to_tsquery: Google-like syntax (PG 11+)</span>
+<span class="n">websearch_to_tsquery</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&quot;quick fox&quot; -lazy&#39;</span><span class="p">)</span>
+<span class="c1">-- Result: &#39;quick&#39; &lt;-&gt; &#39;fox&#39; &amp; !&#39;lazi&#39;</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">advancedSearch</span><span class="p">(</span><span class="nx">query</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// websearch_to_tsquery handles Google-like syntax safely</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span><span class="sb">`</span>
+<span class="sb">    SELECT id, title,</span>
+<span class="sb">      ts_rank_cd(search_vector, websearch_to_tsquery(&#39;english&#39;, $1)) AS rank</span>
+<span class="sb">    FROM articles</span>
+<span class="sb">    WHERE search_vector @@ websearch_to_tsquery(&#39;english&#39;, $1)</span>
+<span class="sb">    ORDER BY rank DESC</span>
+<span class="sb">    LIMIT 20</span>
+<span class="sb">  `</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="nx">query</span><span class="p">]);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Users can search like:</span>
+<span class="c1">// &quot;javascript tutorial&quot;       -&gt; phrase match</span>
+<span class="c1">// javascript -beginner        -&gt; exclude beginner</span>
+<span class="c1">// javascript OR typescript    -&gt; either term</span>
+</code></pre></div>
+
+<h2>Stored tsvector Column (Performance)</h2>
+<p>Recomputing tsvector on every query is expensive. Store it as a column:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Add a generated tsvector column</span>
+<span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">articles</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">search_vector</span><span class="w"> </span><span class="n">tsvector</span>
+<span class="w">  </span><span class="k">GENERATED</span><span class="w"> </span><span class="n">ALWAYS</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">setweight</span><span class="p">(</span><span class="n">to_tsvector</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">coalesce</span><span class="p">(</span><span class="n">title</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">)),</span><span class="w"> </span><span class="s1">&#39;A&#39;</span><span class="p">)</span><span class="w"> </span><span class="o">||</span>
+<span class="w">    </span><span class="n">setweight</span><span class="p">(</span><span class="n">to_tsvector</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">coalesce</span><span class="p">(</span><span class="n">body</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">)),</span><span class="w"> </span><span class="s1">&#39;B&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="n">STORED</span><span class="p">;</span>
+
+<span class="c1">-- Create a GIN index on it</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_articles_search</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">articles</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">gin</span><span class="w"> </span><span class="p">(</span><span class="n">search_vector</span><span class="p">);</span>
+</code></pre></div>
+
+<h3>Weighted Search</h3>
+<p>Weights allow you to rank title matches higher than body matches:</p>
+<div class="highlight"><pre><span></span><code>Weights:
+A = 1.0  (highest - title)
+B = 0.4  (body)
+C = 0.2  (metadata)
+D = 0.1  (lowest - comments)
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">weightedSearch</span><span class="p">(</span><span class="nx">query</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span><span class="sb">`</span>
+<span class="sb">    SELECT</span>
+<span class="sb">      id,</span>
+<span class="sb">      title,</span>
+<span class="sb">      ts_rank(search_vector, websearch_to_tsquery(&#39;english&#39;, $1)) AS rank</span>
+<span class="sb">    FROM articles</span>
+<span class="sb">    WHERE search_vector @@ websearch_to_tsquery(&#39;english&#39;, $1)</span>
+<span class="sb">    ORDER BY rank DESC</span>
+<span class="sb">    LIMIT 20</span>
+<span class="sb">  `</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="nx">query</span><span class="p">]);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Highlighting Results</h2>
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">searchWithHighlights</span><span class="p">(</span><span class="nx">query</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span><span class="sb">`</span>
+<span class="sb">    SELECT</span>
+<span class="sb">      id,</span>
+<span class="sb">      ts_headline(&#39;english&#39;, title, websearch_to_tsquery(&#39;english&#39;, $1),</span>
+<span class="sb">        &#39;StartSel=&lt;b&gt;, StopSel=&lt;/b&gt;, MaxFragments=0&#39;</span>
+<span class="sb">      ) AS highlighted_title,</span>
+<span class="sb">      ts_headline(&#39;english&#39;, body, websearch_to_tsquery(&#39;english&#39;, $1),</span>
+<span class="sb">        &#39;StartSel=&lt;b&gt;, StopSel=&lt;/b&gt;, MaxWords=60, MinWords=30, MaxFragments=3, FragmentDelimiter= ... &#39;</span>
+<span class="sb">      ) AS highlighted_body,</span>
+<span class="sb">      ts_rank(search_vector, websearch_to_tsquery(&#39;english&#39;, $1)) AS rank</span>
+<span class="sb">    FROM articles</span>
+<span class="sb">    WHERE search_vector @@ websearch_to_tsquery(&#39;english&#39;, $1)</span>
+<span class="sb">    ORDER BY rank DESC</span>
+<span class="sb">    LIMIT 20</span>
+<span class="sb">  `</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="nx">query</span><span class="p">]);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Autocomplete / Prefix Search</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Prefix matching with :*</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">title</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">articles</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">search_vector</span><span class="w"> </span><span class="o">@@</span><span class="w"> </span><span class="n">to_tsquery</span><span class="p">(</span><span class="s1">&#39;english&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;postg:*&#39;</span><span class="p">);</span>
+<span class="c1">-- Matches: PostgreSQL, Postgres, postgraduate...</span>
+
+<span class="c1">-- For fast autocomplete, use trigram index</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">pg_trgm</span><span class="p">;</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_articles_title_trgm</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">articles</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">gin</span><span class="w"> </span><span class="p">(</span><span class="n">title</span><span class="w"> </span><span class="n">gin_trgm_ops</span><span class="p">);</span>
+
+<span class="k">SELECT</span><span class="w"> </span><span class="n">title</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">articles</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">title</span><span class="w"> </span><span class="k">ILIKE</span><span class="w"> </span><span class="s1">&#39;%postg%&#39;</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">similarity</span><span class="p">(</span><span class="n">title</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;postg&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">DESC</span>
+<span class="k">LIMIT</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">autocomplete</span><span class="p">(</span><span class="nx">prefix</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span><span class="sb">`</span>
+<span class="sb">    SELECT DISTINCT title</span>
+<span class="sb">    FROM articles</span>
+<span class="sb">    WHERE title ILIKE $1</span>
+<span class="sb">    ORDER BY similarity(title, $2) DESC</span>
+<span class="sb">    LIMIT 10</span>
+<span class="sb">  `</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="sb">`%</span><span class="si">${</span><span class="nx">prefix</span><span class="si">}</span><span class="sb">%`</span><span class="p">,</span><span class="w"> </span><span class="nx">prefix</span><span class="p">]);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">title</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>When to Use PostgreSQL FTS vs Elasticsearch</h2>
+<div class="highlight"><pre><span></span><code>PostgreSQL FTS is great when:
+- Search is a feature, not the product
+- Dataset &lt; 10M documents
+- You want transactional consistency
+- Simpler ops (no separate cluster)
+- Budget/team constraints
+
+Elasticsearch/Meilisearch when:
+- Search IS the product
+- Need faceted search, fuzzy matching, &quot;did you mean?&quot;
+- Dataset &gt; 10M documents with complex queries
+- Need real-time indexing at high write volume
+- Need multi-language analysis
+</code></pre></div>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Search API</div>
+                    <div class="exercise-desc"><p>Create an articles table with title, body, and author fields. Add a stored tsvector column with weights (A for title, B for body, C for author). Build a Node.js function that accepts a search query, returns results with highlights and relevance ranking.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use GENERATED ALWAYS AS STORED for the tsvector column. Use websearch_to_tsquery for user input. Use ts_headline for highlights.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Autocomplete with Trigrams</div>
+                    <div class="exercise-desc"><p>Implement a fast autocomplete endpoint that returns suggestions as the user types. Use pg_trgm extension for fuzzy matching. Handle edge cases: very short inputs, special characters, empty results.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Create a GIN index with gin_trgm_ops. Use similarity() for ranking. Require minimum 2 characters for trigram matching.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Multi-Table Search</div>
+                    <div class="exercise-desc"><p>Build a unified search that searches across articles, users, and products tables simultaneously. Return results grouped by type with relevance scores.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use UNION ALL to combine results from each table, each with a 'type' label. Normalize rank scores. Order by combined rank.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Full-text search returns no results for partial words</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> tsvector stores stemmed complete words, not substrings. 'post' won't match 'postgresql' with standard tsquery.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use prefix matching with :* operator: `to_tsquery('post:*')`. For substring matching, use pg_trgm extension with ILIKE and GIN trigram index.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Search is slow on large tables</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Computing to_tsvector on every query, or missing GIN index on the tsvector column.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Store the tsvector as a generated column and create a GIN index on it. This precomputes the search vector and enables fast index lookups.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Stop words like 'the', 'a', 'is' in search queries cause empty results</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Stop words are removed by the text search configuration. Searching for only stop words produces an empty tsquery.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use the 'simple' configuration for exact matching: `to_tsvector('simple', text)`. Or combine with the 'english' config for best of both worlds.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://www.postgresql.org/docs/current/textsearch.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">PostgreSQL Full Text Search</div>
+                    
+                </a>
+                
+                <a href="https://www.postgresql.org/docs/current/pgtrgm.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">pg_trgm - Trigram Matching</div>
+                    
+                </a>
+                
+                <a href="https://rachbelaid.com/postgres-full-text-search-is-good-enough/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Postgres Full-Text Search is Good Enough</div>
+                    
+                </a>
+                
+                <a href="https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-PARSING-QUERIES" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">websearch_to_tsquery</div>
+                    
+                    <div class="resource-note">Google-like search syntax in PostgreSQL</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/2.2.4-js.html" class="btn">&larr; JSONB: Storing and Querying Semi-Structured Data</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-2-js.html">&larr; Back to Databases</a>
+        </div>
+    </div>
+</body>
+</html>

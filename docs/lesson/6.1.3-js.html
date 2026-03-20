@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>systemd, cron, and Process Management - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-6-js.html">DevOps & Deployment</a> &rsaquo;
+            Linux & CLI
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">6.1.3</span>
+                <span>~2h</span>
+            </div>
+            <h1>systemd, cron, and Process Management</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>systemd is like a super-reliable babysitter for your application. You tell it exactly how to start your app, and it watches over it 24/7 - restarting it if it crashes, starting it when the server boots, and keeping logs of everything. cron is like an alarm clock that triggers tasks on a schedule, while signals are like tapping someone on the shoulder (SIGTERM) versus pushing them out the door (SIGKILL).</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>systemd, cron, and Process Management</h1>
+<h2>Introduction</h2>
+<p>In production, your Node.js application needs to start automatically on boot, restart if it crashes, run scheduled tasks, and be manageable by operations teams. This lesson covers the Linux tools that make this possible: systemd for service management, cron for scheduled tasks, and general process management techniques.</p>
+<h2>systemd: The Modern Service Manager</h2>
+<p>systemd is the init system and service manager for most modern Linux distributions. It manages the lifecycle of services (daemons) on your system.</p>
+<h3>Architecture Overview</h3>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────┐
+│              systemd (PID 1)                 │
+│                                              │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
+│  │ nginx    │  │ node-app │  │ postgres │  │
+│  │ .service │  │ .service │  │ .service │  │
+│  └──────────┘  └──────────┘  └──────────┘  │
+│                                              │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
+│  │ .timer   │  │ .socket  │  │ .target  │  │
+│  │ (cron-   │  │ (socket  │  │ (group   │  │
+│  │  like)   │  │  activ.) │  │  units)  │  │
+│  └──────────┘  └──────────┘  └──────────┘  │
+└─────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>Creating a Service for Your Node.js App</h3>
+<p>Create a service file at <code>/etc/systemd/system/myapp.service</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">[Unit]</span>
+<span class="na">Description</span><span class="o">=</span><span class="s">My Node.js Application</span>
+<span class="na">Documentation</span><span class="o">=</span><span class="s">https://github.com/yourorg/myapp</span>
+<span class="na">After</span><span class="o">=</span><span class="s">network.target postgresql.service</span>
+<span class="na">Wants</span><span class="o">=</span><span class="s">postgresql.service</span>
+
+<span class="k">[Service]</span>
+<span class="na">Type</span><span class="o">=</span><span class="s">simple</span>
+<span class="na">User</span><span class="o">=</span><span class="s">deploy</span>
+<span class="na">Group</span><span class="o">=</span><span class="s">deploy</span>
+<span class="na">WorkingDirectory</span><span class="o">=</span><span class="s">/var/www/myapp</span>
+<span class="na">ExecStart</span><span class="o">=</span><span class="s">/usr/bin/node dist/server.js</span>
+<span class="na">ExecReload</span><span class="o">=</span><span class="s">/bin/kill -HUP $MAINPID</span>
+<span class="na">Restart</span><span class="o">=</span><span class="s">on-failure</span>
+<span class="na">RestartSec</span><span class="o">=</span><span class="s">5</span>
+<span class="na">StartLimitBurst</span><span class="o">=</span><span class="s">5</span>
+<span class="na">StartLimitIntervalSec</span><span class="o">=</span><span class="s">60</span>
+
+<span class="c1"># Environment</span>
+<span class="na">Environment</span><span class="o">=</span><span class="s">NODE_ENV=production</span>
+<span class="na">Environment</span><span class="o">=</span><span class="s">PORT=3000</span>
+<span class="na">EnvironmentFile</span><span class="o">=</span><span class="s">/var/www/myapp/.env</span>
+
+<span class="c1"># Security hardening</span>
+<span class="na">NoNewPrivileges</span><span class="o">=</span><span class="s">true</span>
+<span class="na">ProtectSystem</span><span class="o">=</span><span class="s">strict</span>
+<span class="na">ProtectHome</span><span class="o">=</span><span class="s">true</span>
+<span class="na">ReadWritePaths</span><span class="o">=</span><span class="s">/var/www/myapp/uploads /var/log/myapp</span>
+<span class="na">PrivateTmp</span><span class="o">=</span><span class="s">true</span>
+
+<span class="c1"># Logging</span>
+<span class="na">StandardOutput</span><span class="o">=</span><span class="s">journal</span>
+<span class="na">StandardError</span><span class="o">=</span><span class="s">journal</span>
+<span class="na">SyslogIdentifier</span><span class="o">=</span><span class="s">myapp</span>
+
+<span class="c1"># Resource limits</span>
+<span class="na">LimitNOFILE</span><span class="o">=</span><span class="s">65535</span>
+<span class="na">MemoryMax</span><span class="o">=</span><span class="s">512M</span>
+<span class="na">CPUQuota</span><span class="o">=</span><span class="s">80%</span>
+
+<span class="k">[Install]</span>
+<span class="na">WantedBy</span><span class="o">=</span><span class="s">multi-user.target</span>
+</code></pre></div>
+
+<h3>Managing Services</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Reload systemd after creating/modifying service files</span>
+sudo<span class="w"> </span>systemctl<span class="w"> </span>daemon-reload
+
+<span class="c1"># Start, stop, restart</span>
+sudo<span class="w"> </span>systemctl<span class="w"> </span>start<span class="w"> </span>myapp
+sudo<span class="w"> </span>systemctl<span class="w"> </span>stop<span class="w"> </span>myapp
+sudo<span class="w"> </span>systemctl<span class="w"> </span>restart<span class="w"> </span>myapp
+sudo<span class="w"> </span>systemctl<span class="w"> </span>reload<span class="w"> </span>myapp<span class="w">     </span><span class="c1"># Graceful reload (if supported)</span>
+
+<span class="c1"># Enable/disable auto-start on boot</span>
+sudo<span class="w"> </span>systemctl<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>myapp
+sudo<span class="w"> </span>systemctl<span class="w"> </span>disable<span class="w"> </span>myapp
+
+<span class="c1"># Check status</span>
+sudo<span class="w"> </span>systemctl<span class="w"> </span>status<span class="w"> </span>myapp
+
+<span class="c1"># View logs</span>
+sudo<span class="w"> </span>journalctl<span class="w"> </span>-u<span class="w"> </span>myapp<span class="w">              </span><span class="c1"># All logs</span>
+sudo<span class="w"> </span>journalctl<span class="w"> </span>-u<span class="w"> </span>myapp<span class="w"> </span>-f<span class="w">           </span><span class="c1"># Follow (like tail -f)</span>
+sudo<span class="w"> </span>journalctl<span class="w"> </span>-u<span class="w"> </span>myapp<span class="w"> </span>--since<span class="w"> </span>today
+sudo<span class="w"> </span>journalctl<span class="w"> </span>-u<span class="w"> </span>myapp<span class="w"> </span>--since<span class="w"> </span><span class="s2">&quot;2024-01-15 10:00&quot;</span><span class="w"> </span>--until<span class="w"> </span><span class="s2">&quot;2024-01-15 11:00&quot;</span>
+sudo<span class="w"> </span>journalctl<span class="w"> </span>-u<span class="w"> </span>myapp<span class="w"> </span>-n<span class="w"> </span><span class="m">100</span><span class="w">       </span><span class="c1"># Last 100 lines</span>
+sudo<span class="w"> </span>journalctl<span class="w"> </span>-u<span class="w"> </span>myapp<span class="w"> </span>-p<span class="w"> </span>err<span class="w">       </span><span class="c1"># Only errors</span>
+
+<span class="c1"># List all services</span>
+systemctl<span class="w"> </span>list-units<span class="w"> </span>--type<span class="o">=</span>service
+systemctl<span class="w"> </span>list-units<span class="w"> </span>--type<span class="o">=</span>service<span class="w"> </span>--state<span class="o">=</span>running
+</code></pre></div>
+
+<h3>Service Dependencies</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Ensure PostgreSQL starts before your app</span>
+<span class="k">[Unit]</span>
+<span class="na">After</span><span class="o">=</span><span class="s">postgresql.service redis.service</span>
+<span class="na">Requires</span><span class="o">=</span><span class="s">postgresql.service</span><span class="w">         </span><span class="c1"># Hard dependency - if PG fails, app fails</span>
+<span class="na">Wants</span><span class="o">=</span><span class="s">redis.service</span><span class="w">                 </span><span class="c1"># Soft dependency - app starts even if Redis fails</span>
+
+<span class="c1"># Start multiple instances</span>
+<span class="c1"># myapp@.service (template)</span>
+<span class="k">[Service]</span>
+<span class="na">ExecStart</span><span class="o">=</span><span class="s">/usr/bin/node dist/server.js</span>
+<span class="na">Environment</span><span class="o">=</span><span class="s">PORT=%i</span>
+
+<span class="c1"># Then: systemctl start myapp@3000 myapp@3001 myapp@3002</span>
+</code></pre></div>
+
+<h3>Understanding Restart Policies</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Restart policies:</span>
+<span class="na">Restart</span><span class="o">=</span><span class="s">no</span><span class="w">                 </span><span class="c1"># Never restart (default)</span>
+<span class="na">Restart</span><span class="o">=</span><span class="s">on-failure</span><span class="w">         </span><span class="c1"># Restart on non-zero exit code (RECOMMENDED)</span>
+<span class="na">Restart</span><span class="o">=</span><span class="s">always</span><span class="w">             </span><span class="c1"># Always restart (even on clean exit)</span>
+<span class="na">Restart</span><span class="o">=</span><span class="s">on-abnormal</span><span class="w">        </span><span class="c1"># Restart on signal/timeout</span>
+<span class="na">Restart</span><span class="o">=</span><span class="s">on-abort</span><span class="w">           </span><span class="c1"># Restart on signal only</span>
+
+<span class="c1"># Restart timing</span>
+<span class="na">RestartSec</span><span class="o">=</span><span class="s">5</span><span class="w">               </span><span class="c1"># Wait 5 seconds before restarting</span>
+<span class="na">StartLimitBurst</span><span class="o">=</span><span class="s">5</span><span class="w">          </span><span class="c1"># Max 5 restarts...</span>
+<span class="na">StartLimitIntervalSec</span><span class="o">=</span><span class="s">60</span><span class="w">   </span><span class="c1"># ...within 60 seconds, then give up</span>
+</code></pre></div>
+
+<h2>cron: Scheduled Tasks</h2>
+<p>cron executes commands on a schedule. Essential for backups, cleanup tasks, report generation, and periodic data processing.</p>
+<h3>Cron Schedule Format</h3>
+<div class="highlight"><pre><span></span><code>┌───────────── minute (0-59)
+│ ┌───────────── hour (0-23)
+│ │ ┌───────────── day of month (1-31)
+│ │ │ ┌───────────── month (1-12)
+│ │ │ │ ┌───────────── day of week (0-7, 0 and 7 = Sunday)
+│ │ │ │ │
+* * * * *  command to execute
+</code></pre></div>
+
+<h3>Common Schedules</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Edit crontab for current user</span>
+crontab<span class="w"> </span>-e
+
+<span class="c1"># List current user&#39;s crontab</span>
+crontab<span class="w"> </span>-l
+
+<span class="c1"># Common schedules</span>
+*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w">     </span><span class="c1"># Every minute</span>
+*/5<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w">   </span><span class="c1"># Every 5 minutes</span>
+<span class="m">0</span><span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w">     </span><span class="c1"># Every hour (at minute 0)</span>
+<span class="m">0</span><span class="w"> </span><span class="m">0</span><span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w">     </span><span class="c1"># Every day at midnight</span>
+<span class="m">0</span><span class="w"> </span><span class="m">0</span><span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span><span class="m">0</span><span class="w">     </span><span class="c1"># Every Sunday at midnight</span>
+<span class="m">0</span><span class="w"> </span><span class="m">2</span><span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w">     </span><span class="c1"># Every day at 2 AM</span>
+<span class="m">0</span><span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="m">1</span><span class="w"> </span>*<span class="w"> </span>*<span class="w">     </span><span class="c1"># First day of every month</span>
+<span class="m">30</span><span class="w"> </span><span class="m">4</span><span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span><span class="m">1</span>-5<span class="w">  </span><span class="c1"># Weekdays at 4:30 AM</span>
+</code></pre></div>
+
+<h3>Real-World Cron Examples for Node.js</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Database backup every day at 2 AM</span>
+<span class="m">0</span><span class="w"> </span><span class="m">2</span><span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>/var/www/myapp/scripts/backup-db.sh<span class="w"> </span>&gt;&gt;<span class="w"> </span>/var/log/myapp/backup.log<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span>
+
+<span class="c1"># Clean up temp files every hour</span>
+<span class="m">0</span><span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>find<span class="w"> </span>/var/www/myapp/tmp<span class="w"> </span>-type<span class="w"> </span>f<span class="w"> </span>-mmin<span class="w"> </span>+60<span class="w"> </span>-delete
+
+<span class="c1"># Run a Node.js script to send digest emails every morning</span>
+<span class="m">0</span><span class="w"> </span><span class="m">8</span><span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span><span class="nb">cd</span><span class="w"> </span>/var/www/myapp<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>/usr/bin/node<span class="w"> </span>scripts/send-digest.js<span class="w"> </span>&gt;&gt;<span class="w"> </span>/var/log/myapp/digest.log<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span>
+
+<span class="c1"># Rotate application logs weekly</span>
+<span class="m">0</span><span class="w"> </span><span class="m">0</span><span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span><span class="m">0</span><span class="w"> </span>/usr/sbin/logrotate<span class="w"> </span>/etc/logrotate.d/myapp
+
+<span class="c1"># Health check every 5 minutes</span>
+*/5<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>curl<span class="w"> </span>-sf<span class="w"> </span>http://localhost:3000/health<span class="w"> </span><span class="o">||</span><span class="w"> </span>systemctl<span class="w"> </span>restart<span class="w"> </span>myapp
+
+<span class="c1"># Certificate renewal (Let&#39;s Encrypt)</span>
+<span class="m">0</span><span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="m">1</span>,15<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>certbot<span class="w"> </span>renew<span class="w"> </span>--quiet<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>systemctl<span class="w"> </span>reload<span class="w"> </span>nginx
+</code></pre></div>
+
+<h3>Cron Best Practices</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Always redirect output to a log file</span>
+<span class="m">0</span><span class="w"> </span><span class="m">2</span><span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>/path/to/script.sh<span class="w"> </span>&gt;&gt;<span class="w"> </span>/var/log/cron-job.log<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span>
+
+<span class="c1"># Use full paths (cron has minimal PATH)</span>
+<span class="m">0</span><span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>/usr/bin/node<span class="w"> </span>/var/www/myapp/scripts/task.js
+
+<span class="c1"># Set environment variables at the top of crontab</span>
+<span class="nv">SHELL</span><span class="o">=</span>/bin/bash
+<span class="nv">PATH</span><span class="o">=</span>/usr/local/bin:/usr/bin:/bin
+<span class="nv">NODE_ENV</span><span class="o">=</span>production
+<span class="nv">MAILTO</span><span class="o">=</span>admin@example.com
+
+<span class="c1"># Lock file to prevent overlapping runs</span>
+*/5<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>*<span class="w"> </span>flock<span class="w"> </span>-n<span class="w"> </span>/tmp/mytask.lock<span class="w"> </span>/var/www/myapp/scripts/long-task.sh
+</code></pre></div>
+
+<h3>systemd Timers (Modern Alternative to cron)</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># /etc/systemd/system/myapp-backup.timer</span>
+<span class="k">[Unit]</span>
+<span class="na">Description</span><span class="o">=</span><span class="s">Daily database backup</span>
+
+<span class="k">[Timer]</span>
+<span class="na">OnCalendar</span><span class="o">=</span><span class="s">*-*-* 02:00:00</span>
+<span class="na">Persistent</span><span class="o">=</span><span class="s">true</span><span class="w">           </span><span class="c1"># Run missed executions after downtime</span>
+<span class="na">RandomizedDelaySec</span><span class="o">=</span><span class="s">300</span><span class="w">     </span><span class="c1"># Random delay up to 5 min (avoid thundering herd)</span>
+
+<span class="k">[Install]</span>
+<span class="na">WantedBy</span><span class="o">=</span><span class="s">timers.target</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># /etc/systemd/system/myapp-backup.service</span>
+<span class="k">[Unit]</span>
+<span class="na">Description</span><span class="o">=</span><span class="s">Database backup job</span>
+
+<span class="k">[Service]</span>
+<span class="na">Type</span><span class="o">=</span><span class="s">oneshot</span>
+<span class="na">User</span><span class="o">=</span><span class="s">deploy</span>
+<span class="na">ExecStart</span><span class="o">=</span><span class="s">/var/www/myapp/scripts/backup-db.sh</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># Enable and start the timer</span>
+sudo<span class="w"> </span>systemctl<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>myapp-backup.timer
+sudo<span class="w"> </span>systemctl<span class="w"> </span>start<span class="w"> </span>myapp-backup.timer
+
+<span class="c1"># Check timer status</span>
+systemctl<span class="w"> </span>list-timers<span class="w"> </span>--all
+</code></pre></div>
+
+<h2>Process Management</h2>
+<h3>Understanding Signals</h3>
+<div class="highlight"><pre><span></span><code>Signal     Number   Meaning                  Node.js Handler
+─────────────────────────────────────────────────────────────
+SIGTERM    15       Graceful shutdown         process.on(&#39;SIGTERM&#39;, ...)
+SIGINT     2        Interrupt (Ctrl+C)        process.on(&#39;SIGINT&#39;, ...)
+SIGKILL    9        Force kill (uncatchable)  Cannot be handled
+SIGHUP     1        Reload configuration      process.on(&#39;SIGHUP&#39;, ...)
+SIGUSR2    12       User-defined              Used by nodemon, PM2
+</code></pre></div>
+
+<h3>Graceful Shutdown in Node.js</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// server.js - Production-ready signal handling</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="nx">PORT</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Server running on port </span><span class="si">${</span><span class="nx">PORT</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">gracefulShutdown</span><span class="p">(</span><span class="nx">signal</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Received </span><span class="si">${</span><span class="nx">signal</span><span class="si">}</span><span class="sb">. Starting graceful shutdown...`</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Stop accepting new connections</span>
+<span class="w">  </span><span class="nx">server</span><span class="p">.</span><span class="nx">close</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;HTTP server closed.&#39;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Close database connections</span>
+<span class="w">    </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$disconnect</span><span class="p">().</span><span class="nx">then</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Database disconnected.&#39;</span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// Close Redis</span>
+<span class="w">      </span><span class="nx">redis</span><span class="p">.</span><span class="nx">quit</span><span class="p">().</span><span class="nx">then</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Redis disconnected.&#39;</span><span class="p">);</span>
+<span class="w">        </span><span class="nx">process</span><span class="p">.</span><span class="nx">exit</span><span class="p">(</span><span class="mf">0</span><span class="p">);</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Force shutdown after 30 seconds</span>
+<span class="w">  </span><span class="nx">setTimeout</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Forced shutdown after timeout&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">process</span><span class="p">.</span><span class="nx">exit</span><span class="p">(</span><span class="mf">1</span><span class="p">);</span>
+<span class="w">  </span><span class="p">},</span><span class="w"> </span><span class="mf">30000</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="nx">process</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;SIGTERM&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">gracefulShutdown</span><span class="p">(</span><span class="s1">&#39;SIGTERM&#39;</span><span class="p">));</span>
+<span class="nx">process</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;SIGINT&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">gracefulShutdown</span><span class="p">(</span><span class="s1">&#39;SIGINT&#39;</span><span class="p">));</span>
+
+<span class="c1">// Handle uncaught errors</span>
+<span class="nx">process</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;uncaughtException&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Uncaught Exception:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">gracefulShutdown</span><span class="p">(</span><span class="s1">&#39;uncaughtException&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">process</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;unhandledRejection&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">reason</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Unhandled Rejection:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">reason</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Don&#39;t exit - just log. Or exit if you prefer fail-fast.</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Monitoring Processes</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Real-time process monitoring</span>
+htop
+
+<span class="c1"># Process tree (see parent-child relationships)</span>
+pstree<span class="w"> </span>-p
+
+<span class="c1"># Detailed process info</span>
+ps<span class="w"> </span>aux<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>node
+ps<span class="w"> </span>-eo<span class="w"> </span>pid,ppid,%cpu,%mem,cmd<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>node
+
+<span class="c1"># Track system calls (debugging)</span>
+strace<span class="w"> </span>-p<span class="w"> </span>PID<span class="w"> </span>-e<span class="w"> </span><span class="nv">trace</span><span class="o">=</span>network<span class="w">    </span><span class="c1"># Network calls</span>
+strace<span class="w"> </span>-p<span class="w"> </span>PID<span class="w"> </span>-e<span class="w"> </span><span class="nv">trace</span><span class="o">=</span>file<span class="w">       </span><span class="c1"># File operations</span>
+
+<span class="c1"># Monitor file descriptors</span>
+ls<span class="w"> </span>-la<span class="w"> </span>/proc/PID/fd<span class="w"> </span><span class="p">|</span><span class="w"> </span>wc<span class="w"> </span>-l<span class="w">      </span><span class="c1"># Count open file descriptors</span>
+lsof<span class="w"> </span>-p<span class="w"> </span>PID<span class="w">                       </span><span class="c1"># List open files for process</span>
+
+<span class="c1"># Monitor network connections</span>
+ss<span class="w"> </span>-tlnp<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>node<span class="w">             </span><span class="c1"># TCP connections by node</span>
+ss<span class="w"> </span>-s<span class="w">                             </span><span class="c1"># Summary statistics</span>
+</code></pre></div>
+
+<h3>Resource Limits</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># Check current limits</span>
+<span class="nb">ulimit</span><span class="w"> </span>-a
+
+<span class="c1"># Increase open file limit (current session)</span>
+<span class="nb">ulimit</span><span class="w"> </span>-n<span class="w"> </span><span class="m">65535</span>
+
+<span class="c1"># Permanent limits in /etc/security/limits.conf</span>
+deploy<span class="w">  </span>soft<span class="w">  </span>nofile<span class="w">  </span><span class="m">65535</span>
+deploy<span class="w">  </span>hard<span class="w">  </span>nofile<span class="w">  </span><span class="m">65535</span>
+
+<span class="c1"># Or in systemd service file</span>
+<span class="o">[</span>Service<span class="o">]</span>
+<span class="nv">LimitNOFILE</span><span class="o">=</span><span class="m">65535</span>
+<span class="nv">LimitNPROC</span><span class="o">=</span><span class="m">4096</span>
+</code></pre></div>
+
+<h2>Putting It All Together: Production Deployment</h2>
+<p>Here is a complete example of deploying a Node.js app with systemd:</p>
+<div class="highlight"><pre><span></span><code><span class="ch">#!/bin/bash</span>
+<span class="c1"># deploy.sh - Production deployment script</span>
+
+<span class="nb">set</span><span class="w"> </span>-euo<span class="w"> </span>pipefail
+
+<span class="nv">APP_DIR</span><span class="o">=</span>/var/www/myapp
+<span class="nv">DEPLOY_USER</span><span class="o">=</span>deploy
+
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;=== Deploying application ===&quot;</span>
+
+<span class="c1"># Pull latest code</span>
+<span class="nb">cd</span><span class="w"> </span><span class="nv">$APP_DIR</span>
+git<span class="w"> </span>pull<span class="w"> </span>origin<span class="w"> </span>main
+
+<span class="c1"># Install dependencies</span>
+npm<span class="w"> </span>ci<span class="w"> </span>--production
+
+<span class="c1"># Build TypeScript</span>
+npm<span class="w"> </span>run<span class="w"> </span>build
+
+<span class="c1"># Run database migrations</span>
+npx<span class="w"> </span>prisma<span class="w"> </span>migrate<span class="w"> </span>deploy
+
+<span class="c1"># Restart with zero downtime</span>
+sudo<span class="w"> </span>systemctl<span class="w"> </span>reload-or-restart<span class="w"> </span>myapp
+
+<span class="c1"># Verify health</span>
+sleep<span class="w"> </span><span class="m">5</span>
+<span class="k">if</span><span class="w"> </span>curl<span class="w"> </span>-sf<span class="w"> </span>http://localhost:3000/health<span class="w"> </span>&gt;<span class="w"> </span>/dev/null<span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;Deployment successful!&quot;</span>
+<span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;Health check failed! Rolling back...&quot;</span>
+<span class="w">    </span>git<span class="w"> </span>checkout<span class="w"> </span>HEAD~1
+<span class="w">    </span>npm<span class="w"> </span>ci<span class="w"> </span>--production
+<span class="w">    </span>npm<span class="w"> </span>run<span class="w"> </span>build
+<span class="w">    </span>sudo<span class="w"> </span>systemctl<span class="w"> </span>restart<span class="w"> </span>myapp
+<span class="w">    </span><span class="nb">exit</span><span class="w"> </span><span class="m">1</span>
+<span class="k">fi</span>
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Not using <code>daemon-reload</code> after editing service files</strong> - systemd caches unit files. Always run <code>sudo systemctl daemon-reload</code>.</li>
+<li><strong>Cron jobs failing silently</strong> - Always redirect output: <code>&gt;&gt; /var/log/job.log 2&gt;&amp;1</code>.</li>
+<li><strong>Not handling SIGTERM in Node.js</strong> - Your app gets 30 seconds to shut down before SIGKILL. Use that time to close connections.</li>
+<li><strong>Running Node.js as root</strong> - Always create a dedicated user. Use <code>cap_net_bind_service</code> if you need port 80.</li>
+<li><strong>Overlapping cron jobs</strong> - Use <code>flock</code> to prevent a slow job from running concurrently with itself.</li>
+</ol>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Create a systemd Service</div>
+                    <div class="exercise-desc"><p>Write a complete systemd service file for a Node.js Express application. It should: run as the 'deploy' user, auto-restart on failure with a 5-second delay, load environment from a .env file, set a memory limit of 512MB, and log to journald. Enable it to start on boot.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the [Unit], [Service], and [Install] sections. Key directives: User, WorkingDirectory, ExecStart, Restart, RestartSec, EnvironmentFile, MemoryMax.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Cron Job Suite</div>
+                    <div class="exercise-desc"><p>Write a crontab with the following jobs: (1) database backup at 2 AM daily, (2) log cleanup every Sunday, (3) health check every 5 minutes that restarts the service if it fails, (4) SSL certificate renewal on the 1st and 15th of each month. Include proper logging for each job.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use crontab -e. Remember to redirect both stdout and stderr. Use flock for the backup job to prevent overlapping runs.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Graceful Shutdown Implementation</div>
+                    <div class="exercise-desc"><p>Write a Node.js server that handles SIGTERM and SIGINT. On receiving these signals, it should: (1) stop accepting new connections, (2) wait for existing requests to complete (up to 30 seconds), (3) close database connections, and (4) exit. Test by sending signals with kill.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use server.close() to stop accepting connections. Track active connections with a counter. Use setTimeout as a safety net for forced shutdown.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">systemd service keeps restarting in a loop then stops</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Status shows 'failed' and 'start-limit-hit'
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The service failed too many times within the StartLimitIntervalSec window, so systemd stopped trying.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Check logs with `journalctl -u myapp -n 50`. Fix the root cause (missing env vars, wrong path, port conflict). Reset the failure counter: `sudo systemctl reset-failed myapp`. Adjust StartLimitBurst and StartLimitIntervalSec if the restarts are expected during startup.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Cron job works manually but not in cron</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Cron runs with a minimal environment (limited PATH, no shell profile loaded).
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use full paths to all executables (`/usr/bin/node` not just `node`). Set PATH at the top of crontab. Set the working directory with `cd /path && command`. Add logging to capture errors: `>> /var/log/job.log 2>&1`.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Node.js app not releasing port after restart</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Error: listen EADDRINUSE :::3000
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The old process did not shut down gracefully, and the port is still held by a lingering connection in TIME_WAIT state.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Handle SIGTERM properly in your Node.js code. In your server, ensure server.close() is called. If the issue persists, check for child processes: `pgrep -P old_pid`. As a last resort, use SO_REUSEADDR (Express does this by default).
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://systemd.io/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">systemd for Developers</div>
+                    
+                </a>
+                
+                <a href="https://www.digitalocean.com/community/tutorials/understanding-systemd-units-and-unit-files" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag tutorial">tutorial</div>
+                    <div class="resource-title">Understanding systemd Units and Unit Files</div>
+                    
+                </a>
+                
+                <a href="https://crontab.guru/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag tool">tool</div>
+                    <div class="resource-title">Crontab Guru</div>
+                    
+                    <div class="resource-note">Interactive cron schedule expression editor</div>
+                    
+                </a>
+                
+                <a href="https://blog.heroku.com/best-practices-nodejs-errors" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Node.js Graceful Shutdown</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/6.1.2-js.html" class="btn">&larr; SSH, Permissions, and File System</a>
+            
+            
+            <a href="/backend-learning/lesson/6.1.4-js.html" class="btn">Shell Scripting Basics for Backend Devs &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-6-js.html">&larr; Back to DevOps & Deployment</a>
+        </div>
+    </div>
+</body>
+</html>

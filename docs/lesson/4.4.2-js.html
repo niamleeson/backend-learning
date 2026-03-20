@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JWT Strategy and Auth Module - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-4-js.html">Web Frameworks — NestJS</a> &rsaquo;
+            Authentication
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">4.4.2</span>
+                <span>~3h</span>
+            </div>
+            <h1>JWT Strategy and Auth Module</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>JWT auth is like a theme park wristband. At the entrance (login), they check your ticket (credentials) and give you a wristband (JWT). For every ride (API endpoint), you just show your wristband -- no need to re-check the ticket. But wristbands expire at closing time (token expiry), and if yours is fake (invalid signature), security (JwtStrategy) catches it immediately.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>JWT Strategy and Auth Module</h1>
+<h2>Introduction</h2>
+<p>JSON Web Tokens (JWT) are the most common authentication mechanism for stateless APIs. Unlike session-based auth, JWTs are self-contained -- they carry all the information needed to authenticate a user without querying a database on every request. This lesson covers building a complete JWT authentication module in NestJS.</p>
+<h2>JWT Fundamentals</h2>
+<p>A JWT consists of three parts separated by dots:</p>
+<div class="highlight"><pre><span></span><code>Header.Payload.Signature
+eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMiLCJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20ifQ.signature
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>+-------------------+     +-------------------+     +-------------------+
+|      Header       |     |      Payload      |     |     Signature     |
+|                   |     |                   |     |                   |
+| {                 |     | {                 |     | HMACSHA256(       |
+|   &quot;alg&quot;: &quot;HS256&quot;, | . | &quot;sub&quot;: &quot;123&quot;,    | .  |   base64(header) +|
+|   &quot;typ&quot;: &quot;JWT&quot;    |     |   &quot;email&quot;: &quot;...&quot;, |     |   &quot;.&quot; +           |
+| }                 |     |   &quot;iat&quot;: 171...,  |     |   base64(payload),|
+|                   |     |   &quot;exp&quot;: 171...   |     |   secret          |
+|                   |     | }                 |     | )                 |
++-------------------+     +-------------------+     +-------------------+
+</code></pre></div>
+
+<h2>Installation</h2>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>i<span class="w"> </span>@nestjs/jwt<span class="w"> </span>@nestjs/passport<span class="w"> </span>passport<span class="w"> </span>passport-jwt
+npm<span class="w"> </span>i<span class="w"> </span>-D<span class="w"> </span>@types/passport-jwt
+</code></pre></div>
+
+<h2>JWT Strategy</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// auth/strategies/jwt.strategy.ts</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Injectable</span><span class="p">,</span><span class="w"> </span><span class="nx">UnauthorizedException</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/common&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PassportStrategy</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/passport&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ExtractJwt</span><span class="p">,</span><span class="w"> </span><span class="nx">Strategy</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;passport-jwt&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ConfigService</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/config&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">UsersService</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;../../users/users.service&#39;</span><span class="p">;</span>
+
+<span class="kd">@Injectable</span><span class="p">()</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">JwtStrategy</span><span class="w"> </span><span class="k">extends</span><span class="w"> </span><span class="nx">PassportStrategy</span><span class="p">(</span><span class="nx">Strategy</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span>
+<span class="w">    </span><span class="k">private</span><span class="w"> </span><span class="nx">config</span><span class="o">:</span><span class="w"> </span><span class="kt">ConfigService</span><span class="p">,</span>
+<span class="w">    </span><span class="k">private</span><span class="w"> </span><span class="nx">usersService</span><span class="o">:</span><span class="w"> </span><span class="kt">UsersService</span><span class="p">,</span>
+<span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">super</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">jwtFromRequest</span><span class="o">:</span><span class="w"> </span><span class="kt">ExtractJwt.fromAuthHeaderAsBearerToken</span><span class="p">(),</span>
+<span class="w">      </span><span class="nx">ignoreExpiration</span><span class="o">:</span><span class="w"> </span><span class="kt">false</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">secretOrKey</span><span class="o">:</span><span class="w"> </span><span class="kt">config.get</span><span class="o">&lt;</span><span class="kt">string</span><span class="o">&gt;</span><span class="p">(</span><span class="s1">&#39;JWT_SECRET&#39;</span><span class="p">),</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">validate</span><span class="p">(</span><span class="nx">payload</span><span class="o">:</span><span class="w"> </span><span class="kt">JwtPayload</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="nb">Promise</span><span class="o">&lt;</span><span class="nx">any</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// payload is the decoded JWT (after verification)</span>
+<span class="w">    </span><span class="c1">// This method is called ONLY if the token is valid</span>
+
+<span class="w">    </span><span class="c1">// Optional: Check if user still exists</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">usersService</span><span class="p">.</span><span class="nx">findById</span><span class="p">(</span><span class="nx">payload</span><span class="p">.</span><span class="nx">sub</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">UnauthorizedException</span><span class="p">(</span><span class="s1">&#39;User no longer exists&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Optional: Check if user is active</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">user</span><span class="p">.</span><span class="nx">isActive</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">UnauthorizedException</span><span class="p">(</span><span class="s1">&#39;Account is deactivated&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// What you return here becomes request.user</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="kt">payload.sub</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="kt">payload.email</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">roles</span><span class="o">:</span><span class="w"> </span><span class="kt">payload.roles</span><span class="p">,</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Types</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">interface</span><span class="w"> </span><span class="nx">JwtPayload</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">sub</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">;</span><span class="w">       </span><span class="c1">// User ID</span>
+<span class="w">  </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">roles</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">[];</span>
+<span class="w">  </span><span class="nx">iat</span><span class="o">:</span><span class="w"> </span><span class="kt">number</span><span class="p">;</span><span class="w">       </span><span class="c1">// Issued at</span>
+<span class="w">  </span><span class="nx">exp</span><span class="o">:</span><span class="w"> </span><span class="kt">number</span><span class="p">;</span><span class="w">       </span><span class="c1">// Expires at</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Complete Auth Module</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// auth/auth.module.ts</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Module</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/common&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">JwtModule</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/jwt&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PassportModule</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/passport&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ConfigModule</span><span class="p">,</span><span class="w"> </span><span class="nx">ConfigService</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/config&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">AuthService</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./auth.service&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">AuthController</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./auth.controller&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">JwtStrategy</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./strategies/jwt.strategy&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">LocalStrategy</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./strategies/local.strategy&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">UsersModule</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;../users/users.module&#39;</span><span class="p">;</span>
+
+<span class="kd">@Module</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">imports</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="nx">UsersModule</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">PassportModule</span><span class="p">.</span><span class="nx">register</span><span class="p">({</span><span class="w"> </span><span class="nx">defaultStrategy</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;jwt&#39;</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="nx">JwtModule</span><span class="p">.</span><span class="nx">registerAsync</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">imports</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">ConfigModule</span><span class="p">],</span>
+<span class="w">      </span><span class="nx">useFactory</span><span class="o">:</span><span class="w"> </span><span class="kt">async</span><span class="w"> </span><span class="p">(</span><span class="nx">config</span><span class="o">:</span><span class="w"> </span><span class="kt">ConfigService</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">        </span><span class="nx">secret</span><span class="o">:</span><span class="w"> </span><span class="kt">config.get</span><span class="o">&lt;</span><span class="kt">string</span><span class="o">&gt;</span><span class="p">(</span><span class="s1">&#39;JWT_SECRET&#39;</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">signOptions</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">expiresIn</span><span class="o">:</span><span class="w"> </span><span class="kt">config.get</span><span class="o">&lt;</span><span class="kt">string</span><span class="o">&gt;</span><span class="p">(</span><span class="s1">&#39;JWT_EXPIRES_IN&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;15m&#39;</span><span class="p">),</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">}),</span>
+<span class="w">      </span><span class="nx">inject</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">ConfigService</span><span class="p">],</span>
+<span class="w">    </span><span class="p">}),</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nx">controllers</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">AuthController</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">providers</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">AuthService</span><span class="p">,</span><span class="w"> </span><span class="nx">JwtStrategy</span><span class="p">,</span><span class="w"> </span><span class="nx">LocalStrategy</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">exports</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">AuthService</span><span class="p">,</span><span class="w"> </span><span class="nx">JwtModule</span><span class="p">],</span>
+<span class="p">})</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">AuthModule</span><span class="w"> </span><span class="p">{}</span>
+</code></pre></div>
+
+<h2>Auth Service with Token Generation</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// auth/auth.service.ts</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Injectable</span><span class="p">,</span><span class="w"> </span><span class="nx">UnauthorizedException</span><span class="p">,</span><span class="w"> </span><span class="nx">ConflictException</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/common&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">JwtService</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/jwt&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ConfigService</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/config&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">UsersService</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;../users/users.service&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="nx">bcrypt</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bcrypt&#39;</span><span class="p">;</span>
+
+<span class="kd">@Injectable</span><span class="p">()</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">AuthService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span>
+<span class="w">    </span><span class="k">private</span><span class="w"> </span><span class="nx">usersService</span><span class="o">:</span><span class="w"> </span><span class="kt">UsersService</span><span class="p">,</span>
+<span class="w">    </span><span class="k">private</span><span class="w"> </span><span class="nx">jwtService</span><span class="o">:</span><span class="w"> </span><span class="kt">JwtService</span><span class="p">,</span>
+<span class="w">    </span><span class="k">private</span><span class="w"> </span><span class="nx">config</span><span class="o">:</span><span class="w"> </span><span class="kt">ConfigService</span><span class="p">,</span>
+<span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">validateUser</span><span class="p">(</span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">password</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">usersService</span><span class="p">.</span><span class="nx">findByEmail</span><span class="p">(</span><span class="nx">email</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">isValid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">compare</span><span class="p">(</span><span class="nx">password</span><span class="p">,</span><span class="w"> </span><span class="nx">user</span><span class="p">.</span><span class="nx">password</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">isValid</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">password</span><span class="o">:</span><span class="w"> </span><span class="kt">_</span><span class="p">,</span><span class="w"> </span><span class="p">...</span><span class="nx">result</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">user</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">login</span><span class="p">(</span><span class="nx">user</span><span class="o">:</span><span class="w"> </span><span class="kt">any</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">tokens</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">generateTokens</span><span class="p">(</span><span class="nx">user</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="p">...</span><span class="nx">tokens</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">user</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="kt">user.id</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="kt">user.email</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="kt">user.name</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">roles</span><span class="o">:</span><span class="w"> </span><span class="kt">user.roles</span><span class="p">,</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">register</span><span class="p">(</span><span class="nx">dto</span><span class="o">:</span><span class="w"> </span><span class="kt">RegisterDto</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">usersService</span><span class="p">.</span><span class="nx">findByEmail</span><span class="p">(</span><span class="nx">dto</span><span class="p">.</span><span class="nx">email</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">ConflictException</span><span class="p">(</span><span class="s1">&#39;Email already registered&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">hashedPassword</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">hash</span><span class="p">(</span><span class="nx">dto</span><span class="p">.</span><span class="nx">password</span><span class="p">,</span><span class="w"> </span><span class="mf">12</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">usersService</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="p">...</span><span class="nx">dto</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">password</span><span class="o">:</span><span class="w"> </span><span class="kt">hashedPassword</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">login</span><span class="p">(</span><span class="nx">user</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">private</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="nx">generateTokens</span><span class="p">(</span><span class="nx">user</span><span class="o">:</span><span class="w"> </span><span class="kt">any</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">payload</span><span class="o">:</span><span class="w"> </span><span class="kt">JwtPayload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">sub</span><span class="o">:</span><span class="w"> </span><span class="kt">user.id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="kt">user.email</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">roles</span><span class="o">:</span><span class="w"> </span><span class="kt">user.roles</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;user&#39;</span><span class="p">],</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">accessToken</span><span class="p">,</span><span class="w"> </span><span class="nx">refreshToken</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">([</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">jwtService</span><span class="p">.</span><span class="nx">signAsync</span><span class="p">(</span><span class="nx">payload</span><span class="p">),</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">jwtService</span><span class="p">.</span><span class="nx">signAsync</span><span class="p">(</span><span class="nx">payload</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">secret</span><span class="o">:</span><span class="w"> </span><span class="kt">this.config.get</span><span class="p">(</span><span class="s1">&#39;JWT_REFRESH_SECRET&#39;</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">expiresIn</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;7d&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="p">}),</span>
+<span class="w">    </span><span class="p">]);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">accessToken</span><span class="p">,</span><span class="w"> </span><span class="nx">refreshToken</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Auth Controller</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// auth/auth.controller.ts</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">Controller</span><span class="p">,</span><span class="w"> </span><span class="nx">Post</span><span class="p">,</span><span class="w"> </span><span class="nx">Body</span><span class="p">,</span><span class="w"> </span><span class="nx">UseGuards</span><span class="p">,</span><span class="w"> </span><span class="nx">Get</span><span class="p">,</span><span class="w"> </span><span class="nx">Request</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">HttpCode</span><span class="p">,</span><span class="w"> </span><span class="nx">HttpStatus</span><span class="p">,</span>
+<span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/common&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">AuthService</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./auth.service&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">LocalAuthGuard</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./guards/local-auth.guard&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">JwtAuthGuard</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./guards/jwt-auth.guard&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Public</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./decorators/public.decorator&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">CurrentUser</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./decorators/current-user.decorator&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">RegisterDto</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./dto/register.dto&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">LoginDto</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./dto/login.dto&#39;</span><span class="p">;</span>
+
+<span class="kd">@Controller</span><span class="p">(</span><span class="s1">&#39;auth&#39;</span><span class="p">)</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">AuthController</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="k">private</span><span class="w"> </span><span class="nx">authService</span><span class="o">:</span><span class="w"> </span><span class="kt">AuthService</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+
+<span class="w">  </span><span class="kd">@Public</span><span class="p">()</span>
+<span class="w">  </span><span class="kd">@Post</span><span class="p">(</span><span class="s1">&#39;register&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">register</span><span class="p">(</span><span class="kd">@Body</span><span class="p">()</span><span class="w"> </span><span class="nx">dto</span><span class="o">:</span><span class="w"> </span><span class="kt">RegisterDto</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">authService</span><span class="p">.</span><span class="nx">register</span><span class="p">(</span><span class="nx">dto</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">@Public</span><span class="p">()</span>
+<span class="w">  </span><span class="kd">@UseGuards</span><span class="p">(</span><span class="nx">LocalAuthGuard</span><span class="p">)</span>
+<span class="w">  </span><span class="kd">@Post</span><span class="p">(</span><span class="s1">&#39;login&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="kd">@HttpCode</span><span class="p">(</span><span class="nx">HttpStatus</span><span class="p">.</span><span class="nx">OK</span><span class="p">)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">login</span><span class="p">(</span><span class="kd">@Request</span><span class="p">()</span><span class="w"> </span><span class="nx">req</span><span class="o">:</span><span class="w"> </span><span class="kt">any</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">authService</span><span class="p">.</span><span class="nx">login</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">@UseGuards</span><span class="p">(</span><span class="nx">JwtAuthGuard</span><span class="p">)</span>
+<span class="w">  </span><span class="kd">@Get</span><span class="p">(</span><span class="s1">&#39;profile&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="nx">getProfile</span><span class="p">(</span><span class="kd">@CurrentUser</span><span class="p">()</span><span class="w"> </span><span class="nx">user</span><span class="o">:</span><span class="w"> </span><span class="kt">any</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">user</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">@UseGuards</span><span class="p">(</span><span class="nx">JwtAuthGuard</span><span class="p">)</span>
+<span class="w">  </span><span class="kd">@Post</span><span class="p">(</span><span class="s1">&#39;change-password&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">changePassword</span><span class="p">(</span>
+<span class="w">    </span><span class="kd">@CurrentUser</span><span class="p">(</span><span class="s1">&#39;id&#39;</span><span class="p">)</span><span class="w"> </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span>
+<span class="w">    </span><span class="kd">@Body</span><span class="p">()</span><span class="w"> </span><span class="nx">dto</span><span class="o">:</span><span class="w"> </span><span class="kt">ChangePasswordDto</span><span class="p">,</span>
+<span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">authService</span><span class="p">.</span><span class="nx">changePassword</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">dto</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>DTOs</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// auth/dto/register.dto.ts</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">IsEmail</span><span class="p">,</span><span class="w"> </span><span class="nx">IsString</span><span class="p">,</span><span class="w"> </span><span class="nx">MinLength</span><span class="p">,</span><span class="w"> </span><span class="nx">MaxLength</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;class-validator&#39;</span><span class="p">;</span>
+
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">RegisterDto</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">@IsString</span><span class="p">()</span>
+<span class="w">  </span><span class="kd">@MinLength</span><span class="p">(</span><span class="mf">2</span><span class="p">)</span>
+<span class="w">  </span><span class="kd">@MaxLength</span><span class="p">(</span><span class="mf">50</span><span class="p">)</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">@IsEmail</span><span class="p">()</span>
+<span class="w">  </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">@IsString</span><span class="p">()</span>
+<span class="w">  </span><span class="kd">@MinLength</span><span class="p">(</span><span class="mf">8</span><span class="p">)</span>
+<span class="w">  </span><span class="nx">password</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// auth/dto/login.dto.ts</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">LoginDto</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">@IsEmail</span><span class="p">()</span>
+<span class="w">  </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">@IsString</span><span class="p">()</span>
+<span class="w">  </span><span class="nx">password</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Global JWT Auth Guard</h2>
+<p>Protect all routes by default:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// auth/guards/jwt-auth.guard.ts</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ExecutionContext</span><span class="p">,</span><span class="w"> </span><span class="nx">Injectable</span><span class="p">,</span><span class="w"> </span><span class="nx">UnauthorizedException</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/common&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Reflector</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/core&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">AuthGuard</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/passport&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">IS_PUBLIC_KEY</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;../decorators/public.decorator&#39;</span><span class="p">;</span>
+
+<span class="kd">@Injectable</span><span class="p">()</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">JwtAuthGuard</span><span class="w"> </span><span class="k">extends</span><span class="w"> </span><span class="nx">AuthGuard</span><span class="p">(</span><span class="s1">&#39;jwt&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="k">private</span><span class="w"> </span><span class="nx">reflector</span><span class="o">:</span><span class="w"> </span><span class="kt">Reflector</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">super</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">canActivate</span><span class="p">(</span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="kt">ExecutionContext</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">isPublic</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">reflector</span><span class="p">.</span><span class="nx">getAllAndOverride</span><span class="o">&lt;</span><span class="kt">boolean</span><span class="o">&gt;</span><span class="p">(</span><span class="nx">IS_PUBLIC_KEY</span><span class="p">,</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="nx">context</span><span class="p">.</span><span class="nx">getHandler</span><span class="p">(),</span>
+<span class="w">      </span><span class="nx">context</span><span class="p">.</span><span class="nx">getClass</span><span class="p">(),</span>
+<span class="w">    </span><span class="p">]);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">isPublic</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">super</span><span class="p">.</span><span class="nx">canActivate</span><span class="p">(</span><span class="nx">context</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">handleRequest</span><span class="p">(</span><span class="nx">err</span><span class="o">:</span><span class="w"> </span><span class="kt">any</span><span class="p">,</span><span class="w"> </span><span class="nx">user</span><span class="o">:</span><span class="w"> </span><span class="kt">any</span><span class="p">,</span><span class="w"> </span><span class="nx">info</span><span class="o">:</span><span class="w"> </span><span class="kt">any</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">UnauthorizedException</span><span class="p">(</span>
+<span class="w">        </span><span class="nx">info</span><span class="o">?</span><span class="p">.</span><span class="nx">name</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;TokenExpiredError&#39;</span>
+<span class="w">          </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;Token has expired&#39;</span>
+<span class="w">          </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid authentication token&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">user</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Register globally:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// app.module.ts</span>
+<span class="kd">@Module</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">imports</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">AuthModule</span><span class="p">,</span><span class="w"> </span><span class="nx">UsersModule</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">providers</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">provide</span><span class="o">:</span><span class="w"> </span><span class="kt">APP_GUARD</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">useClass</span><span class="o">:</span><span class="w"> </span><span class="kt">JwtAuthGuard</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="p">})</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">AppModule</span><span class="w"> </span><span class="p">{}</span>
+</code></pre></div>
+
+<h2>Token Extraction Options</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// From Authorization header (most common)</span>
+<span class="nx">ExtractJwt</span><span class="p">.</span><span class="nx">fromAuthHeaderAsBearerToken</span><span class="p">()</span>
+
+<span class="c1">// From query parameter</span>
+<span class="nx">ExtractJwt</span><span class="p">.</span><span class="nx">fromUrlQueryParameter</span><span class="p">(</span><span class="s1">&#39;token&#39;</span><span class="p">)</span>
+
+<span class="c1">// From cookie</span>
+<span class="nx">jwtFromRequest</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">cookies</span><span class="o">?</span><span class="p">.</span><span class="nx">access_token</span>
+
+<span class="c1">// From custom header</span>
+<span class="nx">ExtractJwt</span><span class="p">.</span><span class="nx">fromHeader</span><span class="p">(</span><span class="s1">&#39;x-auth-token&#39;</span><span class="p">)</span>
+
+<span class="c1">// Try multiple sources</span>
+<span class="nx">jwtFromRequest</span><span class="o">:</span><span class="w"> </span><span class="kt">ExtractJwt.fromExtractors</span><span class="p">([</span>
+<span class="w">  </span><span class="nx">ExtractJwt</span><span class="p">.</span><span class="nx">fromAuthHeaderAsBearerToken</span><span class="p">(),</span>
+<span class="w">  </span><span class="p">(</span><span class="nx">req</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">cookies</span><span class="o">?</span><span class="p">.</span><span class="nx">access_token</span><span class="p">,</span>
+<span class="p">])</span>
+</code></pre></div>
+
+<h2>Asymmetric Keys (RS256)</h2>
+<p>For production, consider using RSA key pairs:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">readFileSync</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;fs&#39;</span><span class="p">;</span>
+
+<span class="kd">@Module</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">imports</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="nx">JwtModule</span><span class="p">.</span><span class="nx">registerAsync</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">useFactory</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">config</span><span class="o">:</span><span class="w"> </span><span class="kt">ConfigService</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">        </span><span class="nx">privateKey</span><span class="o">:</span><span class="w"> </span><span class="kt">readFileSync</span><span class="p">(</span><span class="nx">config</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;JWT_PRIVATE_KEY_PATH&#39;</span><span class="p">)),</span>
+<span class="w">        </span><span class="nx">publicKey</span><span class="o">:</span><span class="w"> </span><span class="kt">readFileSync</span><span class="p">(</span><span class="nx">config</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;JWT_PUBLIC_KEY_PATH&#39;</span><span class="p">)),</span>
+<span class="w">        </span><span class="nx">signOptions</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">algorithm</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;RS256&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">expiresIn</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;15m&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">}),</span>
+<span class="w">      </span><span class="nx">inject</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">ConfigService</span><span class="p">],</span>
+<span class="w">    </span><span class="p">}),</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="p">})</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">AuthModule</span><span class="w"> </span><span class="p">{}</span>
+
+<span class="c1">// In JwtStrategy:</span>
+<span class="k">super</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">jwtFromRequest</span><span class="o">:</span><span class="w"> </span><span class="kt">ExtractJwt.fromAuthHeaderAsBearerToken</span><span class="p">(),</span>
+<span class="w">  </span><span class="nx">secretOrKey</span><span class="o">:</span><span class="w"> </span><span class="kt">readFileSync</span><span class="p">(</span><span class="nx">config</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;JWT_PUBLIC_KEY_PATH&#39;</span><span class="p">)),</span>
+<span class="w">  </span><span class="nx">algorithms</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;RS256&#39;</span><span class="p">],</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<p>RS256 allows services to verify tokens without knowing the private signing key.</p>
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Short-lived tokens without refresh</strong> -- Access tokens should expire quickly (15 min). Without refresh tokens, users must re-login constantly.</li>
+<li><strong>Storing tokens in localStorage</strong> -- Vulnerable to XSS attacks. Consider httpOnly cookies for web apps.</li>
+<li><strong>Including sensitive data in JWT payload</strong> -- JWTs are base64-encoded, not encrypted. Anyone can read the payload. Never include passwords or sensitive PII.</li>
+<li><strong>Not checking user existence in validate()</strong> -- A valid token for a deleted user should be rejected.</li>
+</ol>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Complete JWT Auth Module</div>
+                    <div class="exercise-desc"><p>Create a full authentication module with: register (with email uniqueness check), login (with JWT generation), profile endpoint (protected), and change-password endpoint. Include proper DTOs with validation, bcrypt password hashing, and error handling.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Follow the module structure in this lesson. Use bcrypt with a salt round of 12. Generate both access and refresh tokens. Return user info (without password) on login.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Global Auth with Public Routes</div>
+                    <div class="exercise-desc"><p>Register JwtAuthGuard globally using APP_GUARD. Create a @Public() decorator to mark open routes. Verify that: /auth/login and /auth/register are public, /users endpoints require auth, and /health is public.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use SetMetadata for the @Public() decorator. In the guard's canActivate(), use Reflector to check for the public metadata before calling super.canActivate().</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Add Token Extraction from Cookies</div>
+                    <div class="exercise-desc"><p>Modify the JWT strategy to extract tokens from httpOnly cookies as a fallback when no Bearer token is present. Set the cookie on login. Include CSRF protection for cookie-based auth.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a custom extractor function that checks cookies: <code>(req) =&gt; req.cookies?.access_token</code>. Set the cookie with <code>res.cookie('access_token', token, { httpOnly: true, secure: true })</code>. Use the csurf package for CSRF protection.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Token expired error even with a fresh token</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Server time is out of sync, or the JWT_EXPIRES_IN value is too short (e.g., '1s' instead of '1h').
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Check the expiresIn value in JwtModule configuration. Ensure server clock is synchronized (use NTP). Decode the token at jwt.io to inspect the exp claim.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">JwtStrategy validate() is never called</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The token is invalid or expired, so Passport rejects it before calling validate(). Or the JwtStrategy is not registered as a provider.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> 1) Add JwtStrategy to the module's providers. 2) Verify the JWT_SECRET matches between token signing and strategy. 3) Check that the token format is 'Bearer <token>' in the Authorization header.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Different JWT secret between auth service and strategy</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> JwtModule.register() and JwtStrategy use different values for the secret, causing token verification to fail.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use ConfigService in both places to ensure the same secret. Better yet, use JwtModule.registerAsync() and inject ConfigService in the strategy.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://docs.nestjs.com/security/authentication#jwt-functionality" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">NestJS JWT Authentication Recipe</div>
+                    
+                </a>
+                
+                <a href="https://jwt.io/introduction" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">JWT.io - JSON Web Tokens Introduction</div>
+                    
+                    <div class="resource-note">Interactive JWT debugger and educational resource.</div>
+                    
+                </a>
+                
+                <a href="https://github.com/nestjs/jwt" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">@nestjs/jwt Documentation</div>
+                    
+                </a>
+                
+                <a href="https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_for_Java_Cheat_Sheet.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">OWASP JWT Security Cheat Sheet</div>
+                    
+                    <div class="resource-note">Security best practices for JWT implementations.</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/4.4.1-js.html" class="btn">&larr; @nestjs/passport: Strategies and Guards</a>
+            
+            
+            <a href="/backend-learning/lesson/4.4.3-js.html" class="btn">Refresh Tokens and Token Revocation &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-4-js.html">&larr; Back to Web Frameworks — NestJS</a>
+        </div>
+    </div>
+</body>
+</html>

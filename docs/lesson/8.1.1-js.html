@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Client-Server Model and Request Lifecycle - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-js.html">System Design & Scalability</a> &rsaquo;
+            System Design Fundamentals
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.1.1</span>
+                <span>~2h</span>
+            </div>
+            <h1>Client-Server Model and Request Lifecycle</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a restaurant: the client is a customer placing an order, the waiter (HTTP) carries it to the kitchen (server), which coordinates cooks (services), pantry (database), and prep station (cache) to assemble the meal (response) and send it back.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Client-Server Model and Request Lifecycle</h1>
+<h2>Introduction</h2>
+<p>Every backend system you will ever build rests on the <strong>client-server model</strong> — a foundational architectural pattern where clients send requests and servers produce responses. Understanding the full lifecycle of a request, from the moment a user clicks a button to the instant a response renders on screen, is the single most important mental model for system design.</p>
+<h2>The Client-Server Model</h2>
+<p>At its core, the client-server model divides computing into two roles:</p>
+<ul>
+<li><strong>Client</strong>: Initiates requests (browser, mobile app, CLI tool, another service)</li>
+<li><strong>Server</strong>: Listens for requests, processes them, and returns responses</li>
+</ul>
+<div class="highlight"><pre><span></span><code>┌──────────┐         HTTP Request          ┌──────────┐
+│          │ ──────────────────────────────&gt;│          │
+│  Client  │                               │  Server  │
+│          │ &lt;─────────────────────────────-│          │
+└──────────┘         HTTP Response          └──────────┘
+</code></pre></div>
+
+<p>This seems simple, but in modern systems the "server" is rarely a single machine. It is a distributed system of load balancers, application servers, caches, databases, and message queues.</p>
+<h2>DNS Resolution</h2>
+<p>When a client types <code>https://api.example.com/users</code> into a browser, the very first step is DNS resolution:</p>
+<div class="highlight"><pre><span></span><code>┌────────┐    ┌──────────────┐    ┌────────────┐    ┌──────────────┐
+│ Client │───&gt;│ DNS Resolver  │───&gt;│ Root NS    │───&gt;│ .com NS      │
+│        │    │ (ISP/Google)  │    │            │    │              │
+│        │    └──────────────┘    └────────────┘    └──────────────┘
+│        │           │                                      │
+│        │           │         ┌─────────────────┐          │
+│        │           └────────&gt;│ example.com NS  │&lt;─────────┘
+│        │                     │ Returns IP:     │
+│        │&lt;────────────────────│ 93.184.216.34   │
+└────────┘                     └─────────────────┘
+</code></pre></div>
+
+<p>In Node.js, DNS resolution happens automatically in <code>http</code> and <code>https</code> modules, but you can inspect it:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">dns</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:dns/promises&#39;</span><span class="p">;</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">resolveDomain</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">addresses</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">dns</span><span class="p">.</span><span class="nx">resolve4</span><span class="p">(</span><span class="s1">&#39;api.example.com&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;IP addresses:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">addresses</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">full</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">dns</span><span class="p">.</span><span class="nx">resolveAny</span><span class="p">(</span><span class="s1">&#39;api.example.com&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;All records:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">full</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="nx">resolveDomain</span><span class="p">();</span>
+</code></pre></div>
+
+<h2>TCP Connection and TLS Handshake</h2>
+<p>Once the IP is resolved, the client establishes a TCP connection via a three-way handshake, followed by a TLS handshake for HTTPS:</p>
+<div class="highlight"><pre><span></span><code>Client                          Server
+  │                               │
+  │──── SYN ─────────────────────&gt;│   TCP
+  │&lt;─── SYN-ACK ─────────────────│   Three-Way
+  │──── ACK ─────────────────────&gt;│   Handshake
+  │                               │
+  │──── ClientHello ─────────────&gt;│   TLS
+  │&lt;─── ServerHello + Cert ───────│   Handshake
+  │──── Key Exchange ────────────&gt;│   (adds ~1-2 RTT)
+  │&lt;─── Finished ────────────────-│
+  │                               │
+  │──── HTTP Request ────────────&gt;│   Application
+  │&lt;─── HTTP Response ───────────-│   Data
+</code></pre></div>
+
+<p>The TCP + TLS handshake adds latency. This is why <strong>connection reuse</strong> (HTTP keep-alive, HTTP/2 multiplexing) matters enormously for performance.</p>
+<h2>The HTTP Request</h2>
+<p>An HTTP request consists of:</p>
+<div class="highlight"><pre><span></span><code>GET /api/users?page=1&amp;limit=20 HTTP/1.1
+Host: api.example.com
+Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
+Accept: application/json
+Connection: keep-alive
+</code></pre></div>
+
+<p>In Express.js, you can inspect every part of this:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">((</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">method</span><span class="p">,</span><span class="w">           </span><span class="c1">// GET</span>
+<span class="w">    </span><span class="nx">path</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">path</span><span class="p">,</span><span class="w">               </span><span class="c1">// /api/users</span>
+<span class="w">    </span><span class="nx">query</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">,</span><span class="w">             </span><span class="c1">// { page: &#39;1&#39;, limit: &#39;20&#39; }</span>
+<span class="w">    </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">headers</span><span class="p">,</span><span class="w">         </span><span class="c1">// all headers</span>
+<span class="w">    </span><span class="nx">ip</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">ip</span><span class="p">,</span><span class="w">                   </span><span class="c1">// client IP</span>
+<span class="w">    </span><span class="nx">protocol</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">protocol</span><span class="p">,</span><span class="w">       </span><span class="c1">// https</span>
+<span class="w">    </span><span class="nx">hostname</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">hostname</span><span class="p">,</span><span class="w">       </span><span class="c1">// api.example.com</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">next</span><span class="p">();</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Server-Side Request Lifecycle</h2>
+<p>Once the request hits your Node.js server, it goes through a well-defined pipeline:</p>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────────────┐
+│                    Node.js Server                        │
+│                                                         │
+│  Incoming ──&gt; Middleware ──&gt; Route ──&gt; Controller ──&gt;    │
+│  Request      Pipeline      Match     Logic             │
+│                                                         │
+│               │ CORS        │         │ Validate        │
+│               │ Auth        │         │ Query DB        │
+│               │ Logging     │         │ Transform       │
+│               │ Body Parse  │         │ Respond         │
+│                                                         │
+│  &lt;── Response &lt;── Error Handler &lt;── Service Layer &lt;──   │
+└─────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<p>Here is a complete Express example showing the full lifecycle:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@prisma/client&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="p">();</span>
+
+<span class="c1">// 1. Body parsing middleware</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">express</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+
+<span class="c1">// 2. Logging middleware</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">((</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;finish&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">duration</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">start</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">method</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">path</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">res</span><span class="p">.</span><span class="nx">statusCode</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">duration</span><span class="si">}</span><span class="sb">ms`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">next</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="c1">// 3. Auth middleware</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">headers</span><span class="p">.</span><span class="nx">authorization</span><span class="o">?</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">&#39; &#39;</span><span class="p">)[</span><span class="mf">1</span><span class="p">];</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">token</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">401</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;No token&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">verifyToken</span><span class="p">(</span><span class="nx">token</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">next</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">401</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid token&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// 4. Route handler (controller)</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/users&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">page</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">20</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">skip</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">page</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">limit</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">users</span><span class="p">,</span><span class="w"> </span><span class="nx">total</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">([</span>
+<span class="w">      </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span><span class="w"> </span><span class="nx">skip</span><span class="p">,</span><span class="w"> </span><span class="nx">take</span><span class="o">:</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">      </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">count</span><span class="p">(),</span>
+<span class="w">    </span><span class="p">]);</span>
+
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">users</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">meta</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">page</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span><span class="w"> </span><span class="nx">total</span><span class="p">,</span><span class="w"> </span><span class="nx">pages</span><span class="o">:</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">ceil</span><span class="p">(</span><span class="nx">total</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">next</span><span class="p">(</span><span class="nx">err</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="c1">// 5. Global error handler</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">((</span><span class="nx">err</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">stack</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Internal server error&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="mf">3000</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>The Event Loop's Role</h2>
+<p>Node.js processes requests using a single-threaded event loop. Understanding this is critical for system design:</p>
+<div class="highlight"><pre><span></span><code>   ┌───────────────────────────┐
+┌─&gt;│           timers          │  setTimeout, setInterval
+│  └─────────────┬─────────────┘
+│  ┌─────────────┴─────────────┐
+│  │     pending callbacks     │  I/O callbacks
+│  └─────────────┬─────────────┘
+│  ┌─────────────┴─────────────┐
+│  │       idle, prepare       │  internal use
+│  └─────────────┬─────────────┘
+│  ┌─────────────┴─────────────┐
+│  │           poll            │  incoming connections, data
+│  └─────────────┬─────────────┘
+│  ┌─────────────┴─────────────┐
+│  │           check           │  setImmediate
+│  └─────────────┬─────────────┘
+│  ┌─────────────┴─────────────┐
+│  │      close callbacks      │  socket.on(&#39;close&#39;)
+│  └─────────────┬─────────────┘
+└─────────────────┘
+</code></pre></div>
+
+<p>This single-threaded model means a CPU-heavy synchronous operation blocks ALL concurrent requests. This is why you must never do CPU-intensive work on the main thread.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// BAD: Blocks the event loop</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/hash&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">computeExpensiveHash</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span><span class="w"> </span><span class="c1">// blocks!</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// GOOD: Offload to worker thread</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Worker</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:worker_threads&#39;</span><span class="p">;</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/hash&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">worker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;./hash-worker.js&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">workerData</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">data</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">worker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;message&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">result</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="p">}));</span>
+<span class="w">  </span><span class="nx">worker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;error&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="p">}));</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Full Request Lifecycle in Production</h2>
+<p>In a real production system, the request lifecycle is much more complex:</p>
+<div class="highlight"><pre><span></span><code>Client
+  │
+  ▼
+CDN (static assets, edge caching)
+  │
+  ▼
+Load Balancer (L4/L7 - Nginx, ALB, HAProxy)
+  │
+  ▼
+API Gateway (rate limiting, auth, routing)
+  │
+  ▼
+Application Server (Node.js)
+  │
+  ├──&gt; In-Memory Cache (node-cache, LRU)
+  ├──&gt; Distributed Cache (Redis via ioredis)
+  ├──&gt; Database (PostgreSQL via Prisma)
+  ├──&gt; Message Queue (BullMQ / Kafka)
+  └──&gt; External Services (payment, email, etc.)
+  │
+  ▼
+Response travels back through the same chain
+</code></pre></div>
+
+<h2>Keep-Alive and Connection Pooling</h2>
+<p>Connection reuse is a key optimization. Node.js HTTP clients support keep-alive:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">http</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:http&#39;</span><span class="p">;</span>
+
+<span class="c1">// Create a reusable agent with keep-alive</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">Agent</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">keepAlive</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">maxSockets</span><span class="o">:</span><span class="w"> </span><span class="mf">50</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">maxFreeSockets</span><span class="o">:</span><span class="w"> </span><span class="mf">10</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">60000</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="c1">// Use with fetch or http.request</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s1">&#39;http://internal-service/api/data&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">agent</span><span class="p">,</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<p>For database connections, use connection pooling (Prisma does this automatically):</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Prisma connection pool configuration</span>
+<span class="c1">// In schema.prisma:</span>
+<span class="c1">// datasource db {</span>
+<span class="c1">//   provider = &quot;postgresql&quot;</span>
+<span class="c1">//   url      = env(&quot;DATABASE_URL&quot;)  // ?connection_limit=20&amp;pool_timeout=10</span>
+<span class="c1">// }</span>
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Forgetting DNS caching</strong>: DNS lookups for external services add latency on every request. Use <code>cacheable-lookup</code> or configure DNS TTL.</li>
+<li><strong>Not reusing connections</strong>: Creating new TCP connections per request wastes time on handshakes.</li>
+<li><strong>Blocking the event loop</strong>: Synchronous file reads, JSON parsing of huge payloads, or regex on user input.</li>
+<li><strong>Ignoring response lifecycle</strong>: Not calling <code>res.end()</code> or <code>next()</code> causes requests to hang.</li>
+</ol>
+<h2>Summary</h2>
+<p>The client-server request lifecycle involves DNS resolution, TCP/TLS handshake, HTTP request/response, middleware pipeline, business logic, database queries, and response serialization. In Node.js, the single-threaded event loop handles concurrency through async I/O. Understanding each step lets you identify bottlenecks and design systems that scale.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Trace a Request</div>
+                    <div class="exercise-desc"><p>Build an Express middleware that logs every phase of the request lifecycle: when the request arrives, after auth, after DB query, and when the response is sent. Include timestamps to measure each phase's duration.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>res.on('finish', ...)</code> and store <code>Date.now()</code> at each middleware checkpoint using <code>req.timings = {}</code>.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Connection Reuse Benchmark</div>
+                    <div class="exercise-desc"><p>Write a script that makes 100 sequential HTTP requests to a local Express server, first without keep-alive, then with keep-alive enabled. Measure and compare total time.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>node:http</code> Agent with <code>keepAlive: true</code> vs the default agent. Use <code>console.time</code> to measure.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Event Loop Blocking Detector</div>
+                    <div class="exercise-desc"><p>Create a middleware that detects when the event loop is blocked for more than 100ms. Log a warning with the route that caused the block.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>monitorEventLoopDelay</code> from <code>node:perf_hooks</code> or periodically check <code>Date.now()</code> drift with <code>setInterval</code>.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Requests to the server are timing out intermittently</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Some requests complete in <50ms while others take 5+ seconds. Server CPU shows 100% on one core.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> A synchronous operation (large JSON parse, crypto, or regex) is blocking the event loop, preventing other requests from being processed.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Profile with `clinic doctor` or `--prof` flag. Offload CPU-intensive work to worker threads. Use streaming JSON parsers for large payloads.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">High latency on first request after idle period</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> TCP connections and DNS cache have expired. The first request must re-establish connections (DNS lookup + TCP handshake + TLS handshake).
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Enable HTTP keep-alive with appropriate timeouts. Use DNS caching libraries. Implement health check endpoints that keep connections warm.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Express app crashes with 'socket hang up' errors</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Upstream service or database closed the connection before the response was sent, often due to timeout mismatch.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Set appropriate timeouts on all HTTP clients and database connections. Implement retry logic with exponential backoff. Ensure server timeout > upstream timeout.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://nodejs.org/en/docs/guides/event-loop-timers-and-nexttick" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Node.js Event Loop Documentation</div>
+                    
+                    <div class="resource-note">Official guide to understanding the event loop phases</div>
+                    
+                </a>
+                
+                <a href="https://hpbn.co/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">High Performance Browser Networking</div>
+                    
+                    <div class="resource-note">Free online book covering TCP, TLS, HTTP/2 and networking fundamentals</div>
+                    
+                </a>
+                
+                <a href="https://howdns.works/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag interactive">interactive</div>
+                    <div class="resource-title">How DNS Works</div>
+                    
+                    <div class="resource-note">Visual comic explaining DNS resolution step by step</div>
+                    
+                </a>
+                
+                <a href="https://expressjs.com/en/guide/writing-middleware.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Express.js Request Lifecycle</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/8.1.2-js.html" class="btn">Load Balancing: Algorithms and Strategies &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-js.html">&larr; Back to System Design & Scalability</a>
+        </div>
+    </div>
+</body>
+</html>

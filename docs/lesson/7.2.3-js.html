@@ -1,0 +1,1009 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RBAC and ABAC: Role and Attribute-Based Access Control - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-7-js.html">Security & Reliability</a> &rsaquo;
+            Authentication & Authorization
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">7.2.3</span>
+                <span>~3h</span>
+            </div>
+            <h1>RBAC and ABAC: Role and Attribute-Based Access Control</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>RBAC is like a building access card system: your card says you are an "Engineer" and that gives you access to the engineering floor, the lab, and the cafeteria. ABAC is like a smart building that also checks the time of day, whether you booked the conference room, and whether you have completed your safety training before letting you into the lab. Most real buildings use both: the card gets you in the door (RBAC), but certain rooms have additional rules (ABAC).</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>RBAC and ABAC: Role and Attribute-Based Access Control</h1>
+<h2>Why Access Control Matters</h2>
+<p>Authentication answers "Who are you?" Authorization answers "What are you allowed to do?" Even after you know a user is Alice, you need to determine whether Alice can delete a blog post, approve a purchase order, or access the admin dashboard.</p>
+<p>Getting authorization wrong leads to some of the most dangerous security vulnerabilities: users accessing other users' data, regular users performing admin actions, or sensitive operations being exposed to the public.</p>
+<h2>The Access Control Spectrum</h2>
+<div class="highlight"><pre><span></span><code>Simple                                                 Complex
+  │                                                       │
+  ▼                                                       ▼
+┌────────┐    ┌────────┐    ┌────────┐    ┌────────────┐
+│  ACL    │    │  RBAC  │    │  ABAC  │    │  ReBAC     │
+│         │    │        │    │        │    │            │
+│ User -&gt; │    │ User -&gt;│    │ Policies│    │ Relations  │
+│ Resource│    │ Role -&gt;│    │ evaluate│    │ between    │
+│ mapping │    │ Perms  │    │ context │    │ objects    │
+└────────┘    └────────┘    └────────┘    └────────────┘
+  Lists of     Roles group   Rules based   Google Docs
+  who can do   permissions   on attributes  style sharing
+  what         together      at runtime
+</code></pre></div>
+
+<h2>RBAC: Role-Based Access Control</h2>
+<p>RBAC is the most widely used authorization model. The core idea is simple: instead of assigning permissions directly to users, you create roles (like "admin", "editor", "viewer") and assign permissions to those roles. Then you assign roles to users.</p>
+<h3>RBAC Data Model</h3>
+<div class="highlight"><pre><span></span><code>┌──────────┐       ┌──────────┐       ┌──────────────┐
+│  Users    │──M:N──│  Roles   │──M:N──│  Permissions  │
+│           │       │          │       │               │
+│  alice    │       │  admin   │       │  posts:create  │
+│  bob      │       │  editor  │       │  posts:read    │
+│  charlie  │       │  viewer  │       │  posts:update  │
+│           │       │          │       │  posts:delete  │
+│           │       │          │       │  users:manage  │
+└──────────┘       └──────────┘       └──────────────┘
+
+alice  -&gt; admin   -&gt; posts:create, posts:read, posts:update,
+                     posts:delete, users:manage
+bob    -&gt; editor  -&gt; posts:create, posts:read, posts:update
+charlie -&gt; viewer -&gt; posts:read
+</code></pre></div>
+
+<h3>Database Schema</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// prisma/schema.prisma equivalent in SQL</span>
+<span class="c1">// Using a permission-string approach (simpler)</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">knex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;knex&#39;</span><span class="p">);</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">createRBACTables</span><span class="p">(</span><span class="nx">knex</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Roles table</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">knex</span><span class="p">.</span><span class="nx">schema</span><span class="p">.</span><span class="nx">createTable</span><span class="p">(</span><span class="s1">&#39;roles&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">table</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">increments</span><span class="p">(</span><span class="s1">&#39;id&#39;</span><span class="p">).</span><span class="nx">primary</span><span class="p">();</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">string</span><span class="p">(</span><span class="s1">&#39;name&#39;</span><span class="p">).</span><span class="nx">unique</span><span class="p">().</span><span class="nx">notNullable</span><span class="p">();</span><span class="w">   </span><span class="c1">// &#39;admin&#39;, &#39;editor&#39;</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">string</span><span class="p">(</span><span class="s1">&#39;description&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">timestamps</span><span class="p">(</span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Permissions table</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">knex</span><span class="p">.</span><span class="nx">schema</span><span class="p">.</span><span class="nx">createTable</span><span class="p">(</span><span class="s1">&#39;permissions&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">table</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">increments</span><span class="p">(</span><span class="s1">&#39;id&#39;</span><span class="p">).</span><span class="nx">primary</span><span class="p">();</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">string</span><span class="p">(</span><span class="s1">&#39;resource&#39;</span><span class="p">).</span><span class="nx">notNullable</span><span class="p">();</span><span class="w">   </span><span class="c1">// &#39;posts&#39;, &#39;users&#39;</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">string</span><span class="p">(</span><span class="s1">&#39;action&#39;</span><span class="p">).</span><span class="nx">notNullable</span><span class="p">();</span><span class="w">     </span><span class="c1">// &#39;create&#39;, &#39;read&#39;, &#39;update&#39;, &#39;delete&#39;</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">string</span><span class="p">(</span><span class="s1">&#39;description&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">unique</span><span class="p">([</span><span class="s1">&#39;resource&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;action&#39;</span><span class="p">]);</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Role-Permission mapping (M:N)</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">knex</span><span class="p">.</span><span class="nx">schema</span><span class="p">.</span><span class="nx">createTable</span><span class="p">(</span><span class="s1">&#39;role_permissions&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">table</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">integer</span><span class="p">(</span><span class="s1">&#39;role_id&#39;</span><span class="p">).</span><span class="nx">references</span><span class="p">(</span><span class="s1">&#39;id&#39;</span><span class="p">).</span><span class="nx">inTable</span><span class="p">(</span><span class="s1">&#39;roles&#39;</span><span class="p">).</span><span class="nx">onDelete</span><span class="p">(</span><span class="s1">&#39;CASCADE&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">integer</span><span class="p">(</span><span class="s1">&#39;permission_id&#39;</span><span class="p">).</span><span class="nx">references</span><span class="p">(</span><span class="s1">&#39;id&#39;</span><span class="p">).</span><span class="nx">inTable</span><span class="p">(</span><span class="s1">&#39;permissions&#39;</span><span class="p">).</span><span class="nx">onDelete</span><span class="p">(</span><span class="s1">&#39;CASCADE&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">primary</span><span class="p">([</span><span class="s1">&#39;role_id&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;permission_id&#39;</span><span class="p">]);</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// User-Role mapping (M:N)</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">knex</span><span class="p">.</span><span class="nx">schema</span><span class="p">.</span><span class="nx">createTable</span><span class="p">(</span><span class="s1">&#39;user_roles&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">table</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">integer</span><span class="p">(</span><span class="s1">&#39;user_id&#39;</span><span class="p">).</span><span class="nx">references</span><span class="p">(</span><span class="s1">&#39;id&#39;</span><span class="p">).</span><span class="nx">inTable</span><span class="p">(</span><span class="s1">&#39;users&#39;</span><span class="p">).</span><span class="nx">onDelete</span><span class="p">(</span><span class="s1">&#39;CASCADE&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">integer</span><span class="p">(</span><span class="s1">&#39;role_id&#39;</span><span class="p">).</span><span class="nx">references</span><span class="p">(</span><span class="s1">&#39;id&#39;</span><span class="p">).</span><span class="nx">inTable</span><span class="p">(</span><span class="s1">&#39;roles&#39;</span><span class="p">).</span><span class="nx">onDelete</span><span class="p">(</span><span class="s1">&#39;CASCADE&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">table</span><span class="p">.</span><span class="nx">primary</span><span class="p">([</span><span class="s1">&#39;user_id&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;role_id&#39;</span><span class="p">]);</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>RBAC Implementation</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// rbac/rbac-service.js</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">RBACService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">db</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">db</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">permissionCache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span><span class="w"> </span><span class="c1">// Cache: userId -&gt; Set&lt;permission&gt;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Get all permissions for a user (through their roles)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getUserPermissions</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Check cache first</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">permissionCache</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">userId</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">permissionCache</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">rows</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;user_roles&#39;</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="s1">&#39;role_permissions&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;user_roles.role_id&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;role_permissions.role_id&#39;</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="s1">&#39;permissions&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;role_permissions.permission_id&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;permissions.id&#39;</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">where</span><span class="p">(</span><span class="s1">&#39;user_roles.user_id&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">select</span><span class="p">(</span><span class="s1">&#39;permissions.resource&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;permissions.action&#39;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Set</span><span class="p">(</span>
+<span class="w">      </span><span class="nx">rows</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">r</span><span class="p">.</span><span class="nx">resource</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">r</span><span class="p">.</span><span class="nx">action</span><span class="si">}</span><span class="sb">`</span><span class="p">)</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Cache for 5 minutes</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">permissionCache</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">permissions</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">setTimeout</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">permissionCache</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">userId</span><span class="p">),</span><span class="w"> </span><span class="mf">5</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">permissions</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Check if a user has a specific permission</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">hasPermission</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">resource</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getUserPermissions</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">permissions</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">resource</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">action</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Check if a user has a specific role</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">hasRole</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">roleName</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">role</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;user_roles&#39;</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="s1">&#39;roles&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;user_roles.role_id&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;roles.id&#39;</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">where</span><span class="p">({</span><span class="w"> </span><span class="s1">&#39;user_roles.user_id&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;roles.name&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">roleName</span><span class="w"> </span><span class="p">})</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">first</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">!!</span><span class="nx">role</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Assign a role to a user</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">assignRole</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">roleName</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">role</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;roles&#39;</span><span class="p">).</span><span class="nx">where</span><span class="p">({</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="nx">roleName</span><span class="w"> </span><span class="p">}).</span><span class="nx">first</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">role</span><span class="p">)</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Role not found: </span><span class="si">${</span><span class="nx">roleName</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;user_roles&#39;</span><span class="p">).</span><span class="nx">insert</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">user_id</span><span class="o">:</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">role_id</span><span class="o">:</span><span class="w"> </span><span class="nx">role</span><span class="p">.</span><span class="nx">id</span>
+<span class="w">    </span><span class="p">}).</span><span class="nx">onConflict</span><span class="p">([</span><span class="s1">&#39;user_id&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;role_id&#39;</span><span class="p">]).</span><span class="nx">ignore</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// Invalidate cache</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">permissionCache</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Remove a role from a user</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">removeRole</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">roleName</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">role</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;roles&#39;</span><span class="p">).</span><span class="nx">where</span><span class="p">({</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="nx">roleName</span><span class="w"> </span><span class="p">}).</span><span class="nx">first</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">role</span><span class="p">)</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Role not found: </span><span class="si">${</span><span class="nx">roleName</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;user_roles&#39;</span><span class="p">).</span><span class="nx">where</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">user_id</span><span class="o">:</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">role_id</span><span class="o">:</span><span class="w"> </span><span class="nx">role</span><span class="p">.</span><span class="nx">id</span>
+<span class="w">    </span><span class="p">}).</span><span class="ow">delete</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">permissionCache</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">RBACService</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+
+<h3>Express Middleware for RBAC</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// rbac/middleware.js</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">requirePermission</span><span class="p">(</span><span class="nx">resource</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">401</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Authentication required&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">allowed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">rbac</span><span class="p">.</span><span class="nx">hasPermission</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">resource</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">allowed</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Forbidden&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="sb">`You do not have permission to </span><span class="si">${</span><span class="nx">action</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">resource</span><span class="si">}</span><span class="sb">`</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="nx">next</span><span class="p">();</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">requireRole</span><span class="p">(...</span><span class="nx">roles</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">401</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Authentication required&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">userRoles</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">(</span>
+<span class="w">      </span><span class="nx">roles</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">role</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">rbac</span><span class="p">.</span><span class="nx">hasRole</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">role</span><span class="p">))</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">userRoles</span><span class="p">.</span><span class="nx">some</span><span class="p">(</span><span class="nb">Boolean</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Forbidden&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="sb">`Required role: </span><span class="si">${</span><span class="nx">roles</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="s1">&#39; or &#39;</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="nx">next</span><span class="p">();</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+
+<span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">requirePermission</span><span class="p">,</span><span class="w"> </span><span class="nx">requireRole</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// routes/posts.js</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">requirePermission</span><span class="p">,</span><span class="w"> </span><span class="nx">requireRole</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;../rbac/middleware&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// Anyone with posts:read can list posts</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">requirePermission</span><span class="p">(</span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;read&#39;</span><span class="p">),</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">posts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">PostService</span><span class="p">.</span><span class="nx">findAll</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">posts</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Only users with posts:create can create</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">requirePermission</span><span class="p">(</span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;create&#39;</span><span class="p">),</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">PostService</span><span class="p">.</span><span class="nx">create</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">post</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Only admins can delete</span>
+<span class="nx">router</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="s1">&#39;/:id&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">requireRole</span><span class="p">(</span><span class="s1">&#39;admin&#39;</span><span class="p">),</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">PostService</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">204</span><span class="p">).</span><span class="nx">end</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">router</span><span class="p">;</span>
+</code></pre></div>
+
+<h3>Hierarchical Roles</h3>
+<p>In many systems, roles inherit from other roles. An admin has all editor permissions, and an editor has all viewer permissions.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// rbac/hierarchical-rbac.js</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">ROLE_HIERARCHY</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">admin</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;editor&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;viewer&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">editor</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;viewer&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">viewer</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="p">};</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">HierarchicalRBAC</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Get all roles including inherited ones</span>
+<span class="w">  </span><span class="nx">getEffectiveRoles</span><span class="p">(</span><span class="nx">role</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">roles</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Set</span><span class="p">([</span><span class="nx">role</span><span class="p">]);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">queue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="nx">role</span><span class="p">];</span>
+
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nx">queue</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">current</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">queue</span><span class="p">.</span><span class="nx">shift</span><span class="p">();</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">inherited</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ROLE_HIERARCHY</span><span class="p">[</span><span class="nx">current</span><span class="p">]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">parent</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">inherited</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">roles</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">parent</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">roles</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="nx">parent</span><span class="p">);</span>
+<span class="w">          </span><span class="nx">queue</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">parent</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">roles</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// admin -&gt; gets {admin, editor, viewer}</span>
+<span class="c1">// editor -&gt; gets {editor, viewer}</span>
+<span class="c1">// viewer -&gt; gets {viewer}</span>
+</code></pre></div>
+
+<h2>ABAC: Attribute-Based Access Control</h2>
+<p>RBAC works well for many scenarios, but it breaks down when access decisions depend on context: "Editors can edit posts, but only their own posts" or "Managers can approve expenses under $10,000, but directors can approve any amount."</p>
+<p>ABAC evaluates policies based on attributes of the <strong>subject</strong> (user), <strong>resource</strong> (what they are accessing), <strong>action</strong> (what they want to do), and <strong>environment</strong> (time, location, IP).</p>
+<h3>ABAC Concepts</h3>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────────────┐
+│                    ABAC Policy Engine                     │
+│                                                          │
+│  Subject Attributes  │  Resource Attributes               │
+│  - role: &quot;editor&quot;    │  - type: &quot;post&quot;                    │
+│  - department: &quot;eng&quot; │  - owner_id: 42                    │
+│  - clearance: 3      │  - status: &quot;draft&quot;                 │
+│                      │  - classification: &quot;internal&quot;       │
+│  Action Attributes   │  Environment Attributes             │
+│  - type: &quot;update&quot;    │  - time: &quot;2024-03-15T14:30:00Z&quot;    │
+│  - fields: [&quot;body&quot;] │  - ip: &quot;192.168.1.100&quot;              │
+│                      │  - mfa_verified: true               │
+│                                                          │
+│  Policy: ALLOW if                                        │
+│    subject.role == &quot;editor&quot; AND                          │
+│    resource.owner_id == subject.id AND                   │
+│    resource.status == &quot;draft&quot;                            │
+│                                                          │
+│  Result: ALLOW / DENY                                    │
+└─────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>ABAC Policy Engine</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// abac/policy-engine.js</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">PolicyEngine</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">policies</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">addPolicy</span><span class="p">(</span><span class="nx">policy</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">policies</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">policy</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">evaluate</span><span class="p">(</span><span class="nx">context</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Find all policies that apply to this action and resource</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">applicable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">policies</span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">policy</span><span class="w"> </span><span class="p">=&gt;</span>
+<span class="w">      </span><span class="nx">policy</span><span class="p">.</span><span class="nx">resource</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">resource</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">      </span><span class="nx">policy</span><span class="p">.</span><span class="nx">action</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">action</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">applicable</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">allowed</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nx">reason</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;No applicable policy found&#39;</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Deny-first: if any policy explicitly denies, deny</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">policy</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">applicable</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">policy</span><span class="p">.</span><span class="nx">evaluate</span><span class="p">(</span><span class="nx">context</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">effect</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;deny&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">allowed</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nx">reason</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">reason</span><span class="w"> </span><span class="p">};</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Then check for any allow</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">policy</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">applicable</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">policy</span><span class="p">.</span><span class="nx">evaluate</span><span class="p">(</span><span class="nx">context</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">effect</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;allow&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">allowed</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">reason</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">reason</span><span class="w"> </span><span class="p">};</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Default deny</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">allowed</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nx">reason</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;No policy granted access&#39;</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Define policies as objects</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">Policy</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">({</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">resource</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="p">,</span><span class="w"> </span><span class="nx">effect</span><span class="p">,</span><span class="w"> </span><span class="nx">condition</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">name</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">resource</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">resource</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">action</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">action</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">effect</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">effect</span><span class="p">;</span><span class="w"> </span><span class="c1">// &#39;allow&#39; or &#39;deny&#39;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">condition</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">condition</span><span class="p">;</span><span class="w"> </span><span class="c1">// function(context) =&gt; boolean</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">evaluate</span><span class="p">(</span><span class="nx">context</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">matches</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">condition</span><span class="p">(</span><span class="nx">context</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">effect</span><span class="o">:</span><span class="w"> </span><span class="nx">matches</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">effect</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;no_match&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">reason</span><span class="o">:</span><span class="w"> </span><span class="nx">matches</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">name</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PolicyEngine</span><span class="p">,</span><span class="w"> </span><span class="nx">Policy</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+
+<h3>Defining ABAC Policies</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// abac/policies.js</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PolicyEngine</span><span class="p">,</span><span class="w"> </span><span class="nx">Policy</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;./policy-engine&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">engine</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PolicyEngine</span><span class="p">();</span>
+
+<span class="c1">// Policy: Admins can do anything with posts</span>
+<span class="nx">engine</span><span class="p">.</span><span class="nx">addPolicy</span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="nx">Policy</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;admin-full-access&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;post&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;*&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">effect</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;allow&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">condition</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">subject</span><span class="p">.</span><span class="nx">roles</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;admin&#39;</span><span class="p">)</span>
+<span class="p">}));</span>
+
+<span class="c1">// Policy: Editors can update their own posts</span>
+<span class="nx">engine</span><span class="p">.</span><span class="nx">addPolicy</span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="nx">Policy</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;editor-own-posts&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;post&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">effect</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;allow&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">condition</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span>
+<span class="w">    </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">subject</span><span class="p">.</span><span class="nx">roles</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;editor&#39;</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">    </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">resource</span><span class="p">.</span><span class="nx">ownerId</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">subject</span><span class="p">.</span><span class="nx">id</span>
+<span class="p">}));</span>
+
+<span class="c1">// Policy: Editors can update any post if it is a draft</span>
+<span class="nx">engine</span><span class="p">.</span><span class="nx">addPolicy</span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="nx">Policy</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;editor-draft-posts&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;post&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">effect</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;allow&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">condition</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span>
+<span class="w">    </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">subject</span><span class="p">.</span><span class="nx">roles</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;editor&#39;</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">    </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">resource</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;draft&#39;</span>
+<span class="p">}));</span>
+
+<span class="c1">// Policy: No one can delete published posts (deny overrides allow)</span>
+<span class="nx">engine</span><span class="p">.</span><span class="nx">addPolicy</span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="nx">Policy</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;no-delete-published&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;post&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">effect</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;deny&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">condition</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">resource</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;published&#39;</span>
+<span class="p">}));</span>
+
+<span class="c1">// Policy: Managers can approve expenses under their limit</span>
+<span class="nx">engine</span><span class="p">.</span><span class="nx">addPolicy</span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="nx">Policy</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;manager-expense-approval&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;expense&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;approve&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">effect</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;allow&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">condition</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span>
+<span class="w">    </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">subject</span><span class="p">.</span><span class="nx">roles</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;manager&#39;</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">    </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">resource</span><span class="p">.</span><span class="nx">amount</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">subject</span><span class="p">.</span><span class="nx">approvalLimit</span>
+<span class="p">}));</span>
+
+<span class="c1">// Policy: Deny access outside business hours for sensitive resources</span>
+<span class="nx">engine</span><span class="p">.</span><span class="nx">addPolicy</span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="nx">Policy</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;business-hours-only&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;financial_report&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;read&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">effect</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;deny&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">condition</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">hour</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">ctx</span><span class="p">.</span><span class="nx">environment</span><span class="p">.</span><span class="nx">timestamp</span><span class="p">).</span><span class="nx">getHours</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">hour</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">8</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">hour</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">18</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}));</span>
+
+<span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">engine</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+
+<h3>ABAC Middleware</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// abac/middleware.js</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">abacMiddleware</span><span class="p">(</span><span class="nx">engine</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="nx">resourceType</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="p">,</span><span class="w"> </span><span class="nx">getResource</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">401</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Authentication required&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="c1">// Build the ABAC context</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">resource</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getResource</span>
+<span class="w">        </span><span class="o">?</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getResource</span><span class="p">(</span><span class="nx">req</span><span class="p">)</span><span class="w">    </span><span class="c1">// Fetch the resource to check attributes</span>
+<span class="w">        </span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="nx">resourceType</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">context</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">subject</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">roles</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">roles</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">department</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">department</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">approvalLimit</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">approvalLimit</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="nx">resourceType</span><span class="p">,</span>
+<span class="w">          </span><span class="p">...</span><span class="nx">resource</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="nx">action</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">environment</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">(),</span>
+<span class="w">          </span><span class="nx">ip</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">ip</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">userAgent</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;user-agent&#39;</span><span class="p">)</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">};</span>
+
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">decision</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">engine</span><span class="p">.</span><span class="nx">evaluate</span><span class="p">(</span><span class="nx">context</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">decision</span><span class="p">.</span><span class="nx">allowed</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">          </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Forbidden&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">reason</span><span class="o">:</span><span class="w"> </span><span class="nx">decision</span><span class="p">.</span><span class="nx">reason</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="c1">// Attach the resource to avoid re-fetching in the handler</span>
+<span class="w">      </span><span class="nx">req</span><span class="p">.</span><span class="nx">resource</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">resource</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">next</span><span class="p">();</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+
+<span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">abacMiddleware</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// routes/posts.js (with ABAC)</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">abacMiddleware</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;../abac/middleware&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">engine</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;../abac/policies&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">authorize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">abacMiddleware</span><span class="p">(</span><span class="nx">engine</span><span class="p">);</span>
+
+<span class="c1">// Fetch the post resource for attribute checking</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">getPost</span><span class="p">(</span><span class="nx">req</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">PostService</span><span class="p">.</span><span class="nx">findById</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="c1">// Update: engine evaluates ownership and status</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">put</span><span class="p">(</span><span class="s1">&#39;/:id&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">authorize</span><span class="p">(</span><span class="s1">&#39;post&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">getPost</span><span class="p">),</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// req.resource is already loaded by the middleware</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">updated</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">PostService</span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">updated</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">);</span>
+
+<span class="c1">// Delete: engine checks if post is published (deny policy)</span>
+<span class="nx">router</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="s1">&#39;/:id&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">authorize</span><span class="p">(</span><span class="s1">&#39;post&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">getPost</span><span class="p">),</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">PostService</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">204</span><span class="p">).</span><span class="nx">end</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>RBAC vs ABAC: When to Use Which</h2>
+<div class="highlight"><pre><span></span><code>┌─────────────────────┬────────────────────┬────────────────────┐
+│  Aspect              │  RBAC              │  ABAC              │
+├─────────────────────┼────────────────────┼────────────────────┤
+│  Complexity          │  Simple            │  Complex           │
+├─────────────────────┼────────────────────┼────────────────────┤
+│  Flexibility         │  Limited           │  Very flexible     │
+├─────────────────────┼────────────────────┼────────────────────┤
+│  Performance         │  Fast (lookup)     │  Slower (evaluate) │
+├─────────────────────┼────────────────────┼────────────────────┤
+│  Audit               │  Easy to audit     │  Harder to audit   │
+├─────────────────────┼────────────────────┼────────────────────┤
+│  Use when...         │  Permissions are   │  Access depends on │
+│                      │  static and based  │  resource state,   │
+│                      │  on job function   │  ownership, time,  │
+│                      │                    │  or context        │
+├─────────────────────┼────────────────────┼────────────────────┤
+│  Example             │  &quot;Admins can       │  &quot;Users can edit   │
+│                      │  manage users&quot;     │  their own posts   │
+│                      │                    │  if draft&quot;         │
+├─────────────────────┼────────────────────┼────────────────────┤
+│  Best for            │  Internal tools,   │  Multi-tenant SaaS,│
+│                      │  CMS, most CRUD    │  healthcare,       │
+│                      │  apps              │  finance           │
+└─────────────────────┴────────────────────┴────────────────────┘
+</code></pre></div>
+
+<h2>Combining RBAC and ABAC</h2>
+<p>In practice, most applications use a hybrid approach: RBAC for coarse-grained access and ABAC for fine-grained rules.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// hybrid-authorization.js</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">HybridAuthorization</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">rbacService</span><span class="p">,</span><span class="w"> </span><span class="nx">abacEngine</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">rbac</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">rbacService</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">abac</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">abacEngine</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">authorize</span><span class="p">(</span><span class="nx">context</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Step 1: RBAC check (fast, coarse-grained)</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">hasBasePermission</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">rbac</span><span class="p">.</span><span class="nx">hasPermission</span><span class="p">(</span>
+<span class="w">      </span><span class="nx">context</span><span class="p">.</span><span class="nx">subject</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">context</span><span class="p">.</span><span class="nx">resource</span><span class="p">.</span><span class="nx">type</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">context</span><span class="p">.</span><span class="nx">action</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">hasBasePermission</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">allowed</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">reason</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Role does not include this permission&#39;</span>
+<span class="w">      </span><span class="p">};</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Step 2: ABAC check (contextual, fine-grained)</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">abacResult</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">abac</span><span class="p">.</span><span class="nx">evaluate</span><span class="p">(</span><span class="nx">context</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">abacResult</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage:</span>
+<span class="c1">// 1. RBAC says: &quot;editors can update posts&quot; (general permission)</span>
+<span class="c1">// 2. ABAC says: &quot;but only if it is their own post or it is a draft&quot;</span>
+</code></pre></div>
+
+<h2>Permission Checking in API Responses</h2>
+<p>Sometimes the frontend needs to know what the current user can do to render the UI correctly (show/hide buttons).</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Include permissions in API responses</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/posts/:id&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">PostService</span><span class="p">.</span><span class="nx">findById</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Calculate what the current user can do with this post</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">canEdit</span><span class="o">:</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">canUserEdit</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">,</span><span class="w"> </span><span class="nx">post</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">canDelete</span><span class="o">:</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">canUserDelete</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">,</span><span class="w"> </span><span class="nx">post</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">canPublish</span><span class="o">:</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">canUserPublish</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">,</span><span class="w"> </span><span class="nx">post</span><span class="p">)</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">post</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">permissions</span><span class="o">:</span><span class="w"> </span><span class="nx">permissions</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// IMPORTANT: These are hints for the UI only.</span>
+<span class="c1">// The actual authorization check MUST happen on the server</span>
+<span class="c1">// when the user attempts the action.</span>
+</code></pre></div>
+
+<h2>Seeding Roles and Permissions</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// seeds/rbac-seed.js</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">seedRBAC</span><span class="p">(</span><span class="nx">db</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Create permissions</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;create&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;read&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;publish&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;users&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;read&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;users&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;create&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;users&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;users&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;settings&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;read&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;settings&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">];</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">perm</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">permissions</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;permissions&#39;</span><span class="p">).</span><span class="nx">insert</span><span class="p">(</span><span class="nx">perm</span><span class="p">).</span><span class="nx">onConflict</span><span class="p">([</span><span class="s1">&#39;resource&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;action&#39;</span><span class="p">]).</span><span class="nx">ignore</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Create roles</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">roles</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;admin&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">description</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Full system access&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;editor&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">description</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Content management&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;viewer&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">description</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Read-only access&#39;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">];</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">role</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">roles</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;roles&#39;</span><span class="p">).</span><span class="nx">insert</span><span class="p">(</span><span class="nx">role</span><span class="p">).</span><span class="nx">onConflict</span><span class="p">(</span><span class="s1">&#39;name&#39;</span><span class="p">).</span><span class="nx">ignore</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Define role-permission mappings</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">rolePermissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">admin</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;posts:*&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;users:*&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;settings:*&#39;</span><span class="p">],</span><span class="w">  </span><span class="c1">// All permissions</span>
+<span class="w">    </span><span class="nx">editor</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;posts:create&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;posts:read&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;posts:update&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;posts:publish&#39;</span><span class="p">,</span>
+<span class="w">             </span><span class="s1">&#39;users:read&#39;</span><span class="p">],</span>
+<span class="w">    </span><span class="nx">viewer</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;posts:read&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;users:read&#39;</span><span class="p">]</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">roleName</span><span class="p">,</span><span class="w"> </span><span class="nx">perms</span><span class="p">]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nb">Object</span><span class="p">.</span><span class="nx">entries</span><span class="p">(</span><span class="nx">rolePermissions</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">role</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;roles&#39;</span><span class="p">).</span><span class="nx">where</span><span class="p">({</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="nx">roleName</span><span class="w"> </span><span class="p">}).</span><span class="nx">first</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">perm</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">perms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">perm</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;*&#39;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Wildcard: assign all permissions for this resource</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">resource</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">perm</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">&#39;:&#39;</span><span class="p">)[</span><span class="mf">0</span><span class="p">];</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">matchingPerms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;permissions&#39;</span><span class="p">).</span><span class="nx">where</span><span class="p">({</span><span class="w"> </span><span class="nx">resource</span><span class="w"> </span><span class="p">});</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">p</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">matchingPerms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;role_permissions&#39;</span><span class="p">).</span><span class="nx">insert</span><span class="p">({</span>
+<span class="w">            </span><span class="nx">role_id</span><span class="o">:</span><span class="w"> </span><span class="nx">role</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">permission_id</span><span class="o">:</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">id</span>
+<span class="w">          </span><span class="p">}).</span><span class="nx">onConflict</span><span class="p">([</span><span class="s1">&#39;role_id&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;permission_id&#39;</span><span class="p">]).</span><span class="nx">ignore</span><span class="p">();</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">resource</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">perm</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">&#39;:&#39;</span><span class="p">);</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;permissions&#39;</span><span class="p">).</span><span class="nx">where</span><span class="p">({</span><span class="w"> </span><span class="nx">resource</span><span class="p">,</span><span class="w"> </span><span class="nx">action</span><span class="w"> </span><span class="p">}).</span><span class="nx">first</span><span class="p">();</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">(</span><span class="s1">&#39;role_permissions&#39;</span><span class="p">).</span><span class="nx">insert</span><span class="p">({</span>
+<span class="w">            </span><span class="nx">role_id</span><span class="o">:</span><span class="w"> </span><span class="nx">role</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">permission_id</span><span class="o">:</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">id</span>
+<span class="w">          </span><span class="p">}).</span><span class="nx">onConflict</span><span class="p">([</span><span class="s1">&#39;role_id&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;permission_id&#39;</span><span class="p">]).</span><span class="nx">ignore</span><span class="p">();</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">seedRBAC</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+
+<h2>Testing Authorization</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// __tests__/rbac.test.js</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">RBACService</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;../rbac/rbac-service&#39;</span><span class="p">);</span>
+
+<span class="nx">describe</span><span class="p">(</span><span class="s1">&#39;RBAC&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">rbac</span><span class="p">;</span>
+
+<span class="w">  </span><span class="nx">beforeEach</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Set up test database with seeded roles/permissions</span>
+<span class="w">    </span><span class="nx">rbac</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">RBACService</span><span class="p">(</span><span class="nx">testDb</span><span class="p">);</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">seedRBAC</span><span class="p">(</span><span class="nx">testDb</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">test</span><span class="p">(</span><span class="s1">&#39;admin has all permissions&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">assignRole</span><span class="p">(</span><span class="nx">adminUser</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;admin&#39;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">hasPermission</span><span class="p">(</span><span class="nx">adminUser</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="p">)).</span><span class="nx">toBe</span><span class="p">(</span><span class="kc">true</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">hasPermission</span><span class="p">(</span><span class="nx">adminUser</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;users&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="p">)).</span><span class="nx">toBe</span><span class="p">(</span><span class="kc">true</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">hasPermission</span><span class="p">(</span><span class="nx">adminUser</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;settings&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="p">)).</span><span class="nx">toBe</span><span class="p">(</span><span class="kc">true</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">test</span><span class="p">(</span><span class="s1">&#39;viewer cannot create posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">assignRole</span><span class="p">(</span><span class="nx">viewerUser</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;viewer&#39;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">hasPermission</span><span class="p">(</span><span class="nx">viewerUser</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;read&#39;</span><span class="p">)).</span><span class="nx">toBe</span><span class="p">(</span><span class="kc">true</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">hasPermission</span><span class="p">(</span><span class="nx">viewerUser</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;create&#39;</span><span class="p">)).</span><span class="nx">toBe</span><span class="p">(</span><span class="kc">false</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">hasPermission</span><span class="p">(</span><span class="nx">viewerUser</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="p">)).</span><span class="nx">toBe</span><span class="p">(</span><span class="kc">false</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">test</span><span class="p">(</span><span class="s1">&#39;user with no roles has no permissions&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">hasPermission</span><span class="p">(</span><span class="nx">newUser</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;read&#39;</span><span class="p">)).</span><span class="nx">toBe</span><span class="p">(</span><span class="kc">false</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">test</span><span class="p">(</span><span class="s1">&#39;removing a role removes permissions&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">assignRole</span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;editor&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">hasPermission</span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;create&#39;</span><span class="p">)).</span><span class="nx">toBe</span><span class="p">(</span><span class="kc">true</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">removeRole</span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;editor&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">rbac</span><span class="p">.</span><span class="nx">hasPermission</span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;create&#39;</span><span class="p">)).</span><span class="nx">toBe</span><span class="p">(</span><span class="kc">false</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="nx">describe</span><span class="p">(</span><span class="s1">&#39;ABAC&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">test</span><span class="p">(</span><span class="s1">&#39;editor can update own draft post&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">engine</span><span class="p">.</span><span class="nx">evaluate</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">subject</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">roles</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;editor&#39;</span><span class="p">]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;post&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">ownerId</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;draft&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">environment</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">()</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">allowed</span><span class="p">).</span><span class="nx">toBe</span><span class="p">(</span><span class="kc">true</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">test</span><span class="p">(</span><span class="s1">&#39;editor cannot update another user published post&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">engine</span><span class="p">.</span><span class="nx">evaluate</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">subject</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">roles</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;editor&#39;</span><span class="p">]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;post&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">ownerId</span><span class="o">:</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;published&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">environment</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">()</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">allowed</span><span class="p">).</span><span class="nx">toBe</span><span class="p">(</span><span class="kc">false</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">test</span><span class="p">(</span><span class="s1">&#39;no one can delete published posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">engine</span><span class="p">.</span><span class="nx">evaluate</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">subject</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">roles</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;admin&#39;</span><span class="p">]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">resource</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;post&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">ownerId</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;published&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">environment</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">()</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">allowed</span><span class="p">).</span><span class="nx">toBe</span><span class="p">(</span><span class="kc">false</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Using CASL for Production ABAC</h2>
+<p>For production Node.js applications, the CASL library provides a battle-tested ABAC implementation.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// casl/abilities.js</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">AbilityBuilder</span><span class="p">,</span><span class="w"> </span><span class="nx">createMongoAbility</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;@casl/ability&#39;</span><span class="p">);</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">defineAbilitiesFor</span><span class="p">(</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">can</span><span class="p">,</span><span class="w"> </span><span class="nx">cannot</span><span class="p">,</span><span class="w"> </span><span class="nx">build</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">AbilityBuilder</span><span class="p">(</span><span class="nx">createMongoAbility</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">roles</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;admin&#39;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">can</span><span class="p">(</span><span class="s1">&#39;manage&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;all&#39;</span><span class="p">);</span><span class="w">  </span><span class="c1">// Admin can do everything</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">roles</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;editor&#39;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">can</span><span class="p">(</span><span class="s1">&#39;read&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;Post&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">can</span><span class="p">(</span><span class="s1">&#39;create&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;Post&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">can</span><span class="p">(</span><span class="s1">&#39;update&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;Post&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">authorId</span><span class="o">:</span><span class="w"> </span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">});</span><span class="w">          </span><span class="c1">// Own posts only</span>
+<span class="w">    </span><span class="nx">can</span><span class="p">(</span><span class="s1">&#39;update&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;Post&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;draft&#39;</span><span class="w"> </span><span class="p">});</span><span class="w">            </span><span class="c1">// Any draft</span>
+<span class="w">    </span><span class="nx">cannot</span><span class="p">(</span><span class="s1">&#39;delete&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;Post&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;published&#39;</span><span class="w"> </span><span class="p">});</span><span class="w">     </span><span class="c1">// No deleting published</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">roles</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;viewer&#39;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">can</span><span class="p">(</span><span class="s1">&#39;read&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;Post&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;published&#39;</span><span class="w"> </span><span class="p">});</span><span class="w">          </span><span class="c1">// Only published</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Everyone can read their own profile</span>
+<span class="w">  </span><span class="nx">can</span><span class="p">(</span><span class="s1">&#39;read&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;User&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">can</span><span class="p">(</span><span class="s1">&#39;update&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;User&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">build</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage in Express</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">((</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">ability</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">defineAbilitiesFor</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="nx">next</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="nx">router</span><span class="p">.</span><span class="nx">put</span><span class="p">(</span><span class="s1">&#39;/posts/:id&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">PostService</span><span class="p">.</span><span class="nx">findById</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">req</span><span class="p">.</span><span class="nx">ability</span><span class="p">.</span><span class="nx">can</span><span class="p">(</span><span class="s1">&#39;update&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">post</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Cannot update this post&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">updated</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">PostService</span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">post</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">updated</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Checking roles instead of permissions</strong> - Avoid <code>if (user.role === 'admin')</code> scattered through code. Check permissions instead so you can remap them without code changes.</li>
+<li><strong>Forgetting the default deny</strong> - Always deny by default and explicitly grant access.</li>
+<li><strong>Client-side only authorization</strong> - Hiding a button is NOT security. Always enforce on the server.</li>
+<li><strong>Role explosion</strong> - Too many fine-grained roles become unmanageable. That is when ABAC is needed.</li>
+<li><strong>Not invalidating cached permissions</strong> - When roles change, cached permission lookups become stale.</li>
+</ol>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build an RBAC System from Scratch</div>
+                    <div class="exercise-desc"><p>Create a complete RBAC system with an Express API for managing roles, permissions, and user-role assignments. Include endpoints to: create roles, create permissions, assign permissions to roles, assign roles to users, and check if a user has a specific permission. Use SQLite with Knex for storage.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Create four tables: users, roles, permissions, user_roles, role_permissions. Build a service class that queries across the join tables. Add REST endpoints under /api/rbac/.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">ABAC Policy Engine</div>
+                    <div class="exercise-desc"><p>Build a policy engine that evaluates authorization decisions based on subject, resource, action, and environment attributes. Define at least 5 policies including: ownership-based access, time-based restrictions, and deny-overrides. Write comprehensive tests for each policy.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Structure policies as objects with a condition function that receives the full context. Process deny policies before allow policies. Return the policy name in the decision for audit logging.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Hybrid RBAC + ABAC Blog Authorization</div>
+                    <div class="exercise-desc"><p>Build a blog API where: admins can do everything, editors can create/edit their own posts or any draft, viewers can only read published posts, and no one can delete a post that has more than 10 comments. Implement this using RBAC for base permissions and ABAC for contextual rules.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use RBAC to check if the user's role has the base permission (e.g., 'posts:delete'). Then use ABAC to check the additional context (e.g., comment count &lt; 10). Both checks must pass.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Permission-Aware API Responses</div>
+                    <div class="exercise-desc"><p>Extend a REST API so that each resource response includes a 'permissions' object showing what the current user can do (canEdit, canDelete, canPublish). Write middleware that automatically calculates this for any resource type.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Create a permissions resolver that takes the user and resource, runs them through both RBAC and ABAC checks for each action, and returns a boolean map. Attach it to the response serializer.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">User reports they cannot access a resource despite having the correct role</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The permission cache is stale. The user was recently assigned a new role but the cached permissions still reflect their old roles. Or there is a typo in the resource/action string (e.g., 'post' vs 'posts').
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Invalidate the permission cache whenever roles or permissions change. Use consistent naming conventions for resources and actions. Add logging to the authorization middleware that shows exactly which permission was checked and what the user's effective permissions are.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Role explosion: the system has 50+ roles and they are hard to manage</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The team created very specific roles like 'marketing-blog-editor' and 'engineering-blog-editor' instead of using attributes. This happens when RBAC is stretched beyond its design limits.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Migrate to a hybrid RBAC + ABAC model. Reduce roles to broad categories (admin, editor, viewer) and use ABAC policies for fine-grained rules based on department, ownership, or resource attributes. Consider using a library like CASL to define abilities declaratively.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Authorization check passes but the user sees a 403 on some resources and not others</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The ABAC policy depends on resource attributes (like ownership or status) that differ between resources. The permission check works for resources the user owns but fails for others, and the error message does not explain which attribute caused the denial.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Add detailed logging to your policy engine that records which policy matched and which condition failed. Return specific error messages like 'You can only edit your own posts' instead of generic 'Forbidden'. Implement a 'dry run' mode that explains why access was denied.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://casl.js.org/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">CASL - Isomorphic Authorization for JavaScript</div>
+                    
+                    <div class="resource-note">The most popular ABAC library for Node.js and JavaScript. Use this in production instead of building from scratch.</div>
+                    
+                </a>
+                
+                <a href="https://csrc.nist.gov/publications/detail/sp/800-162/final" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag specification">specification</div>
+                    <div class="resource-title">NIST ABAC Guide (SP 800-162)</div>
+                    
+                    <div class="resource-note">The official NIST guide to Attribute Based Access Control. Dry but comprehensive and authoritative.</div>
+                    
+                </a>
+                
+                <a href="https://www.osohq.com/academy" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag tutorial">tutorial</div>
+                    <div class="resource-title">Oso - Authorization Academy</div>
+                    
+                    <div class="resource-note">Free course covering authorization patterns from ACLs to ReBAC with practical examples</div>
+                    
+                </a>
+                
+                <a href="https://casbin.org/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Casbin - Authorization Library</div>
+                    
+                    <div class="resource-note">Supports ACL, RBAC, ABAC, and custom models. Has a Node.js adapter and works with multiple databases.</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/7.2.2-js.html" class="btn">&larr; OpenID Connect and Identity Providers</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-7-js.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

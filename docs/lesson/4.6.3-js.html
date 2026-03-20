@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Room-Based Messaging and Presence - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-4-js.html">Web Frameworks — NestJS</a> &rsaquo;
+            WebSockets
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">4.6.3</span>
+                <span>~2h</span>
+            </div>
+            <h1>Room-Based Messaging and Presence</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Rooms are like conference rooms in an office. You walk in (join), hear everything said (events), speak to everyone there (emit), and walk out (leave). Presence is like the office directory board showing who's in the building. When you badge in (connect), your status lights up green. When you leave (disconnect), it goes dark.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Room-Based Messaging and Presence</h1>
+<h2>Introduction</h2>
+<p>Socket.IO rooms are a powerful abstraction for grouping connected clients. Combined with presence tracking (knowing who's online), they form the backbone of any real-time collaborative application. This lesson dives deep into room management patterns, presence systems, and scaling considerations.</p>
+<h2>Socket.IO Rooms Explained</h2>
+<p>A room is a server-side concept -- a named channel that sockets can join and leave. Events emitted to a room are delivered to all sockets in that room.</p>
+<div class="highlight"><pre><span></span><code>Room: &quot;project-alpha&quot;
++----------------------------------+
+|  Socket A (Alice)                |
+|  Socket B (Bob)                  |
+|  Socket C (Charlie)              |
++----------------------------------+
+
+server.to(&quot;project-alpha&quot;).emit(&quot;update&quot;, data)
+// Alice, Bob, and Charlie all receive &quot;update&quot;
+</code></pre></div>
+
+<p>Key points:
+- Rooms exist only on the server (clients don't know about them)
+- A socket can be in multiple rooms simultaneously
+- Every socket automatically joins a room with its own ID (<code>socket.id</code>)
+- Rooms are automatically cleaned up when empty</p>
+<h2>Room Management Patterns</h2>
+<h3>Joining and Leaving Rooms</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">@SubscribeMessage</span><span class="p">(</span><span class="s1">&#39;join-room&#39;</span><span class="p">)</span>
+<span class="k">async</span><span class="w"> </span><span class="nx">handleJoinRoom</span><span class="p">(</span>
+<span class="w">  </span><span class="kd">@MessageBody</span><span class="p">()</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">roomId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="kd">@ConnectedSocket</span><span class="p">()</span><span class="w"> </span><span class="nx">client</span><span class="o">:</span><span class="w"> </span><span class="kt">AuthenticatedSocket</span><span class="p">,</span>
+<span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">user</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Authorization check</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">isMember</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">roomService</span><span class="p">.</span><span class="nx">isMember</span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">roomId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">isMember</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WsException</span><span class="p">(</span><span class="s1">&#39;Not a member of this room&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">client</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="sb">`room:</span><span class="si">${</span><span class="nx">data</span><span class="p">.</span><span class="nx">roomId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Notify others in the room</span>
+<span class="w">  </span><span class="nx">client</span><span class="p">.</span><span class="nx">to</span><span class="p">(</span><span class="sb">`room:</span><span class="si">${</span><span class="nx">data</span><span class="p">.</span><span class="nx">roomId</span><span class="si">}</span><span class="sb">`</span><span class="p">).</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;member-joined&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">user.id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="kt">user.name</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Send current room state to the joining client</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">members</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getOnlineRoomMembers</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">roomId</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">client</span><span class="p">.</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;room-state&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">roomId</span><span class="o">:</span><span class="w"> </span><span class="kt">data.roomId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">onlineMembers</span><span class="o">:</span><span class="w"> </span><span class="kt">members</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="kd">@SubscribeMessage</span><span class="p">(</span><span class="s1">&#39;leave-room&#39;</span><span class="p">)</span>
+<span class="nx">handleLeaveRoom</span><span class="p">(</span>
+<span class="w">  </span><span class="kd">@MessageBody</span><span class="p">()</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">roomId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="kd">@ConnectedSocket</span><span class="p">()</span><span class="w"> </span><span class="nx">client</span><span class="o">:</span><span class="w"> </span><span class="kt">AuthenticatedSocket</span><span class="p">,</span>
+<span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">client</span><span class="p">.</span><span class="nx">leave</span><span class="p">(</span><span class="sb">`room:</span><span class="si">${</span><span class="nx">data</span><span class="p">.</span><span class="nx">roomId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">client</span><span class="p">.</span><span class="nx">to</span><span class="p">(</span><span class="sb">`room:</span><span class="si">${</span><span class="nx">data</span><span class="p">.</span><span class="nx">roomId</span><span class="si">}</span><span class="sb">`</span><span class="p">).</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;member-left&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">client.data.user.id</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Broadcasting Patterns</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// To everyone in a room (including sender)</span>
+<span class="k">this</span><span class="p">.</span><span class="nx">server</span><span class="p">.</span><span class="nx">to</span><span class="p">(</span><span class="s1">&#39;room:123&#39;</span><span class="p">).</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;event&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">);</span>
+
+<span class="c1">// To everyone in a room (except sender)</span>
+<span class="nx">client</span><span class="p">.</span><span class="nx">to</span><span class="p">(</span><span class="s1">&#39;room:123&#39;</span><span class="p">).</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;event&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">);</span>
+
+<span class="c1">// To everyone in multiple rooms</span>
+<span class="k">this</span><span class="p">.</span><span class="nx">server</span><span class="p">.</span><span class="nx">to</span><span class="p">(</span><span class="s1">&#39;room:123&#39;</span><span class="p">).</span><span class="nx">to</span><span class="p">(</span><span class="s1">&#39;room:456&#39;</span><span class="p">).</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;event&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">);</span>
+
+<span class="c1">// To everyone except those in a specific room</span>
+<span class="k">this</span><span class="p">.</span><span class="nx">server</span><span class="p">.</span><span class="nx">except</span><span class="p">(</span><span class="s1">&#39;room:123&#39;</span><span class="p">).</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;event&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">);</span>
+
+<span class="c1">// To a specific socket by ID</span>
+<span class="k">this</span><span class="p">.</span><span class="nx">server</span><span class="p">.</span><span class="nx">to</span><span class="p">(</span><span class="nx">socketId</span><span class="p">).</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;event&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Presence System</h2>
+<p>Presence tracks which users are online and their current status.</p>
+<h3>In-Memory Presence Store</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// presence/presence.service.ts</span>
+<span class="kd">interface</span><span class="w"> </span><span class="nx">UserPresence</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;online&#39;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="s1">&#39;away&#39;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="s1">&#39;busy&#39;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="s1">&#39;offline&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">lastSeen</span><span class="o">:</span><span class="w"> </span><span class="kt">Date</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">sockets</span><span class="o">:</span><span class="w"> </span><span class="kt">Set</span><span class="o">&lt;</span><span class="kt">string</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kd">@Injectable</span><span class="p">()</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">PresenceService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">private</span><span class="w"> </span><span class="nx">presence</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="o">&lt;</span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">UserPresence</span><span class="o">&gt;</span><span class="p">();</span>
+
+<span class="w">  </span><span class="nx">setOnline</span><span class="p">(</span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">socketId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">presence</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">existing</span><span class="p">.</span><span class="nx">sockets</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="nx">socketId</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">existing</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;online&#39;</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">existing</span><span class="p">.</span><span class="nx">lastSeen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">presence</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">name</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;online&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">lastSeen</span><span class="o">:</span><span class="w"> </span><span class="kt">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(),</span>
+<span class="w">        </span><span class="nx">sockets</span><span class="o">:</span><span class="w"> </span><span class="kt">new</span><span class="w"> </span><span class="nb">Set</span><span class="p">([</span><span class="nx">socketId</span><span class="p">]),</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">setOffline</span><span class="p">(</span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">socketId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="kt">boolean</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">presence</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">existing</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+
+<span class="w">    </span><span class="nx">existing</span><span class="p">.</span><span class="nx">sockets</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">socketId</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="p">.</span><span class="nx">sockets</span><span class="p">.</span><span class="nx">size</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">existing</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;offline&#39;</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">existing</span><span class="p">.</span><span class="nx">lastSeen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">();</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span><span class="w"> </span><span class="c1">// User is fully offline</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span><span class="w"> </span><span class="c1">// User still has other connections</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">setStatus</span><span class="p">(</span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;online&#39;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="s1">&#39;away&#39;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="s1">&#39;busy&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">presence</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">existing</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">status</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">isOnline</span><span class="p">(</span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="kt">boolean</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">presence</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">!!</span><span class="nx">p</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;offline&#39;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">sockets</span><span class="p">.</span><span class="nx">size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">getOnlineUsers</span><span class="p">()</span><span class="o">:</span><span class="w"> </span><span class="nb">Array</span><span class="o">&lt;</span><span class="p">{</span><span class="w"> </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">;</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">;</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="p">}</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">Array</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">presence</span><span class="p">.</span><span class="nx">values</span><span class="p">())</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">filter</span><span class="p">((</span><span class="nx">p</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">sockets</span><span class="p">.</span><span class="nx">size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">map</span><span class="p">(({</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="w"> </span><span class="p">}));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">getOnlineUsersInSet</span><span class="p">(</span><span class="nx">userIds</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">[])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">userIds</span><span class="p">.</span><span class="nx">filter</span><span class="p">((</span><span class="nx">id</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">isOnline</span><span class="p">(</span><span class="nx">id</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Integration with Gateway</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">@WebSocketGateway</span><span class="p">({</span><span class="w"> </span><span class="nx">cors</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">origin</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;*&#39;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">})</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">ChatGateway</span><span class="w"> </span><span class="k">implements</span><span class="w"> </span><span class="nx">OnGatewayConnection</span><span class="p">,</span><span class="w"> </span><span class="nx">OnGatewayDisconnect</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">@WebSocketServer</span><span class="p">()</span><span class="w"> </span><span class="nx">server</span><span class="o">:</span><span class="w"> </span><span class="kt">Server</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span>
+<span class="w">    </span><span class="k">private</span><span class="w"> </span><span class="nx">chatService</span><span class="o">:</span><span class="w"> </span><span class="kt">ChatService</span><span class="p">,</span>
+<span class="w">    </span><span class="k">private</span><span class="w"> </span><span class="nx">presenceService</span><span class="o">:</span><span class="w"> </span><span class="kt">PresenceService</span><span class="p">,</span>
+<span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">handleConnection</span><span class="p">(</span><span class="nx">client</span><span class="o">:</span><span class="w"> </span><span class="kt">AuthenticatedSocket</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">user</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">presenceService</span><span class="p">.</span><span class="nx">setOnline</span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">user</span><span class="p">.</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">client</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="sb">`user:</span><span class="si">${</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Join all user&#39;s rooms</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">rooms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">chatService</span><span class="p">.</span><span class="nx">getUserRooms</span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">room</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">rooms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">client</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="sb">`room:</span><span class="si">${</span><span class="nx">room</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">      </span><span class="c1">// Notify room that user is online</span>
+<span class="w">      </span><span class="nx">client</span><span class="p">.</span><span class="nx">to</span><span class="p">(</span><span class="sb">`room:</span><span class="si">${</span><span class="nx">room</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">).</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;presence-update&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">user.id</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;online&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">handleDisconnect</span><span class="p">(</span><span class="nx">client</span><span class="o">:</span><span class="w"> </span><span class="kt">AuthenticatedSocket</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">data</span><span class="o">?</span><span class="p">.</span><span class="nx">user</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">fullyOffline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">presenceService</span><span class="p">.</span><span class="nx">setOffline</span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">fullyOffline</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Notify all rooms the user was in</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">server</span><span class="p">.</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;presence-update&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">user.id</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;offline&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">lastSeen</span><span class="o">:</span><span class="w"> </span><span class="kt">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(),</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">@SubscribeMessage</span><span class="p">(</span><span class="s1">&#39;set-status&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="nx">handleSetStatus</span><span class="p">(</span>
+<span class="w">    </span><span class="kd">@MessageBody</span><span class="p">()</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;online&#39;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="s1">&#39;away&#39;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="s1">&#39;busy&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="kd">@ConnectedSocket</span><span class="p">()</span><span class="w"> </span><span class="nx">client</span><span class="o">:</span><span class="w"> </span><span class="kt">AuthenticatedSocket</span><span class="p">,</span>
+<span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">user</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">presenceService</span><span class="p">.</span><span class="nx">setStatus</span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">status</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">server</span><span class="p">.</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;presence-update&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">user.id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="kt">data.status</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">@SubscribeMessage</span><span class="p">(</span><span class="s1">&#39;get-presence&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="nx">handleGetPresence</span><span class="p">(</span>
+<span class="w">    </span><span class="kd">@MessageBody</span><span class="p">()</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">userIds</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">[]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">online</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">presenceService</span><span class="p">.</span><span class="nx">getOnlineUsersInSet</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">userIds</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">event</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;presence-list&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="kt">data.userIds.map</span><span class="p">((</span><span class="nx">id</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">        </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">id</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">online</span><span class="o">:</span><span class="w"> </span><span class="kt">online.includes</span><span class="p">(</span><span class="nx">id</span><span class="p">),</span>
+<span class="w">      </span><span class="p">})),</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Idle Detection</h2>
+<p>Auto-set users as "away" after inactivity:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">@WebSocketGateway</span><span class="p">()</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">ChatGateway</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">private</span><span class="w"> </span><span class="nx">activityTimers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="o">&lt;</span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">NodeJS</span><span class="p">.</span><span class="nx">Timeout</span><span class="o">&gt;</span><span class="p">();</span>
+<span class="w">  </span><span class="k">private</span><span class="w"> </span><span class="k">readonly</span><span class="w"> </span><span class="nx">IDLE_TIMEOUT</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">;</span><span class="w"> </span><span class="c1">// 5 minutes</span>
+
+<span class="w">  </span><span class="kd">@SubscribeMessage</span><span class="p">(</span><span class="s1">&#39;activity&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="nx">handleActivity</span><span class="p">(</span><span class="kd">@ConnectedSocket</span><span class="p">()</span><span class="w"> </span><span class="nx">client</span><span class="o">:</span><span class="w"> </span><span class="kt">AuthenticatedSocket</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">data</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Reset idle timer</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">activityTimers</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="p">)</span><span class="w"> </span><span class="nx">clearTimeout</span><span class="p">(</span><span class="nx">existing</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// If user was away, set back to online</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">presenceService</span><span class="p">.</span><span class="nx">getStatus</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;away&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">presenceService</span><span class="p">.</span><span class="nx">setStatus</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;online&#39;</span><span class="p">);</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">server</span><span class="p">.</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;presence-update&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;online&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Start new idle timer</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">activityTimers</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span>
+<span class="w">      </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">setTimeout</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">this</span><span class="p">.</span><span class="nx">presenceService</span><span class="p">.</span><span class="nx">setStatus</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;away&#39;</span><span class="p">);</span>
+<span class="w">        </span><span class="k">this</span><span class="p">.</span><span class="nx">server</span><span class="p">.</span><span class="nx">emit</span><span class="p">(</span><span class="s1">&#39;presence-update&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;away&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">      </span><span class="p">},</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">IDLE_TIMEOUT</span><span class="p">),</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Scaling with Redis Adapter</h2>
+<p>For multi-server deployments, use the Redis adapter so rooms work across instances:</p>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>i<span class="w"> </span>@socket.io/redis-adapter<span class="w"> </span>redis
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// main.ts</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">IoAdapter</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@nestjs/platform-socket.io&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">createAdapter</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@socket.io/redis-adapter&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">createClient</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;redis&#39;</span><span class="p">;</span>
+
+<span class="k">export</span><span class="w"> </span><span class="kd">class</span><span class="w"> </span><span class="nx">RedisIoAdapter</span><span class="w"> </span><span class="k">extends</span><span class="w"> </span><span class="nx">IoAdapter</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">private</span><span class="w"> </span><span class="nx">adapterConstructor</span><span class="o">:</span><span class="w"> </span><span class="kt">ReturnType</span><span class="o">&lt;</span><span class="ow">typeof</span><span class="w"> </span><span class="nx">createAdapter</span><span class="o">&gt;</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">connectToRedis</span><span class="p">()</span><span class="o">:</span><span class="w"> </span><span class="nb">Promise</span><span class="o">&lt;</span><span class="ow">void</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">pubClient</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">createClient</span><span class="p">({</span><span class="w"> </span><span class="nx">url</span><span class="o">:</span><span class="w"> </span><span class="kt">process.env.REDIS_URL</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">subClient</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">pubClient</span><span class="p">.</span><span class="nx">duplicate</span><span class="p">();</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">([</span><span class="nx">pubClient</span><span class="p">.</span><span class="nx">connect</span><span class="p">(),</span><span class="w"> </span><span class="nx">subClient</span><span class="p">.</span><span class="nx">connect</span><span class="p">()]);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">adapterConstructor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">createAdapter</span><span class="p">(</span><span class="nx">pubClient</span><span class="p">,</span><span class="w"> </span><span class="nx">subClient</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">createIOServer</span><span class="p">(</span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="kt">number</span><span class="p">,</span><span class="w"> </span><span class="nx">options?</span><span class="o">:</span><span class="w"> </span><span class="kt">any</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">super</span><span class="p">.</span><span class="nx">createIOServer</span><span class="p">(</span><span class="nx">port</span><span class="p">,</span><span class="w"> </span><span class="nx">options</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">server</span><span class="p">.</span><span class="nx">adapter</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">adapterConstructor</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">server</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">bootstrap</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">NestFactory</span><span class="p">.</span><span class="nx">create</span><span class="p">(</span><span class="nx">AppModule</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">redisIoAdapter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">RedisIoAdapter</span><span class="p">(</span><span class="nx">app</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redisIoAdapter</span><span class="p">.</span><span class="nx">connectToRedis</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">app</span><span class="p">.</span><span class="nx">useWebSocketAdapter</span><span class="p">(</span><span class="nx">redisIoAdapter</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="mf">3000</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>When using the Redis adapter, the presence service should also use Redis instead of in-memory Maps.</p>
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Room naming collisions</strong> -- Prefix room names with their type: <code>room:123</code>, <code>user:456</code>, <code>project:789</code> to avoid collisions.</li>
+<li><strong>Not cleaning up on disconnect</strong> -- Leave rooms, clear timers, and update presence on every disconnect.</li>
+<li><strong>In-memory state doesn't scale</strong> -- If running multiple server instances, presence and room state must be shared (Redis).</li>
+<li><strong>Broadcasting to large rooms</strong> -- Emitting to rooms with thousands of members can be slow. Consider batching or using Redis pub/sub.</li>
+</ol>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Complete Presence System</div>
+                    <div class="exercise-desc"><p>Implement a PresenceService that tracks online/away/busy/offline status, handles multiple connections per user, and provides room-scoped presence queries. Integrate it with the chat gateway.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a Map<string, UserPresence> where UserPresence contains a Set of socket IDs. A user is online if they have at least one socket. Provide methods for room-scoped queries by intersecting room members with online users.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Add Idle Detection</div>
+                    <div class="exercise-desc"><p>Implement automatic idle detection: the client sends an 'activity' event on mouse move/keypress (throttled to once per 30 seconds). If no activity for 5 minutes, set status to 'away'. On next activity, revert to 'online'.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use setTimeout on the server to track inactivity. Store timers in a Map<userId, Timeout>. Clear and reset the timer on each 'activity' event.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Scale with Redis Adapter</div>
+                    <div class="exercise-desc"><p>Configure the Socket.IO Redis adapter for multi-server support. Move the presence service to use Redis (HSET/HGET) instead of in-memory Maps. Verify that messages and presence updates work across two server instances.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use @socket.io/redis-adapter for rooms. For presence, use Redis HSET to store user status and SADD to track socket IDs. Use Redis pub/sub for cross-instance presence updates.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Rooms don't work across multiple server instances</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Messages sent in a room only reach clients connected to the same server instance.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Socket.IO rooms are in-memory by default. Each server instance has its own set of rooms.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use the Redis adapter (@socket.io/redis-adapter). It synchronizes rooms across instances through Redis pub/sub.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Presence shows user as online after server restart</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> In-memory presence data is lost on restart. If the client reconnects quickly but the server's presence map is empty, inconsistencies arise.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Persist presence in Redis with TTL. On server start, don't assume anyone is online. Let clients reconnect and re-register their presence.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Memory leak from activity timers</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Timers are created for idle detection but not cleared when the user disconnects.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> In handleDisconnect, clear the timer: `clearTimeout(this.activityTimers.get(userId))` and delete the entry from the map.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://socket.io/docs/v4/rooms/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Socket.IO Rooms Documentation</div>
+                    
+                </a>
+                
+                <a href="https://socket.io/docs/v4/redis-adapter/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Socket.IO Redis Adapter</div>
+                    
+                </a>
+                
+                <a href="https://docs.nestjs.com/websockets/adapter" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">NestJS WebSocket Adapter</div>
+                    
+                </a>
+                
+                <a href="https://socket.io/docs/v4/using-multiple-nodes/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Scaling Socket.IO</div>
+                    
+                    <div class="resource-note">Official guide for running Socket.IO across multiple servers.</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/4.6.2-js.html" class="btn">&larr; Building a Real-Time Chat Application</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-4-js.html">&larr; Back to Web Frameworks — NestJS</a>
+        </div>
+    </div>
+</body>
+</html>

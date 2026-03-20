@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Saga Pattern and Distributed Transactions - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-js.html">System Design & Scalability</a> &rsaquo;
+            Microservices Architecture
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.6.4</span>
+                <span>~3h</span>
+            </div>
+            <h1>Saga Pattern and Distributed Transactions</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>A saga is like planning a wedding involving multiple vendors. The choreography approach is like each vendor knowing what to do when they hear the previous vendor finished (florist delivers after venue confirms). The orchestration approach is like having a wedding planner who calls each vendor in order and handles cancellations if something goes wrong. If the caterer cancels last-minute, the planner cancels the venue and florist (compensating actions).</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Saga Pattern and Distributed Transactions</h1>
+<h2>Introduction</h2>
+<p>In a monolith, a single database transaction guarantees that all operations succeed or all fail (ACID). In microservices, each service has its own database, making cross-service transactions impossible with traditional ACID. The <strong>Saga pattern</strong> manages distributed transactions by coordinating a sequence of local transactions across services, with compensating actions for rollback.</p>
+<h2>The Problem</h2>
+<div class="highlight"><pre><span></span><code>Monolith Transaction (ACID):
+  BEGIN TRANSACTION
+    deduct_inventory()
+    charge_payment()
+    create_shipment()
+  COMMIT  ← All or nothing
+
+Microservices (No distributed transaction):
+  Inventory Service: deduct_inventory()  ← SUCCESS
+  Payment Service: charge_payment()      ← FAILS!
+  Shipping Service: never called
+
+  Problem: inventory was deducted but payment failed
+  Result: inconsistent state across services!
+</code></pre></div>
+
+<h2>Saga Types</h2>
+<h3>Choreography-Based Saga</h3>
+<p>Each service publishes events and reacts to events from other services. No central coordinator.</p>
+<div class="highlight"><pre><span></span><code>Order Created
+    │
+    ▼
+┌─────────────┐  inventory.reserved  ┌─────────────┐
+│ Inventory   │─────────────────────&gt;│ Payment     │
+│ Service     │                      │ Service     │
+└─────────────┘                      └──────┬──────┘
+                                            │
+                              payment.charged │
+                                            ▼
+                                     ┌─────────────┐
+                                     │ Shipping    │
+                                     │ Service     │
+                                     └─────────────┘
+
+Failure &amp; Compensation:
+Payment fails → publishes payment.failed
+Inventory Service listens → releases reserved inventory
+Order Service listens → marks order as failed
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// Choreography implementation with events</span>
+
+<span class="c1">// Order Service</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">OrderService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">createOrder</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">orderRepo</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="p">...</span><span class="nx">data</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;PENDING&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// Publish event to start saga</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">eventBus</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="s1">&#39;order.created&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">items</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">items</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">total</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">total</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">order</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Listen for saga completion/failure events</span>
+<span class="w">  </span><span class="err">@</span><span class="nx">EventPattern</span><span class="p">(</span><span class="s1">&#39;payment.charged&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">handlePaymentCharged</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">orderRepo</span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">orderId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;PAID&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="err">@</span><span class="nx">EventPattern</span><span class="p">(</span><span class="s1">&#39;payment.failed&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">handlePaymentFailed</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">orderRepo</span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">orderId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;PAYMENT_FAILED&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">failureReason</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">reason</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="err">@</span><span class="nx">EventPattern</span><span class="p">(</span><span class="s1">&#39;shipping.created&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">handleShippingCreated</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">orderRepo</span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">orderId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;SHIPPED&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Inventory Service</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">InventoryService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="err">@</span><span class="nx">EventPattern</span><span class="p">(</span><span class="s1">&#39;order.created&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">handleOrderCreated</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">inventoryRepo</span><span class="p">.</span><span class="nx">reserve</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">items</span><span class="p">);</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">eventBus</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="s1">&#39;inventory.reserved&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">orderId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">items</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">items</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">eventBus</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="s1">&#39;inventory.failed&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">orderId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">reason</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Compensating action</span>
+<span class="w">  </span><span class="err">@</span><span class="nx">EventPattern</span><span class="p">(</span><span class="s1">&#39;payment.failed&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">handlePaymentFailed</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">inventoryRepo</span><span class="p">.</span><span class="nx">release</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">items</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Released inventory for order </span><span class="si">${</span><span class="nx">data</span><span class="p">.</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Payment Service</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">PaymentService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="err">@</span><span class="nx">EventPattern</span><span class="p">(</span><span class="s1">&#39;inventory.reserved&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">handleInventoryReserved</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">charge</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">paymentGateway</span><span class="p">.</span><span class="nx">charge</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">total</span><span class="p">);</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">eventBus</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="s1">&#39;payment.charged&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">orderId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">chargeId</span><span class="o">:</span><span class="w"> </span><span class="nx">charge</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">eventBus</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="s1">&#39;payment.failed&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">orderId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">items</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">items</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">reason</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Orchestration-Based Saga</h3>
+<p>A central <strong>Saga Orchestrator</strong> coordinates the transaction steps.</p>
+<div class="highlight"><pre><span></span><code>                  ┌────────────────────┐
+                  │  Saga Orchestrator │
+                  └────────┬───────────┘
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+         1. Reserve   2. Charge    3. Ship
+              │            │            │
+              ▼            ▼            ▼
+         ┌────────┐  ┌────────┐  ┌────────┐
+         │Inventory│  │Payment │  │Shipping│
+         └────────┘  └────────┘  └────────┘
+
+On failure at step 2:
+  Orchestrator calls compensate on step 1 (release inventory)
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">OrderSagaOrchestrator</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">inventoryClient</span><span class="p">,</span><span class="w"> </span><span class="nx">paymentClient</span><span class="p">,</span><span class="w"> </span><span class="nx">shippingClient</span><span class="p">,</span><span class="w"> </span><span class="nx">orderRepo</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;reserve_inventory&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">execute</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">inventoryClient</span><span class="p">.</span><span class="nx">reserve</span><span class="p">(</span><span class="nx">ctx</span><span class="p">.</span><span class="nx">items</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">compensate</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">inventoryClient</span><span class="p">.</span><span class="nx">release</span><span class="p">(</span><span class="nx">ctx</span><span class="p">.</span><span class="nx">items</span><span class="p">),</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;charge_payment&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">execute</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">paymentClient</span><span class="p">.</span><span class="nx">charge</span><span class="p">(</span><span class="nx">ctx</span><span class="p">.</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">total</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">compensate</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">paymentClient</span><span class="p">.</span><span class="nx">refund</span><span class="p">(</span><span class="nx">ctx</span><span class="p">.</span><span class="nx">chargeId</span><span class="p">),</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;create_shipment&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">execute</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">shippingClient</span><span class="p">.</span><span class="nx">createShipment</span><span class="p">(</span><span class="nx">ctx</span><span class="p">.</span><span class="nx">orderId</span><span class="p">,</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">items</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">compensate</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">shippingClient</span><span class="p">.</span><span class="nx">cancelShipment</span><span class="p">(</span><span class="nx">ctx</span><span class="p">.</span><span class="nx">shipmentId</span><span class="p">),</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">];</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">orderRepo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">orderRepo</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">execute</span><span class="p">(</span><span class="nx">orderData</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">context</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">orderData</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">completedSteps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">step</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">steps</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Executing step: </span><span class="si">${</span><span class="nx">step</span><span class="p">.</span><span class="nx">name</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">step</span><span class="p">.</span><span class="nx">execute</span><span class="p">(</span><span class="nx">context</span><span class="p">);</span>
+
+<span class="w">        </span><span class="c1">// Merge result into context for subsequent steps</span>
+<span class="w">        </span><span class="nb">Object</span><span class="p">.</span><span class="nx">assign</span><span class="p">(</span><span class="nx">context</span><span class="p">,</span><span class="w"> </span><span class="nx">result</span><span class="p">);</span>
+<span class="w">        </span><span class="nx">completedSteps</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">step</span><span class="p">);</span>
+
+<span class="w">        </span><span class="c1">// Update order status</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">orderRepo</span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">context</span><span class="p">.</span><span class="nx">orderId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">sagaStep</span><span class="o">:</span><span class="w"> </span><span class="nx">step</span><span class="p">.</span><span class="nx">name</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;PROCESSING&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="c1">// All steps succeeded</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">orderRepo</span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">context</span><span class="p">.</span><span class="nx">orderId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;COMPLETED&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">success</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`Saga failed at step: </span><span class="si">${</span><span class="nx">completedSteps</span><span class="p">.</span><span class="nx">length</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// Compensate in reverse order</span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">step</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">completedSteps</span><span class="p">.</span><span class="nx">reverse</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Compensating: </span><span class="si">${</span><span class="nx">step</span><span class="p">.</span><span class="nx">name</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">          </span><span class="k">await</span><span class="w"> </span><span class="nx">step</span><span class="p">.</span><span class="nx">compensate</span><span class="p">(</span><span class="nx">context</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">compErr</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="c1">// Log compensation failure — may need manual intervention</span>
+<span class="w">          </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`Compensation failed for </span><span class="si">${</span><span class="nx">step</span><span class="p">.</span><span class="nx">name</span><span class="si">}</span><span class="sb">:`</span><span class="p">,</span><span class="w"> </span><span class="nx">compErr</span><span class="p">);</span>
+<span class="w">          </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">alertOps</span><span class="p">(</span><span class="nx">step</span><span class="p">.</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">compErr</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">orderRepo</span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">context</span><span class="p">.</span><span class="nx">orderId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;FAILED&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">failureReason</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">success</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage with BullMQ for reliability</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">sagaQueue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;order-sagas&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="w"> </span><span class="p">});</span>
+
+<span class="c1">// API creates the saga job</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/orders&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">orderRepo</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span><span class="w"> </span><span class="p">...</span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;PENDING&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">sagaQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;execute-order-saga&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="p">...</span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">202</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;PENDING&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Worker processes sagas</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">sagaWorker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;order-sagas&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">saga</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">OrderSagaOrchestrator</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">inventoryClient</span><span class="p">,</span><span class="w"> </span><span class="nx">paymentClient</span><span class="p">,</span><span class="w"> </span><span class="nx">shippingClient</span><span class="p">,</span><span class="w"> </span><span class="nx">orderRepo</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">saga</span><span class="p">.</span><span class="nx">execute</span><span class="p">(</span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">connection</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">concurrency</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">attempts</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="c1">// Saga handles its own retries</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Saga State Machine</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// Persistent saga state for recovery</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">SagaStateMachine</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">redis</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">startSaga</span><span class="p">(</span><span class="nx">sagaId</span><span class="p">,</span><span class="w"> </span><span class="nx">type</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">saga</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">sagaId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">type</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">data</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;STARTED&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">currentStep</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">completedSteps</span><span class="o">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">      </span><span class="nx">createdAt</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="sb">`saga:</span><span class="si">${</span><span class="nx">sagaId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">saga</span><span class="p">),</span><span class="w"> </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">86400</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">saga</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">advanceStep</span><span class="p">(</span><span class="nx">sagaId</span><span class="p">,</span><span class="w"> </span><span class="nx">stepName</span><span class="p">,</span><span class="w"> </span><span class="nx">result</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">saga</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`saga:</span><span class="si">${</span><span class="nx">sagaId</span><span class="si">}</span><span class="sb">`</span><span class="p">));</span>
+<span class="w">    </span><span class="nx">saga</span><span class="p">.</span><span class="nx">currentStep</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">saga</span><span class="p">.</span><span class="nx">completedSteps</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="nx">stepName</span><span class="p">,</span><span class="w"> </span><span class="nx">result</span><span class="p">,</span><span class="w"> </span><span class="nx">completedAt</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="sb">`saga:</span><span class="si">${</span><span class="nx">sagaId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">saga</span><span class="p">),</span><span class="w"> </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">86400</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">saga</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">failSaga</span><span class="p">(</span><span class="nx">sagaId</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">saga</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`saga:</span><span class="si">${</span><span class="nx">sagaId</span><span class="si">}</span><span class="sb">`</span><span class="p">));</span>
+<span class="w">    </span><span class="nx">saga</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;COMPENSATING&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">saga</span><span class="p">.</span><span class="nx">error</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">error</span><span class="p">;</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="sb">`saga:</span><span class="si">${</span><span class="nx">sagaId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">saga</span><span class="p">),</span><span class="w"> </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">86400</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">saga</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">completeSaga</span><span class="p">(</span><span class="nx">sagaId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">saga</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`saga:</span><span class="si">${</span><span class="nx">sagaId</span><span class="si">}</span><span class="sb">`</span><span class="p">));</span>
+<span class="w">    </span><span class="nx">saga</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;COMPLETED&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">saga</span><span class="p">.</span><span class="nx">completedAt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="sb">`saga:</span><span class="si">${</span><span class="nx">sagaId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">saga</span><span class="p">),</span><span class="w"> </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">86400</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">saga</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Choreography vs Orchestration</h2>
+<div class="highlight"><pre><span></span><code>┌────────────────┬──────────────────┬──────────────────┐
+│                │ Choreography     │ Orchestration    │
+├────────────────┼──────────────────┼──────────────────┤
+│ Coupling       │ Loose            │ Centralized      │
+│ Complexity     │ Distributed      │ Centralized      │
+│ Debugging      │ Hard to trace    │ Easy to trace    │
+│ Single failure │ No               │ Orchestrator     │
+│   point        │                  │                  │
+│ Best for       │ Simple sagas     │ Complex sagas    │
+│                │ (2-3 steps)      │ (4+ steps)       │
+│ Testing        │ Integration only │ Unit testable    │
+└────────────────┴──────────────────┴──────────────────┘
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Not making compensations idempotent</strong>: A compensation may run multiple times. Make it safe to repeat (use idempotency keys).</li>
+<li><strong>Compensation that can also fail</strong>: If "refund payment" fails during compensation, you need manual intervention. Always log and alert on compensation failures.</li>
+<li><strong>Missing saga timeout</strong>: A saga stuck mid-execution wastes resources and leaves data inconsistent. Set timeouts and auto-compensate.</li>
+<li><strong>Using sagas where you don't need them</strong>: If two operations can be in the same database, use a regular transaction. Sagas are for cross-service only.</li>
+</ol>
+<h2>Summary</h2>
+<p>The Saga pattern manages distributed transactions across microservices through a sequence of local transactions with compensating actions for rollback. Choreography uses events and is simpler but harder to debug. Orchestration uses a central coordinator and is easier to manage for complex flows. Always make saga steps and compensations idempotent, persist saga state for recovery, and handle compensation failures with alerts.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Orchestrated Order Saga</div>
+                    <div class="exercise-desc"><p>Implement a saga orchestrator for order processing: reserve inventory, charge payment, create shipment. Include compensating actions that run in reverse on failure.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Define steps as objects with execute and compensate functions. Track completed steps. On failure, compensate in reverse order.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Choreography-Based Saga</div>
+                    <div class="exercise-desc"><p>Build 3 NestJS microservices that communicate via events for an order saga. Each service publishes success/failure events that other services react to.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Redis or RabbitMQ transport. Each service has @EventPattern handlers for both success and failure events.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Saga Recovery</div>
+                    <div class="exercise-desc"><p>Implement persistent saga state in Redis. Build a recovery worker that detects stalled sagas (no progress for 5 minutes) and automatically triggers compensation.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Store saga state with timestamps. A scheduled job checks for sagas stuck in non-terminal states past timeout.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Saga leaves data in inconsistent state after partial failure</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Compensation action failed (e.g., refund API returned error), leaving the saga incomplete.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Retry compensating actions with exponential backoff. Log all compensation failures. Have a manual intervention process for unrecoverable cases. Send alerts to operations team.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Events processed out of order in choreography saga</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Message broker doesn't guarantee ordering, so 'payment.charged' arrives before 'inventory.reserved'.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Each step should verify prerequisites before executing. Store saga state and only proceed when all required prior events have been received.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://microservices.io/patterns/data/saga.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Saga Pattern - microservices.io</div>
+                    
+                </a>
+                
+                <a href="https://www.youtube.com/watch?v=0UTOLRTwOX0" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag video">video</div>
+                    <div class="resource-title">Distributed Sagas - Caitie McCaffrey</div>
+                    
+                </a>
+                
+                <a href="https://docs.nestjs.com/recipes/cqrs" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">NestJS CQRS Module</div>
+                    
+                </a>
+                
+                <a href="https://dataintensive.net/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Designing Data-Intensive Applications</div>
+                    
+                    <div class="resource-note">Chapter 9 covers distributed transactions and sagas</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/8.6.3-js.html" class="btn">&larr; Microservices with NestJS: Transports and Patterns</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-js.html">&larr; Back to System Design & Scalability</a>
+        </div>
+    </div>
+</body>
+</html>

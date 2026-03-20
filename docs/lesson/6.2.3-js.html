@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Stage Builds and Image Optimization - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-6-js.html">DevOps & Deployment</a> &rsaquo;
+            Docker for Node.js
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">6.2.3</span>
+                <span>~2h</span>
+            </div>
+            <h1>Multi-Stage Builds and Image Optimization</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Multi-stage builds are like building a house. You need scaffolding, cranes, and power tools during construction (build stage), but once the house is finished, you remove all the construction equipment. The final image is just the house itself (runtime), not the entire construction site. Each stage is a clean room where you pick only what you need for the next stage.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Multi-Stage Builds and Image Optimization</h1>
+<h2>Why Image Size Matters</h2>
+<p>Every megabyte in your Docker image impacts: pull times (especially in CI/CD), storage costs, startup speed, and attack surface. A typical unoptimized Node.js image can be 1GB+. With proper optimization, you can reduce it to under 150MB.</p>
+<h2>Image Size Comparison</h2>
+<div class="highlight"><pre><span></span><code>Image Base               Size (approximate)
+──────────────────────────────────────────
+node:20                  ~1.1 GB
+node:20-slim             ~250 MB
+node:20-alpine           ~140 MB
+distroless (gcr.io)      ~120 MB
+</code></pre></div>
+
+<h2>Multi-Stage Builds In Depth</h2>
+<h3>The Problem</h3>
+<div class="highlight"><pre><span></span><code><span class="c"># Single-stage: everything in one image</span>
+<span class="k">FROM</span><span class="w"> </span><span class="s">node:20-alpine</span>
+
+<span class="k">WORKDIR</span><span class="w"> </span><span class="s">/app</span>
+<span class="k">COPY</span><span class="w"> </span>.<span class="w"> </span>.
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>ci<span class="w">                    </span>#<span class="w"> </span>Installs<span class="w"> </span>ALL<span class="w"> </span>dependencies<span class="w"> </span><span class="o">(</span>including<span class="w"> </span>dev<span class="o">)</span>
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>build<span class="w">             </span>#<span class="w"> </span>TypeScript<span class="w"> </span>compiler,<span class="w"> </span>needed<span class="w"> </span>only<span class="w"> </span>at<span class="w"> </span>build<span class="w"> </span>time
+
+<span class="k">CMD</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;node&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;dist/server.js&quot;</span><span class="p">]</span>
+
+<span class="c"># Result: image contains TypeScript, dev tools, test frameworks, etc.</span>
+<span class="c"># None of these are needed at runtime!</span>
+</code></pre></div>
+
+<h3>The Solution: Multi-Stage Builds</h3>
+<div class="highlight"><pre><span></span><code><span class="c"># ============================</span>
+<span class="c"># Stage 1: Dependencies</span>
+<span class="c"># ============================</span>
+<span class="k">FROM</span><span class="w"> </span><span class="s">node:20-alpine</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="s">deps</span>
+
+<span class="k">WORKDIR</span><span class="w"> </span><span class="s">/app</span>
+<span class="k">COPY</span><span class="w"> </span>package.json<span class="w"> </span>package-lock.json<span class="w"> </span>./
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>ci
+
+<span class="c"># ============================</span>
+<span class="c"># Stage 2: Build</span>
+<span class="c"># ============================</span>
+<span class="k">FROM</span><span class="w"> </span><span class="s">node:20-alpine</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="s">builder</span>
+
+<span class="k">WORKDIR</span><span class="w"> </span><span class="s">/app</span>
+<span class="k">COPY</span><span class="w"> </span>--from<span class="o">=</span>deps<span class="w"> </span>/app/node_modules<span class="w"> </span>./node_modules
+<span class="k">COPY</span><span class="w"> </span>.<span class="w"> </span>.
+
+<span class="c"># Build TypeScript</span>
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>build
+
+<span class="c"># Generate Prisma client</span>
+<span class="k">RUN</span><span class="w"> </span>npx<span class="w"> </span>prisma<span class="w"> </span>generate
+
+<span class="c"># ============================</span>
+<span class="c"># Stage 3: Production dependencies only</span>
+<span class="c"># ============================</span>
+<span class="k">FROM</span><span class="w"> </span><span class="s">node:20-alpine</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="s">prod-deps</span>
+
+<span class="k">WORKDIR</span><span class="w"> </span><span class="s">/app</span>
+<span class="k">COPY</span><span class="w"> </span>package.json<span class="w"> </span>package-lock.json<span class="w"> </span>./
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>ci<span class="w"> </span>--production
+
+<span class="c"># ============================</span>
+<span class="c"># Stage 4: Production runtime</span>
+<span class="c"># ============================</span>
+<span class="k">FROM</span><span class="w"> </span><span class="s">node:20-alpine</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="s">runner</span>
+
+<span class="k">RUN</span><span class="w"> </span>addgroup<span class="w"> </span>-g<span class="w"> </span><span class="m">1001</span><span class="w"> </span>-S<span class="w"> </span>nodejs<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>adduser<span class="w"> </span>-S<span class="w"> </span>nodejs<span class="w"> </span>-u<span class="w"> </span><span class="m">1001</span><span class="w"> </span>-G<span class="w"> </span>nodejs
+
+<span class="k">RUN</span><span class="w"> </span>apk<span class="w"> </span>add<span class="w"> </span>--no-cache<span class="w"> </span>dumb-init
+
+<span class="k">WORKDIR</span><span class="w"> </span><span class="s">/app</span>
+
+<span class="c"># Copy ONLY what&#39;s needed to run</span>
+<span class="k">COPY</span><span class="w"> </span>--from<span class="o">=</span>prod-deps<span class="w"> </span>--chown<span class="o">=</span>nodejs:nodejs<span class="w"> </span>/app/node_modules<span class="w"> </span>./node_modules
+<span class="k">COPY</span><span class="w"> </span>--from<span class="o">=</span>builder<span class="w"> </span>--chown<span class="o">=</span>nodejs:nodejs<span class="w"> </span>/app/dist<span class="w"> </span>./dist
+<span class="k">COPY</span><span class="w"> </span>--from<span class="o">=</span>builder<span class="w"> </span>--chown<span class="o">=</span>nodejs:nodejs<span class="w"> </span>/app/prisma<span class="w"> </span>./prisma
+<span class="k">COPY</span><span class="w"> </span>--chown<span class="o">=</span>nodejs:nodejs<span class="w"> </span>package.json<span class="w"> </span>./
+
+<span class="k">ENV</span><span class="w"> </span><span class="nv">NODE_ENV</span><span class="o">=</span>production
+<span class="k">USER</span><span class="w"> </span><span class="s">nodejs</span>
+<span class="k">EXPOSE</span><span class="w"> </span><span class="s">3000</span>
+
+<span class="k">ENTRYPOINT</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;dumb-init&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;--&quot;</span><span class="p">]</span>
+<span class="k">CMD</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;node&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;dist/server.js&quot;</span><span class="p">]</span>
+</code></pre></div>
+
+<h3>Size Reduction Visualization</h3>
+<div class="highlight"><pre><span></span><code>Single Stage Build:
+┌─────────────────────────────────────────┐
+│ node:20-alpine base           (~140 MB) │
+│ ALL node_modules (dev+prod)   (~400 MB) │
+│ TypeScript source              (~5 MB)  │
+│ Test files                     (~2 MB)  │
+│ Build tools config             (~1 MB)  │
+│ Compiled dist/                 (~3 MB)  │
+│ Prisma engine                  (~20 MB) │
+│                               =========  │
+│ Total:                        ~571 MB    │
+└─────────────────────────────────────────┘
+
+Multi-Stage Build:
+┌─────────────────────────────────────────┐
+│ node:20-alpine base           (~140 MB) │
+│ Production node_modules only  (~120 MB) │
+│ Compiled dist/                 (~3 MB)  │
+│ Prisma engine                  (~20 MB) │
+│ dumb-init                      (~1 MB)  │
+│                               =========  │
+│ Total:                        ~284 MB    │
+└─────────────────────────────────────────┘
+
+Savings: ~50% reduction
+</code></pre></div>
+
+<h2>Layer Caching Optimization</h2>
+<h3>Order Matters</h3>
+<div class="highlight"><pre><span></span><code><span class="c"># SLOW: Any source change invalidates npm ci cache</span>
+<span class="k">COPY</span><span class="w"> </span>.<span class="w"> </span>.
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>ci
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>build
+
+<span class="c"># FAST: npm ci only reruns when package files change</span>
+<span class="k">COPY</span><span class="w"> </span>package.json<span class="w"> </span>package-lock.json<span class="w"> </span>./
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>ci
+<span class="k">COPY</span><span class="w"> </span>.<span class="w"> </span>.
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>build
+</code></pre></div>
+
+<h3>Using BuildKit Cache Mounts</h3>
+<div class="highlight"><pre><span></span><code><span class="c"># syntax=docker/dockerfile:1</span>
+
+<span class="k">FROM</span><span class="w"> </span><span class="s">node:20-alpine</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="s">builder</span>
+<span class="k">WORKDIR</span><span class="w"> </span><span class="s">/app</span>
+<span class="k">COPY</span><span class="w"> </span>package.json<span class="w"> </span>package-lock.json<span class="w"> </span>./
+
+<span class="c"># Cache npm packages between builds</span>
+<span class="k">RUN</span><span class="w"> </span>--mount<span class="o">=</span><span class="nv">type</span><span class="o">=</span>cache,target<span class="o">=</span>/root/.npm<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>npm<span class="w"> </span>ci
+
+<span class="k">COPY</span><span class="w"> </span>.<span class="w"> </span>.
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>build
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># Enable BuildKit</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">DOCKER_BUILDKIT</span><span class="o">=</span><span class="m">1</span>
+docker<span class="w"> </span>build<span class="w"> </span>.
+
+<span class="c1"># Or use docker buildx</span>
+docker<span class="w"> </span>buildx<span class="w"> </span>build<span class="w"> </span>.
+</code></pre></div>
+
+<h2>Alpine-Specific Optimizations</h2>
+<h3>Handling Native Dependencies</h3>
+<div class="highlight"><pre><span></span><code><span class="k">FROM</span><span class="w"> </span><span class="s">node:20-alpine</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="s">builder</span>
+
+<span class="c"># Install build dependencies for native modules</span>
+<span class="k">RUN</span><span class="w"> </span>apk<span class="w"> </span>add<span class="w"> </span>--no-cache<span class="w"> </span>python3<span class="w"> </span>make<span class="w"> </span>g++
+
+<span class="k">WORKDIR</span><span class="w"> </span><span class="s">/app</span>
+<span class="k">COPY</span><span class="w"> </span>package.json<span class="w"> </span>package-lock.json<span class="w"> </span>./
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>ci
+
+<span class="c"># In production stage, no build tools needed</span>
+<span class="k">FROM</span><span class="w"> </span><span class="s">node:20-alpine</span>
+<span class="c"># Native modules are already compiled in node_modules</span>
+<span class="k">COPY</span><span class="w"> </span>--from<span class="o">=</span>builder<span class="w"> </span>/app/node_modules<span class="w"> </span>./node_modules
+</code></pre></div>
+
+<h3>Avoiding Common Alpine Issues</h3>
+<div class="highlight"><pre><span></span><code><span class="c"># Problem: some packages need glibc (Alpine uses musl)</span>
+<span class="c"># Solution: Install compatibility layer if needed</span>
+<span class="k">RUN</span><span class="w"> </span>apk<span class="w"> </span>add<span class="w"> </span>--no-cache<span class="w"> </span>libc6-compat
+
+<span class="c"># Problem: timezone data missing in Alpine</span>
+<span class="k">RUN</span><span class="w"> </span>apk<span class="w"> </span>add<span class="w"> </span>--no-cache<span class="w"> </span>tzdata
+<span class="k">ENV</span><span class="w"> </span><span class="nv">TZ</span><span class="o">=</span>UTC
+</code></pre></div>
+
+<h2>Advanced Optimization Techniques</h2>
+<h3>Removing Unnecessary Files from node_modules</h3>
+<div class="highlight"><pre><span></span><code><span class="k">FROM</span><span class="w"> </span><span class="s">node:20-alpine</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="s">deps</span>
+<span class="k">WORKDIR</span><span class="w"> </span><span class="s">/app</span>
+<span class="k">COPY</span><span class="w"> </span>package.json<span class="w"> </span>package-lock.json<span class="w"> </span>./
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>ci<span class="w"> </span>--production
+
+<span class="c"># Remove unnecessary files from node_modules</span>
+<span class="k">RUN</span><span class="w"> </span>find<span class="w"> </span>node_modules<span class="w"> </span>-name<span class="w"> </span><span class="s2">&quot;*.md&quot;</span><span class="w"> </span>-delete<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>find<span class="w"> </span>node_modules<span class="w"> </span>-name<span class="w"> </span><span class="s2">&quot;*.map&quot;</span><span class="w"> </span>-delete<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>find<span class="w"> </span>node_modules<span class="w"> </span>-name<span class="w"> </span><span class="s2">&quot;*.ts&quot;</span><span class="w"> </span>-not<span class="w"> </span>-name<span class="w"> </span><span class="s2">&quot;*.d.ts&quot;</span><span class="w"> </span>-delete<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>find<span class="w"> </span>node_modules<span class="w"> </span>-name<span class="w"> </span><span class="s2">&quot;LICENSE*&quot;</span><span class="w"> </span>-delete<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>find<span class="w"> </span>node_modules<span class="w"> </span>-name<span class="w"> </span><span class="s2">&quot;CHANGELOG*&quot;</span><span class="w"> </span>-delete<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>rm<span class="w"> </span>-rf<span class="w"> </span>node_modules/*/<span class="o">{</span>test,tests,__tests__,spec,specs<span class="o">}</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>rm<span class="w"> </span>-rf<span class="w"> </span>node_modules/*/<span class="o">{</span>example,examples,doc,docs<span class="o">}</span>
+</code></pre></div>
+
+<h3>Using node-prune</h3>
+<div class="highlight"><pre><span></span><code><span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>ci<span class="w"> </span>--production<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>npx<span class="w"> </span>node-prune<span class="w">          </span>#<span class="w"> </span>Removes<span class="w"> </span><span class="nb">test</span><span class="w"> </span>files,<span class="w"> </span>docs,<span class="w"> </span>etc.<span class="w"> </span>from<span class="w"> </span>node_modules
+</code></pre></div>
+
+<h3>Distroless Images</h3>
+<p>Google's distroless images contain only the runtime -- no shell, no package manager, no OS utilities. Maximum security.</p>
+<div class="highlight"><pre><span></span><code><span class="k">FROM</span><span class="w"> </span><span class="s">node:20-alpine</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="s">builder</span>
+<span class="k">WORKDIR</span><span class="w"> </span><span class="s">/app</span>
+<span class="k">COPY</span><span class="w"> </span>.<span class="w"> </span>.
+<span class="k">RUN</span><span class="w"> </span>npm<span class="w"> </span>ci<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>build<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>npm<span class="w"> </span>ci<span class="w"> </span>--production
+
+<span class="c"># Distroless: no shell, no package manager, minimal attack surface</span>
+<span class="k">FROM</span><span class="w"> </span><span class="s">gcr.io/distroless/nodejs20-debian12</span>
+<span class="k">COPY</span><span class="w"> </span>--from<span class="o">=</span>builder<span class="w"> </span>/app/dist<span class="w"> </span>/app/dist
+<span class="k">COPY</span><span class="w"> </span>--from<span class="o">=</span>builder<span class="w"> </span>/app/node_modules<span class="w"> </span>/app/node_modules
+<span class="k">COPY</span><span class="w"> </span>--from<span class="o">=</span>builder<span class="w"> </span>/app/package.json<span class="w"> </span>/app/
+<span class="k">WORKDIR</span><span class="w"> </span><span class="s">/app</span>
+<span class="k">CMD</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;dist/server.js&quot;</span><span class="p">]</span>
+</code></pre></div>
+
+<h2>Analyzing Image Layers</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># See layer sizes</span>
+docker<span class="w"> </span><span class="nb">history</span><span class="w"> </span>myapp:latest
+
+<span class="c1"># Use dive for interactive exploration</span>
+<span class="c1"># Install: brew install dive (macOS)</span>
+dive<span class="w"> </span>myapp:latest
+
+<span class="c1"># Output of docker history:</span>
+<span class="c1"># IMAGE          CREATED       SIZE      COMMAND</span>
+<span class="c1"># abc123         2 min ago     3.2MB     COPY dist/ ./dist/</span>
+<span class="c1"># def456         2 min ago     45MB      COPY node_modules ./</span>
+<span class="c1"># ghi789         5 min ago     0B        ENV NODE_ENV=production</span>
+<span class="c1"># jkl012         10 min ago    142MB     /bin/sh -c #(nop) base image</span>
+</code></pre></div>
+
+<h2>Building for Multiple Platforms</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># Build for both AMD64 and ARM64 (Apple Silicon + Intel + AWS Graviton)</span>
+docker<span class="w"> </span>buildx<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span>mybuilder<span class="w"> </span>--use
+
+docker<span class="w"> </span>buildx<span class="w"> </span>build<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--platform<span class="w"> </span>linux/amd64,linux/arm64<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-t<span class="w"> </span>myorg/myapp:latest<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--push<span class="w"> </span>.
+</code></pre></div>
+
+<h2>CI/CD Cache Optimization</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># GitHub Actions with Docker layer caching</span>
+<span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Build and push</span>
+<span class="w">  </span><span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">docker/build-push-action@v5</span>
+<span class="w">  </span><span class="nt">with</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">context</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">.</span>
+<span class="w">    </span><span class="nt">push</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">tags</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">myorg/myapp:latest</span>
+<span class="w">    </span><span class="nt">cache-from</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">type=gha</span><span class="w">         </span><span class="c1"># GitHub Actions cache</span>
+<span class="w">    </span><span class="nt">cache-to</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">type=gha,mode=max</span>
+</code></pre></div>
+
+<h2>Security Scanning</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># Scan image for vulnerabilities</span>
+docker<span class="w"> </span>scout<span class="w"> </span>cve<span class="w"> </span>myapp:latest
+
+<span class="c1"># Use Trivy (popular open-source scanner)</span>
+trivy<span class="w"> </span>image<span class="w"> </span>myapp:latest
+
+<span class="c1"># Snyk</span>
+snyk<span class="w"> </span>container<span class="w"> </span><span class="nb">test</span><span class="w"> </span>myapp:latest
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Not using multi-stage builds</strong> - The single biggest optimization. Separating build from runtime can halve your image size.</li>
+<li><strong>Installing dev dependencies in production stage</strong> - Always use <code>npm ci --production</code> or separate dependency stages.</li>
+<li><strong>Cache-busting with COPY . .</strong> - Place frequently changing operations (COPY source) after rarely changing ones (npm ci).</li>
+<li><strong>Not scanning for vulnerabilities</strong> - Alpine images are smaller but can still have CVEs. Scan regularly.</li>
+<li><strong>Ignoring build context size</strong> - A large <code>.dockerignore</code>-less context slows down every build. Always check what is being sent.</li>
+</ol>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Size Optimization Challenge</div>
+                    <div class="exercise-desc"><p>Start with a Dockerfile using node:20 (Debian) with a single stage. Measure its size. Then optimize in steps: (1) switch to Alpine, (2) add .dockerignore, (3) implement multi-stage build, (4) prune node_modules. Document the size at each step and calculate total reduction.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use 'docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"' to compare. Tag each iteration differently.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">BuildKit Cache Mounts</div>
+                    <div class="exercise-desc"><p>Modify your Dockerfile to use BuildKit cache mounts for npm. Benchmark build times with and without cache mounts by building, making a small change to package.json (add a comment), and rebuilding.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Add '# syntax=docker/dockerfile:1' at the top. Use 'RUN --mount=type=cache,target=/root/.npm npm ci'. Enable with DOCKER_BUILDKIT=1.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Security Audit</div>
+                    <div class="exercise-desc"><p>Build your optimized image, then scan it with 'docker scout' or Trivy. Fix any HIGH or CRITICAL vulnerabilities by updating base images or packages. Document the before/after vulnerability count.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Install trivy with brew. Run 'trivy image myapp:latest'. Often, simply updating the Alpine base image or specific npm packages resolves CVEs.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Multi-stage build fails: file not found in COPY --from</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The file path in the builder stage does not match what you are trying to copy, or the build step did not produce output.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Add a debug step in the builder stage: `RUN ls -la /app/dist/`. Ensure the build command actually produces output in the expected directory. Check that WORKDIR is set correctly in both stages.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Native npm packages crash in Alpine production stage</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Native modules (bcrypt, sharp, etc.) compiled in the builder stage may link against libraries not present in the production stage.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Ensure the production stage has necessary runtime libraries: `RUN apk add --no-cache libc6-compat`. For sharp, add `vips-dev`. Better yet, use pure-JS alternatives (bcryptjs) or install native deps in the production stage too.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Build takes forever despite 'no changes'</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Docker build context is too large (node_modules, .git, etc. being sent to daemon), or cache is not being utilized due to layer ordering.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Check .dockerignore is properly excluding node_modules and .git. Verify layer order: package.json copy and npm ci should come BEFORE source code copy. Use `docker build --progress=plain .` to see which layers are rebuilding.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://docs.docker.com/build/building/multi-stage/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Multi-Stage Builds - Docker Docs</div>
+                    
+                </a>
+                
+                <a href="https://github.com/wagoodman/dive" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag tool">tool</div>
+                    <div class="resource-title">Dive - Docker Image Layer Explorer</div>
+                    
+                </a>
+                
+                <a href="https://github.com/GoogleContainerTools/distroless" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag github">github</div>
+                    <div class="resource-title">Google Distroless Images</div>
+                    
+                </a>
+                
+                <a href="https://docs.docker.com/build/buildkit/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Docker BuildKit Documentation</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/6.2.2-js.html" class="btn">&larr; Docker Compose: Multi-Container Applications</a>
+            
+            
+            <a href="/backend-learning/lesson/6.2.4-js.html" class="btn">Docker Networking and Volumes &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-6-js.html">&larr; Back to DevOps & Deployment</a>
+        </div>
+    </div>
+</body>
+</html>

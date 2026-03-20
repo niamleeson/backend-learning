@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Real-Time Collaborative Editor (Google Docs) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Social & Real-Time Systems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.5.4</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a Real-Time Collaborative Editor (Google Docs)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Imagine two people writing on the same whiteboard from different rooms, each with a camera feed of the board. With OT, a coordinator in the middle watches both cameras and adjusts each person's instructions so they do not overwrite each other — 'You wrote at position 5, but the other person already inserted text at position 3, so your position is actually 6 now.' With CRDTs, each person's marker has a unique invisible ID embedded in every letter, so the whiteboard itself knows how to merge any combination of edits without a coordinator. CRDTs are like self-organizing text.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Real-Time Collaborative Editor (Google Docs)</h1>
+<h2>Introduction</h2>
+<p>A real-time collaborative editor allows multiple users to simultaneously edit the same document with changes appearing instantly for all participants. Google Docs serves over 1 billion users and handles millions of concurrent editing sessions. This is widely considered one of the hardest system design problems because it demands conflict-free concurrent editing, real-time synchronization, rich text formatting, offline support, and version history — all while maintaining a responsive user experience.</p>
+<p>This problem tests your deep understanding of distributed systems concurrency, CRDTs vs Operational Transformation, real-time communication patterns, and the challenges of building a system where consistency and responsiveness must coexist.</p>
+<h2>Requirements</h2>
+<h3>Functional Requirements</h3>
+<ol>
+<li><strong>Create and manage documents</strong> — Create, rename, delete, share documents</li>
+<li><strong>Rich text editing</strong> — Bold, italic, headings, lists, tables, images, links</li>
+<li><strong>Real-time collaboration</strong> — Multiple users edit simultaneously; changes appear within 100ms</li>
+<li><strong>Cursor and selection presence</strong> — See other users' cursors, selections, and names in real-time</li>
+<li><strong>Comments and suggestions</strong> — Add comments anchored to text ranges; suggest edits</li>
+<li><strong>Version history</strong> — View all changes with timestamps and authors; restore any version</li>
+<li><strong>Offline editing</strong> — Continue editing offline; sync when reconnected</li>
+<li><strong>Access control</strong> — Owner, editor, commenter, viewer permission levels</li>
+<li><strong>Conflict resolution</strong> — Concurrent edits never cause data loss or corruption</li>
+</ol>
+<h3>Non-Functional Requirements</h3>
+<ol>
+<li><strong>Real-time latency</strong> — Edits visible to collaborators within 100-200ms</li>
+<li><strong>Consistency</strong> — All users converge to the same document state (eventual consistency)</li>
+<li><strong>Durability</strong> — Zero data loss; every keystroke must eventually persist</li>
+<li><strong>Scalability</strong> — Support 50M concurrent documents, up to 100 editors per document</li>
+<li><strong>Availability</strong> — 99.99% uptime</li>
+</ol>
+<h2>Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Total users:                    1 billion
+Daily active users:             300 million
+Concurrent editing sessions:    50 million documents
+Avg collaborators per document: 2-3 (up to 100)
+Concurrent WebSocket connections: 80 million
+
+Operations:
+  - Keystrokes per active user: 3/sec average
+  - Total operations: 80M * 3 = 240M operations/sec
+  - After batching (50ms windows): 80M * 1 batch/50ms = 80M batched ops/sec
+  - With compression: ~40M messages/sec over WebSockets
+
+Storage:
+  - Avg document size: 50KB (text + formatting)
+  - Total documents: 5 billion
+  - Document storage: 5B * 50KB = 250 TB
+  - Version history (ops log): ~10x document size = 2.5 PB
+
+Bandwidth:
+  - Avg operation message: 100 bytes
+  - Inbound: 240M * 100B = 24 GB/sec
+  - Outbound (fan-out to collaborators): 24GB * 2 avg = 48 GB/sec
+  - Total: ~72 GB/sec
+
+WebSocket servers:
+  - Each server handles ~50K connections
+  - Servers needed: 80M / 50K = 1,600 WebSocket servers
+</code></pre></div>
+
+<h2>High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────────────┐
+│                     Client (Browser)                              │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────────────────┐  │
+│  │ Rich Text    │ │ Local CRDT   │ │ Offline Queue            │  │
+│  │ Editor UI    │ │ Document     │ │ (IndexedDB)              │  │
+│  └──────┬───────┘ └──────┬───────┘ └──────────┬───────────────┘  │
+│         │                │                     │                  │
+└─────────┼────────────────┼─────────────────────┼──────────────────┘
+          │  User ops      │  CRDT updates       │  Offline sync
+          │                │                     │
+┌─────────▼────────────────▼─────────────────────▼──────────────────┐
+│              WebSocket Gateway (sticky sessions)                   │
+│              (Connection routing by document_id)                   │
+└──────────────────────────┬────────────────────────────────────────┘
+                           │
+          ┌────────────────┼────────────────────┐
+          │                │                    │
+    ┌─────▼──────┐   ┌────▼───────┐   ┌────────▼────────┐
+    │ Document   │   │ Presence   │   │  Collaboration   │
+    │ Service    │   │ Service    │   │  Service         │
+    │ (CRUD,     │   │ (cursors,  │   │  (OT/CRDT       │
+    │  sharing)  │   │  online    │   │   engine)        │
+    │            │   │  users)    │   │                  │
+    └─────┬──────┘   └────┬───────┘   └────────┬─────────┘
+          │               │                    │
+    ┌─────▼──────┐   ┌────▼───────┐   ┌────────▼─────────┐
+    │ PostgreSQL │   │   Redis    │   │  Operations Log   │
+    │ (Metadata, │   │  (Presence,│   │  (Kafka /         │
+    │  Perms,    │   │   Pub/Sub) │   │   append-only DB) │
+    │  Sharing)  │   │            │   │                   │
+    └────────────┘   └────────────┘   └───────────────────┘
+                                              │
+                                      ┌───────▼───────┐
+                                      │     S3        │
+                                      │  (Document    │
+                                      │   snapshots)  │
+                                      └───────────────┘
+</code></pre></div>
+
+<h2>API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// Create a document</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/documents&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// POST /api/v1/documents</span>
+<span class="w">  </span><span class="c1">// Body: { title, content?: string, template_id?: string }</span>
+<span class="w">  </span><span class="c1">// Response: { document_id, title, url, created_at }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">doc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">documentService</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">owner_id</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">title</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">title</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;Untitled Document&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">template_id</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">template_id</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">doc</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Get document metadata (not content — content loads via WebSocket)</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/documents/:docId&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Response: { id, title, owner, collaborators, permissions, updated_at }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">doc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">documentService</span><span class="p">.</span><span class="nx">getMetadata</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">docId</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">doc</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Share document</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/documents/:docId/share&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Body: { email, permission: &#39;viewer&#39; | &#39;commenter&#39; | &#39;editor&#39; }</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">documentService</span><span class="p">.</span><span class="nx">share</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">docId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">email</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">permission</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Shared successfully&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Get version history</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/documents/:docId/history&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Response: { versions: [{ id, timestamp, author, summary }] }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">history</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">versionService</span><span class="p">.</span><span class="nx">getHistory</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">docId</span><span class="p">,</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">cursor</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">cursor</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">50</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">history</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Restore a version</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/documents/:docId/history/:versionId/restore&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">restored</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">versionService</span><span class="p">.</span><span class="nx">restore</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">docId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">versionId</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">restored</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Add a comment</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/documents/:docId/comments&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Body: { text, anchor: { start_offset, end_offset } }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">comment</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">commentService</span><span class="p">.</span><span class="nx">addComment</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">docId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">comment</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// List user&#39;s documents</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/documents&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// GET /api/v1/documents?filter=owned|shared|recent&amp;cursor=abc&amp;limit=20</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">docs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">documentService</span><span class="p">.</span><span class="nx">listForUser</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">filter</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">filter</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;recent&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">cursor</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">cursor</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">20</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">docs</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="k">export</span><span class="w"> </span><span class="k">default</span><span class="w"> </span><span class="nx">router</span><span class="p">;</span>
+
+<span class="c1">// --- WebSocket Protocol ---</span>
+<span class="c1">// Connection: wss://collab.example.com/ws/documents/:docId</span>
+<span class="c1">//</span>
+<span class="c1">// Client -&gt; Server messages:</span>
+<span class="c1">//   { type: &#39;operation&#39;, ops: [...], version: number }</span>
+<span class="c1">//   { type: &#39;cursor&#39;, position: { index, length }, file: string }</span>
+<span class="c1">//   { type: &#39;ack&#39;, version: number }</span>
+<span class="c1">//</span>
+<span class="c1">// Server -&gt; Client messages:</span>
+<span class="c1">//   { type: &#39;sync&#39;, document: encodedState, version: number }</span>
+<span class="c1">//   { type: &#39;operation&#39;, ops: [...], author: userId, version: number }</span>
+<span class="c1">//   { type: &#39;cursor&#39;, user_id, name, color, position }</span>
+<span class="c1">//   { type: &#39;presence&#39;, users: [{ id, name, color }] }</span>
+<span class="c1">//   { type: &#39;ack&#39;, version: number }</span>
+</code></pre></div>
+
+<h2>Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Users</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">email</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">avatar_url</span><span class="w">      </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Documents (metadata only — content is in operations log + snapshots)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">documents</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">title</span><span class="w">           </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;Untitled Document&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">owner_id</span><span class="w">        </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">current_version</span><span class="w"> </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">word_count</span><span class="w">      </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_deleted</span><span class="w">      </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">false</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_doc_owner</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">documents</span><span class="p">(</span><span class="n">owner_id</span><span class="p">,</span><span class="w"> </span><span class="n">updated_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+
+<span class="c1">-- Document permissions (sharing)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">document_permissions</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">document_id</span><span class="w">     </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">documents</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">DELETE</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">permission</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w"> </span><span class="c1">-- &#39;owner&#39;, &#39;editor&#39;, &#39;commenter&#39;, &#39;viewer&#39;</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">document_id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span><span class="p">)</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_perm_user</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">document_permissions</span><span class="p">(</span><span class="n">user_id</span><span class="p">);</span>
+
+<span class="c1">-- Operations log (append-only, the source of truth)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">operations</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">document_id</span><span class="w">     </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="k">version</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">author_id</span><span class="w">       </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">op_type</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w"> </span><span class="c1">-- &#39;insert&#39;, &#39;delete&#39;, &#39;format&#39;, &#39;embed&#39;</span>
+<span class="w">  </span><span class="n">op_data</span><span class="w">         </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">       </span><span class="c1">-- the operation payload</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">(</span><span class="n">document_id</span><span class="p">,</span><span class="w"> </span><span class="k">version</span><span class="p">)</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_ops_doc_version</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">operations</span><span class="p">(</span><span class="n">document_id</span><span class="p">,</span><span class="w"> </span><span class="k">version</span><span class="p">);</span>
+
+<span class="c1">-- Document snapshots (periodic materialization of document state)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">document_snapshots</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">document_id</span><span class="w">     </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">documents</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="k">version</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">content</span><span class="w">         </span><span class="n">BYTEA</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">       </span><span class="c1">-- serialized document state (CRDT or rich text)</span>
+<span class="w">  </span><span class="n">content_type</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">32</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;crdt-yjs&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">size_bytes</span><span class="w">      </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_snapshot_doc</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">document_snapshots</span><span class="p">(</span><span class="n">document_id</span><span class="p">,</span><span class="w"> </span><span class="k">version</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+
+<span class="c1">-- Comments</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">comments</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">document_id</span><span class="w">     </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">documents</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">DELETE</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">author_id</span><span class="w">       </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="nb">text</span><span class="w">            </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">anchor_start</span><span class="w">    </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">     </span><span class="c1">-- character offset in document</span>
+<span class="w">  </span><span class="n">anchor_end</span><span class="w">      </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">anchor_marker</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">),</span><span class="w">          </span><span class="c1">-- stable marker ID that survives edits</span>
+<span class="w">  </span><span class="n">is_resolved</span><span class="w">     </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">false</span><span class="p">,</span>
+<span class="w">  </span><span class="n">parent_id</span><span class="w">       </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">comments</span><span class="p">(</span><span class="n">id</span><span class="p">),</span><span class="w"> </span><span class="c1">-- for replies</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_comment_doc</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">comments</span><span class="p">(</span><span class="n">document_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Core Implementation: Operational Transformation vs CRDT</h2>
+<h3>Approach 1: Operational Transformation (OT)</h3>
+<p>OT is the approach Google Docs uses. A central server transforms concurrent operations against each other to maintain consistency.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Operational Transformation engine</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">OTServer</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">documentId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">documentId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">documentId</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">version</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span><span class="w">  </span><span class="c1">// operation history</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nb">document</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">;</span><span class="w">     </span><span class="c1">// current document state</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Receive an operation from a client</span>
+<span class="w">  </span><span class="nx">receiveOperation</span><span class="p">(</span><span class="nx">clientOp</span><span class="p">,</span><span class="w"> </span><span class="nx">clientVersion</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Transform against all operations that happened since client&#39;s version</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">transformedOp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">clientOp</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">clientVersion</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">version</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">transformedOp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">transform</span><span class="p">(</span><span class="nx">transformedOp</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">operations</span><span class="p">[</span><span class="nx">i</span><span class="p">]);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Apply to server document</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nb">document</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">apply</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nb">document</span><span class="p">,</span><span class="w"> </span><span class="nx">transformedOp</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">operations</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">transformedOp</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">version</span><span class="o">++</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">op</span><span class="o">:</span><span class="w"> </span><span class="nx">transformedOp</span><span class="p">,</span><span class="w"> </span><span class="nx">version</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">version</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Transform operation A against operation B</span>
+<span class="w">  </span><span class="c1">// When two users type at different positions simultaneously</span>
+<span class="w">  </span><span class="nx">transform</span><span class="p">(</span><span class="nx">opA</span><span class="p">,</span><span class="w"> </span><span class="nx">opB</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;insert&#39;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;insert&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">position</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">opA</span><span class="p">;</span><span class="w"> </span><span class="c1">// A is before B, no change needed</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// A is after B, shift A&#39;s position by B&#39;s length</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">opA</span><span class="p">,</span><span class="w"> </span><span class="nx">position</span><span class="o">:</span><span class="w"> </span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">text</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="p">};</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;insert&#39;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">position</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">opA</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">length</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">opA</span><span class="p">,</span><span class="w"> </span><span class="nx">position</span><span class="o">:</span><span class="w"> </span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="p">};</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">opA</span><span class="p">,</span><span class="w"> </span><span class="nx">position</span><span class="o">:</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="p">};</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;insert&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">position</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">opA</span><span class="p">,</span><span class="w"> </span><span class="nx">position</span><span class="o">:</span><span class="w"> </span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">text</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="p">};</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">opA</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">length</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">opA</span><span class="p">,</span><span class="w"> </span><span class="nx">position</span><span class="o">:</span><span class="w"> </span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="p">};</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">opA</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">position</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">opA</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="c1">// Overlapping deletes — complex case</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">max</span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="p">,</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">position</span><span class="p">);</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">opA</span><span class="p">.</span><span class="nx">length</span><span class="p">,</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">length</span><span class="p">);</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">overlap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">max</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">end</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">start</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="p">...</span><span class="nx">opA</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">position</span><span class="o">:</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nx">opA</span><span class="p">.</span><span class="nx">position</span><span class="p">,</span><span class="w"> </span><span class="nx">opB</span><span class="p">.</span><span class="nx">position</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">length</span><span class="o">:</span><span class="w"> </span><span class="nx">opA</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">overlap</span><span class="p">,</span>
+<span class="w">      </span><span class="p">};</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">opA</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">apply</span><span class="p">(</span><span class="nx">doc</span><span class="p">,</span><span class="w"> </span><span class="nx">op</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">op</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;insert&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">doc</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">op</span><span class="p">.</span><span class="nx">position</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">op</span><span class="p">.</span><span class="nx">text</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">doc</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="nx">op</span><span class="p">.</span><span class="nx">position</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">op</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;delete&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">doc</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">op</span><span class="p">.</span><span class="nx">position</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">doc</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="nx">op</span><span class="p">.</span><span class="nx">position</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">op</span><span class="p">.</span><span class="nx">length</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">doc</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Approach 2: CRDT with Yjs (Modern Approach)</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="nx">Y</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;yjs&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">WebSocketServer</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ws&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">pub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">sub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">CollaborationService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">documents</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span><span class="w"> </span><span class="c1">// docId -&gt; Y.Doc</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">clients</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span><span class="w">    </span><span class="c1">// docId -&gt; Set&lt;WebSocket&gt;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Initialize or load a document</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getDocument</span><span class="p">(</span><span class="nx">docId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">documents</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">docId</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">documents</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">docId</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">ydoc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Y</span><span class="p">.</span><span class="nx">Doc</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// Load latest snapshot from storage</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">snapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">loadLatestSnapshot</span><span class="p">(</span><span class="nx">docId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">snapshot</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">Y</span><span class="p">.</span><span class="nx">applyUpdate</span><span class="p">(</span><span class="nx">ydoc</span><span class="p">,</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Uint8Array</span><span class="p">(</span><span class="nx">snapshot</span><span class="p">.</span><span class="nx">content</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Apply any operations after the snapshot</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">ops</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">loadOperationsSince</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">snapshot</span><span class="o">?</span><span class="p">.</span><span class="nx">version</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">op</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">ops</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">Y</span><span class="p">.</span><span class="nx">applyUpdate</span><span class="p">(</span><span class="nx">ydoc</span><span class="p">,</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Uint8Array</span><span class="p">(</span><span class="nx">op</span><span class="p">.</span><span class="nx">op_data</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Listen for local changes to persist</span>
+<span class="w">    </span><span class="nx">ydoc</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;update&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">update</span><span class="p">,</span><span class="w"> </span><span class="nx">origin</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">persistOperation</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">update</span><span class="p">);</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">broadcastToOtherServers</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">update</span><span class="p">,</span><span class="w"> </span><span class="nx">origin</span><span class="p">);</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">documents</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">ydoc</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">ydoc</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Handle new WebSocket connection</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">handleConnection</span><span class="p">(</span><span class="nx">ws</span><span class="p">,</span><span class="w"> </span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">ydoc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getDocument</span><span class="p">(</span><span class="nx">docId</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Add to client set</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">this</span><span class="p">.</span><span class="nx">clients</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">docId</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">clients</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Set</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">clients</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">docId</span><span class="p">).</span><span class="nx">add</span><span class="p">(</span><span class="nx">ws</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Send current document state</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">stateVector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">Y</span><span class="p">.</span><span class="nx">encodeStateAsUpdate</span><span class="p">(</span><span class="nx">ydoc</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">ws</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sync&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nb">Array</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">stateVector</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">version</span><span class="o">:</span><span class="w"> </span><span class="nx">ydoc</span><span class="p">.</span><span class="nx">clientID</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}));</span>
+
+<span class="w">    </span><span class="c1">// Send current presence info</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">presence</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getPresence</span><span class="p">(</span><span class="nx">docId</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">ws</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;presence&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">users</span><span class="o">:</span><span class="w"> </span><span class="nx">presence</span><span class="w"> </span><span class="p">}));</span>
+
+<span class="w">    </span><span class="c1">// Add this user to presence</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">addPresence</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Handle incoming messages</span>
+<span class="w">    </span><span class="nx">ws</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;message&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">raw</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">message</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">raw</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">message</span><span class="p">.</span><span class="nx">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="c1">// Apply CRDT update from this client</span>
+<span class="w">          </span><span class="kd">const</span><span class="w"> </span><span class="nx">update</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Uint8Array</span><span class="p">(</span><span class="nx">message</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">          </span><span class="nx">Y</span><span class="p">.</span><span class="nx">applyUpdate</span><span class="p">(</span><span class="nx">ydoc</span><span class="p">,</span><span class="w"> </span><span class="nx">update</span><span class="p">,</span><span class="w"> </span><span class="nx">ws</span><span class="p">);</span>
+
+<span class="w">          </span><span class="c1">// Broadcast to other local clients</span>
+<span class="w">          </span><span class="k">this</span><span class="p">.</span><span class="nx">broadcastToLocal</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">ws</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="p">);</span>
+<span class="w">          </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;cursor&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="c1">// Broadcast cursor position</span>
+<span class="w">          </span><span class="k">this</span><span class="p">.</span><span class="nx">broadcastToLocal</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">ws</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;cursor&#39;</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">user_id</span><span class="o">:</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">            </span><span class="p">...</span><span class="nx">message</span><span class="p">,</span>
+<span class="w">          </span><span class="p">});</span>
+<span class="w">          </span><span class="k">await</span><span class="w"> </span><span class="nx">pub</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="sb">`doc:</span><span class="si">${</span><span class="nx">docId</span><span class="si">}</span><span class="sb">:cursor`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">            </span><span class="nx">user_id</span><span class="o">:</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">            </span><span class="p">...</span><span class="nx">message</span><span class="p">,</span>
+<span class="w">          </span><span class="p">}));</span>
+<span class="w">          </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="nx">ws</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">clients</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">docId</span><span class="p">)</span><span class="o">?</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">ws</span><span class="p">);</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">removePresence</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// If no more clients for this doc, schedule cleanup</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">clients</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">docId</span><span class="p">)</span><span class="o">?</span><span class="p">.</span><span class="nx">size</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">setTimeout</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">maybeUnloadDocument</span><span class="p">(</span><span class="nx">docId</span><span class="p">),</span><span class="w"> </span><span class="mf">30000</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Broadcast to clients on THIS server</span>
+<span class="w">  </span><span class="nx">broadcastToLocal</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">sender</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">clients</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">clients</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">docId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">clients</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">client</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">clients</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">client</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">sender</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">readyState</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">client</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Broadcast to collaboration servers via Redis Pub/Sub</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">broadcastToOtherServers</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">update</span><span class="p">,</span><span class="w"> </span><span class="nx">origin</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">origin</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;remote&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span><span class="w"> </span><span class="c1">// Don&#39;t re-broadcast remote updates</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">pub</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="sb">`doc:</span><span class="si">${</span><span class="nx">docId</span><span class="si">}</span><span class="sb">:update`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nb">Array</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">update</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">server_id</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">SERVER_ID</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Persist operation to append-only log</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">persistOperation</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">update</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">operations</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">document_id</span><span class="o">:</span><span class="w"> </span><span class="nx">docId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">version</span><span class="o">:</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getNextVersion</span><span class="p">(</span><span class="nx">docId</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">author_id</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="c1">// resolved from WebSocket context</span>
+<span class="w">        </span><span class="nx">op_type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;crdt_update&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">op_data</span><span class="o">:</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">update</span><span class="p">),</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Periodically snapshot the document</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">createSnapshot</span><span class="p">(</span><span class="nx">docId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">ydoc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">documents</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">docId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">ydoc</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">Y</span><span class="p">.</span><span class="nx">encodeStateAsUpdate</span><span class="p">(</span><span class="nx">ydoc</span><span class="p">);</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">document_snapshots</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">document_id</span><span class="o">:</span><span class="w"> </span><span class="nx">docId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">version</span><span class="o">:</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getCurrentVersion</span><span class="p">(</span><span class="nx">docId</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">content</span><span class="o">:</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">state</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">content_type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;crdt-yjs&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">size_bytes</span><span class="o">:</span><span class="w"> </span><span class="nx">state</span><span class="p">.</span><span class="nx">length</span><span class="p">,</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Presence management via Redis</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">addPresence</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">sadd</span><span class="p">(</span><span class="sb">`presence:</span><span class="si">${</span><span class="nx">docId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">.</span><span class="nx">toString</span><span class="p">());</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">expire</span><span class="p">(</span><span class="sb">`presence:</span><span class="si">${</span><span class="nx">docId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="mf">300</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">removePresence</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">srem</span><span class="p">(</span><span class="sb">`presence:</span><span class="si">${</span><span class="nx">docId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">.</span><span class="nx">toString</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getPresence</span><span class="p">(</span><span class="nx">docId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">smembers</span><span class="p">(</span><span class="sb">`presence:</span><span class="si">${</span><span class="nx">docId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Offline Support</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// Client-side: offline queue using IndexedDB</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">OfflineManager</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">ydoc</span><span class="p">,</span><span class="w"> </span><span class="nx">docId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">ydoc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ydoc</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">docId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">docId</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">pendingUpdates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">isOnline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">navigator</span><span class="p">.</span><span class="nx">onLine</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Buffer updates when offline</span>
+<span class="w">    </span><span class="nx">ydoc</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;update&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">update</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">this</span><span class="p">.</span><span class="nx">isOnline</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">this</span><span class="p">.</span><span class="nx">pendingUpdates</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">update</span><span class="p">);</span>
+<span class="w">        </span><span class="k">this</span><span class="p">.</span><span class="nx">saveToIndexedDB</span><span class="p">(</span><span class="nx">update</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="nb">window</span><span class="p">.</span><span class="nx">addEventListener</span><span class="p">(</span><span class="s1">&#39;online&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">sync</span><span class="p">());</span>
+<span class="w">    </span><span class="nb">window</span><span class="p">.</span><span class="nx">addEventListener</span><span class="p">(</span><span class="s1">&#39;offline&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">isOnline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">sync</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">isOnline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// Send all buffered updates</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">update</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">pendingUpdates</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">websocket</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;update&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nb">Array</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">update</span><span class="p">),</span>
+<span class="w">      </span><span class="p">}));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">pendingUpdates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">clearIndexedDB</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Scaling Strategies</h2>
+<h3>Document-Level Sharding</h3>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────┐
+│  Collaboration Server Cluster                         │
+│                                                       │
+│  Document routing (consistent hashing on doc_id):    │
+│                                                       │
+│  doc_abc ──&gt; Server 1  (all clients for doc_abc      │
+│  doc_def ──&gt; Server 2   connect to the same server)  │
+│  doc_ghi ──&gt; Server 3                                │
+│                                                       │
+│  If Server 2 fails:                                  │
+│    doc_def migrates to Server 4                      │
+│    Clients reconnect, load from snapshot + ops log   │
+│                                                       │
+│  Cross-server sync via Redis Pub/Sub:                │
+│    When a server hosts doc with external              │
+│    collaborators, Pub/Sub bridges the gap            │
+└──────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>Snapshot + Operations Log Pattern</h3>
+<div class="highlight"><pre><span></span><code>Document reconstruction:
+
+  Snapshot (version 1000)     Operations 1001-1050
+  ┌─────────────────────┐     ┌─────────────────┐
+  │ Full document state  │ + │ 50 incremental  │ = Current State
+  │ at version 1000      │   │ operations       │   (version 1050)
+  └─────────────────────┘     └─────────────────┘
+
+Snapshot every 100 operations to bound reconstruction time.
+Old operations can be archived to cold storage after snapshot.
+</code></pre></div>
+
+<h3>WebSocket Connection Management</h3>
+<div class="highlight"><pre><span></span><code>┌─────────┐   ┌──────────────┐   ┌───────────────────┐
+│ Client  │──&gt;│ WS Gateway   │──&gt;│ Collab Server     │
+│         │   │ (Nginx)      │   │ (sticky to doc_id)│
+└─────────┘   │              │   │                   │
+              │ Routes by    │   │ In-memory Y.Doc   │
+              │ doc_id to    │   │ Client set        │
+              │ correct      │   │ Persistence queue │
+              │ backend      │   │                   │
+              └──────────────┘   └───────────────────┘
+
+Sticky routing ensures all collaborators on the same document
+connect to the same server, minimizing cross-server sync.
+</code></pre></div>
+
+<h2>Comment Anchoring</h2>
+<p>One tricky aspect is keeping comments anchored to the right text as the document changes:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Comment anchors use CRDT-relative positions</span>
+<span class="c1">// instead of absolute character offsets</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">CommentAnchor</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Convert absolute offset to CRDT-relative position</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="nx">fromOffset</span><span class="p">(</span><span class="nx">ydoc</span><span class="p">,</span><span class="w"> </span><span class="nx">offset</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">ytext</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ydoc</span><span class="p">.</span><span class="nx">getText</span><span class="p">(</span><span class="s1">&#39;content&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// Y.createRelativePositionFromTypeIndex creates a position</span>
+<span class="w">    </span><span class="c1">// that moves with the text as edits happen around it</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">Y</span><span class="p">.</span><span class="nx">createRelativePositionFromTypeIndex</span><span class="p">(</span><span class="nx">ytext</span><span class="p">,</span><span class="w"> </span><span class="nx">offset</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Convert CRDT-relative position back to absolute offset</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="nx">toOffset</span><span class="p">(</span><span class="nx">ydoc</span><span class="p">,</span><span class="w"> </span><span class="nx">relativePosition</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">absPos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">Y</span><span class="p">.</span><span class="nx">createAbsolutePositionFromRelativePosition</span><span class="p">(</span>
+<span class="w">      </span><span class="nx">relativePosition</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">ydoc</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">absPos</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">absPos</span><span class="p">.</span><span class="nx">index</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span><span class="w"> </span><span class="c1">// null if text was deleted</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Concurrency model</strong></td>
+<td>Operational Transformation (OT)</td>
+<td>CRDT (Yjs/Automerge)</td>
+</tr>
+<tr>
+<td></td>
+<td>Requires central server, well-understood</td>
+<td>Decentralized, handles offline natively</td>
+</tr>
+<tr>
+<td></td>
+<td>Simpler operations, complex transformation</td>
+<td>Complex data structure, simple merging</td>
+</tr>
+<tr>
+<td></td>
+<td>Google Docs uses this</td>
+<td>Figma, some modern editors use this</td>
+</tr>
+<tr>
+<td><strong>Persistence</strong></td>
+<td>Save on every keystroke</td>
+<td>Batch + periodic save</td>
+</tr>
+<tr>
+<td></td>
+<td>Zero data loss, high write volume</td>
+<td>Potential loss of last few seconds, efficient</td>
+</tr>
+<tr>
+<td><strong>Document storage</strong></td>
+<td>Operations log only</td>
+<td>Snapshots + operations</td>
+</tr>
+<tr>
+<td></td>
+<td>Simple, unlimited undo, huge log</td>
+<td>Fast loading, bounded log size, complex</td>
+</tr>
+<tr>
+<td><strong>Rich text model</strong></td>
+<td>Delta-based (Quill)</td>
+<td>Tree-based (ProseMirror/Slate)</td>
+</tr>
+<tr>
+<td></td>
+<td>Simpler model, limited nesting</td>
+<td>Full document tree, complex but powerful</td>
+</tr>
+<tr>
+<td><strong>WebSocket routing</strong></td>
+<td>Document-sticky (hash)</td>
+<td>Any server (Redis Pub/Sub)</td>
+</tr>
+<tr>
+<td></td>
+<td>Less cross-server traffic, single point</td>
+<td>More flexible, higher Pub/Sub load</td>
+</tr>
+</tbody>
+</table>
+<h2>Summary</h2>
+<p>A real-time collaborative editor is built on three pillars: (1) a concurrency control mechanism (OT or CRDT) that ensures all users converge to the same document state regardless of the order operations arrive, (2) a WebSocket-based real-time transport layer that delivers operations to collaborators within 100-200ms, and (3) a persistence layer using an append-only operations log with periodic snapshots for fast document loading. CRDT-based approaches (Yjs) are increasingly preferred over OT for new systems because they handle offline editing natively and do not require a central transformation server. Documents should be sharded across collaboration servers using consistent hashing on document ID, with Redis Pub/Sub bridging cross-server communication. Comment anchoring requires CRDT-relative positions that survive concurrent edits. The system must handle 240M+ operations per second through aggressive batching, compression, and efficient binary encoding of updates.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build an OT Engine</div>
+                    <div class="exercise-desc"><p>Implement a basic Operational Transformation server in Node.js that handles concurrent insert and delete operations from two clients. Verify that both clients converge to the same document state regardless of operation arrival order.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Start with just insert operations. The key transform rule: if insert A is at position &lt;= insert B's position, B's position shifts by A's text length. Build up to handling delete+insert and delete+delete pairs.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Collaborative Editor with Yjs</div>
+                    <div class="exercise-desc"><p>Build a collaborative rich text editor using Yjs, y-websocket, and Quill (or Monaco). Support bold, italic, and headings. Show remote cursors with user names. Persist the document to PostgreSQL using periodic snapshots.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Y.XmlFragment for rich text. Bind to Quill with y-quill. The y-websocket package provides a ready-made WebSocket server. Snapshot with Y.encodeStateAsUpdate() every 30 seconds.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Operations Log with Snapshot Recovery</div>
+                    <div class="exercise-desc"><p>Implement a document persistence system that stores every operation in an append-only PostgreSQL table and creates snapshots every 100 operations. Build a recovery function that loads the latest snapshot and replays subsequent operations to reconstruct the document.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a BIGSERIAL version column. Query: SELECT * FROM operations WHERE document_id = $1 AND version &gt; $2 ORDER BY version ASC. Measure reconstruction time with and without snapshots.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Document takes 10+ seconds to load because the operations log has millions of entries</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Without snapshots, loading a document requires replaying every operation since creation. A heavily-edited document can have millions of operations.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement periodic snapshotting — every 100-500 operations, serialize the current document state and store it. On load, fetch the latest snapshot and replay only the operations since that snapshot. This bounds loading time to O(snapshot_interval) operations regardless of total document history. Archive old operations to cold storage.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Cursor positions jump around when multiple users are typing near each other</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Cursor positions are stored as absolute character offsets. When another user inserts text before the cursor, the offset becomes stale and points to the wrong position.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use CRDT-relative positions for cursor tracking instead of absolute offsets. In Yjs, use Y.createRelativePositionFromTypeIndex() which creates a position that is stable relative to the surrounding characters, not the absolute offset. This position automatically adjusts as text is inserted or deleted around it.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">WebSocket server crashes when a viral document gets 500+ simultaneous editors</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Each editor generates ~3 operations/second. With 500 editors, that is 1,500 ops/sec inbound, each of which must be broadcast to 499 other clients — resulting in ~750,000 outbound messages/second on a single server.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement operation batching: collect operations in a 50ms window and send them as a single batch. This reduces message count by 10-50x. For extremely hot documents, implement a fan-out tree: the primary server sends updates to 5 relay servers, each of which handles 100 clients. Rate-limit cursor updates to 5/second per user. Consider read-only mode for viewers to eliminate their operation overhead.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://en.wikipedia.org/wiki/Operational_transformation" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Operational Transformation (Wikipedia)</div>
+                    
+                    <div class="resource-note">Comprehensive overview of OT theory, algorithms, and history</div>
+                    
+                </a>
+                
+                <a href="https://www.youtube.com/watch?v=x7drE24geUw" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag video">video</div>
+                    <div class="resource-title">CRDTs: The Hard Parts (Martin Kleppmann)</div>
+                    
+                    <div class="resource-note">Excellent talk covering CRDT challenges in real collaborative editing scenarios</div>
+                    
+                </a>
+                
+                <a href="https://docs.yjs.dev/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Yjs Documentation</div>
+                    
+                    <div class="resource-note">The leading CRDT framework for collaborative editing in JavaScript</div>
+                    
+                </a>
+                
+                <a href="https://drive.googleblog.com/2010/09/whats-different-about-new-google-docs.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">How Google Docs Works (Real-Time Collaboration)</div>
+                    
+                    <div class="resource-note">Google's original blog post explaining their OT-based collaboration approach</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.5.3-js.html" class="btn">&larr; Design an Online Code Editor (Replit)</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

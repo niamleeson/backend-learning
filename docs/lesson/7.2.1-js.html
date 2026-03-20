@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OAuth2 Flows: Authorization Code, Client Credentials, PKCE - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-7-js.html">Security & Reliability</a> &rsaquo;
+            Authentication & Authorization
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">7.2.1</span>
+                <span>~3h</span>
+            </div>
+            <h1>OAuth2 Flows: Authorization Code, Client Credentials, PKCE</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>OAuth2 is like a valet parking system. You (the resource owner) give the valet (the client app) a special ticket (access token) that only lets them park and retrieve your car, but they never get a copy of your house keys (password). The Authorization Code flow adds a layer: the valet first gets a claim ticket (authorization code) from the parking desk, then exchanges it at a secure back office window (server-to-server) for the actual car key.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>OAuth2 Flows: Authorization Code, Client Credentials, PKCE</h1>
+<h2>Why OAuth2 Matters</h2>
+<p>OAuth2 is the industry-standard protocol for authorization. Every time a user clicks "Sign in with Google" or "Login with GitHub," OAuth2 is working behind the scenes. As a backend developer, understanding OAuth2 is essential because you will either integrate with third-party identity providers or build your own authorization server.</p>
+<p>OAuth2 solves a critical problem: how do you let a third-party application access a user's resources without sharing the user's password? Before OAuth, applications literally asked for your username and password to other services. OAuth2 replaces that dangerous pattern with short-lived, scoped tokens.</p>
+<h2>Core OAuth2 Concepts</h2>
+<p>Before diving into flows, you need to understand the actors and artifacts in OAuth2.</p>
+<h3>The Four Roles</h3>
+<div class="highlight"><pre><span></span><code>┌──────────────────┐     ┌───────────────────────┐
+│  Resource Owner   │     │  Client (Your App)     │
+│  (The User)       │     │  - client_id           │
+│                   │     │  - client_secret       │
+│  Owns the data    │     │  - redirect_uri        │
+└────────┬─────────┘     └───────────┬───────────┘
+         │                           │
+         │    Grants access          │   Requests access
+         ▼                           ▼
+┌──────────────────┐     ┌───────────────────────┐
+│  Authorization    │     │  Resource Server       │
+│  Server           │     │  (API)                 │
+│                   │     │                        │
+│  Issues tokens    │     │  Hosts protected       │
+│  (Google, GitHub) │     │  resources             │
+└──────────────────┘     └───────────────────────┘
+</code></pre></div>
+
+<ul>
+<li><strong>Resource Owner</strong> - The user who owns the data (e.g., a GitHub user's repositories)</li>
+<li><strong>Client</strong> - Your application that wants to access the user's data</li>
+<li><strong>Authorization Server</strong> - The server that authenticates the user and issues tokens (e.g., Google's OAuth server)</li>
+<li><strong>Resource Server</strong> - The API that holds the protected resources (e.g., GitHub API)</li>
+</ul>
+<h3>Tokens</h3>
+<ul>
+<li><strong>Authorization Code</strong> - A short-lived, one-time-use code exchanged for tokens. Never exposed to the browser's URL bar for long.</li>
+<li><strong>Access Token</strong> - A credential used to access protected resources. Typically short-lived (15 minutes to 1 hour).</li>
+<li><strong>Refresh Token</strong> - A long-lived token used to obtain new access tokens without re-authenticating the user.</li>
+</ul>
+<h3>Scopes</h3>
+<p>Scopes limit what the access token can do. Think of them as permissions:</p>
+<div class="highlight"><pre><span></span><code>scope: &quot;read:user repo:read notifications&quot;
+</code></pre></div>
+
+<p>This token can read user profile info, read repositories, and access notifications, but cannot write to repositories or delete anything.</p>
+<h2>Flow 1: Authorization Code Flow</h2>
+<p>This is the most common and most secure flow for web applications with a backend server. It is the flow you should use for any application where you have a server-side component.</p>
+<h3>How It Works</h3>
+<div class="highlight"><pre><span></span><code>┌────────┐     ┌────────┐     ┌───────────┐     ┌──────────┐
+│Browser  │     │Your    │     │Auth       │     │Resource  │
+│(User)   │     │Server  │     │Server     │     │Server    │
+└───┬────┘     └───┬────┘     └─────┬─────┘     └────┬─────┘
+    │              │                │                 │
+    │ 1. Click     │                │                 │
+    │  &quot;Login&quot;     │                │                 │
+    │─────────────►│                │                 │
+    │              │                │                 │
+    │ 2. Redirect to Auth Server    │                 │
+    │◄─────────────│                │                 │
+    │              │                │                 │
+    │ 3. User logs in + consents    │                 │
+    │─────────────────────────────►│                 │
+    │              │                │                 │
+    │ 4. Redirect back with code    │                 │
+    │◄────────────────────────────│                 │
+    │              │                │                 │
+    │ 5. Send code │                │                 │
+    │─────────────►│                │                 │
+    │              │                │                 │
+    │              │ 6. Exchange    │                 │
+    │              │ code + secret  │                 │
+    │              │ for tokens     │                 │
+    │              │───────────────►│                 │
+    │              │                │                 │
+    │              │ 7. Access +    │                 │
+    │              │ Refresh Token  │                 │
+    │              │◄───────────────│                 │
+    │              │                │                 │
+    │              │ 8. Use access token              │
+    │              │─────────────────────────────────►│
+    │              │                │                 │
+    │              │ 9. Protected resource             │
+    │              │◄─────────────────────────────────│
+    │              │                │                 │
+    │ 10. Response │                │                 │
+    │◄─────────────│                │                 │
+</code></pre></div>
+
+<p>The key security feature: the authorization code is exchanged for tokens on the server side (step 6), where the <code>client_secret</code> is safe. The browser never sees the access token.</p>
+<h3>Implementation in Node.js</h3>
+<p>Let us build a complete OAuth2 Authorization Code flow with Express and GitHub as the provider.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// oauth-demo/server.js</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:crypto&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">session</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express-session&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="c1">// Session to store state and tokens</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">session</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">secret</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">SESSION_SECRET</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;dev-secret-change-me&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resave</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">saveUninitialized</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">cookie</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">secure</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nx">httpOnly</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">maxAge</span><span class="o">:</span><span class="w"> </span><span class="mf">3600000</span><span class="w"> </span><span class="p">}</span>
+<span class="p">}));</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">GITHUB_CLIENT_ID</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">GITHUB_CLIENT_ID</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">GITHUB_CLIENT_SECRET</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">GITHUB_CLIENT_SECRET</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">REDIRECT_URI</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;http://localhost:3000/auth/github/callback&#39;</span><span class="p">;</span>
+
+<span class="c1">// Step 1 &amp; 2: Redirect user to GitHub&#39;s authorization page</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/auth/github&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Generate a random state parameter to prevent CSRF</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mf">16</span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthState</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">state</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URLSearchParams</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">client_id</span><span class="o">:</span><span class="w"> </span><span class="nx">GITHUB_CLIENT_ID</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">redirect_uri</span><span class="o">:</span><span class="w"> </span><span class="nx">REDIRECT_URI</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">scope</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;read:user user:email&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">state</span><span class="o">:</span><span class="w"> </span><span class="nx">state</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">response_type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;code&#39;</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="sb">`https://github.com/login/oauth/authorize?</span><span class="si">${</span><span class="nx">params</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Steps 4-7: Handle the callback with authorization code</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/auth/github/callback&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">code</span><span class="p">,</span><span class="w"> </span><span class="nx">state</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Verify state to prevent CSRF attacks</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">state</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthState</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;State mismatch. Possible CSRF attack.&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="ow">delete</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthState</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">code</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;No authorization code received&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Step 6: Exchange code for tokens (server-to-server, secret is safe)</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">tokenResponse</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s1">&#39;https://github.com/login/oauth/access_token&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/json&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="s1">&#39;Accept&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/json&#39;</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">client_id</span><span class="o">:</span><span class="w"> </span><span class="nx">GITHUB_CLIENT_ID</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">client_secret</span><span class="o">:</span><span class="w"> </span><span class="nx">GITHUB_CLIENT_SECRET</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">code</span><span class="o">:</span><span class="w"> </span><span class="nx">code</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">redirect_uri</span><span class="o">:</span><span class="w"> </span><span class="nx">REDIRECT_URI</span>
+<span class="w">      </span><span class="p">})</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">tokenData</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tokenResponse</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">tokenData</span><span class="p">.</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">tokenData</span><span class="p">.</span><span class="nx">error_description</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Step 7: Store tokens securely in session (never send to client)</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">accessToken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tokenData</span><span class="p">.</span><span class="nx">access_token</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// GitHub does not issue refresh tokens in this flow</span>
+
+<span class="w">    </span><span class="c1">// Step 8: Use token to get user info</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">userResponse</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s1">&#39;https://api.github.com/user&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="s1">&#39;Authorization&#39;</span><span class="o">:</span><span class="w"> </span><span class="sb">`Bearer </span><span class="si">${</span><span class="nx">tokenData</span><span class="p">.</span><span class="nx">access_token</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">        </span><span class="s1">&#39;Accept&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/vnd.github.v3+json&#39;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">userResponse</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// In production: find or create user in your DB</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">login</span><span class="o">:</span><span class="w"> </span><span class="nx">user</span><span class="p">.</span><span class="nx">login</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="nx">user</span><span class="p">.</span><span class="nx">email</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">avatar</span><span class="o">:</span><span class="w"> </span><span class="nx">user</span><span class="p">.</span><span class="nx">avatar_url</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="s1">&#39;/dashboard&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;OAuth error:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Authentication failed&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="c1">// Protected route</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/dashboard&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="s1">&#39;/auth/github&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="sb">`Welcome </span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">login</span><span class="si">}</span><span class="sb">!`</span><span class="p">,</span><span class="w"> </span><span class="nx">user</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">user</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="mf">3000</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Server running on http://localhost:3000&#39;</span><span class="p">));</span>
+</code></pre></div>
+
+<h3>The State Parameter (CSRF Protection)</h3>
+<p>The <code>state</code> parameter is critical. Without it, an attacker could:</p>
+<ol>
+<li>Start an OAuth flow on their own browser</li>
+<li>Get the authorization code</li>
+<li>Trick the victim into visiting the callback URL with the attacker's code</li>
+<li>The victim's account gets linked to the attacker's identity</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="c1">// Always generate a cryptographically random state</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mf">16</span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+
+<span class="c1">// Store it in the session before redirecting</span>
+<span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthState</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">state</span><span class="p">;</span>
+
+<span class="c1">// Verify it matches when the callback arrives</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">state</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthState</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;CSRF detected&#39;</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Flow 2: Client Credentials Flow</h2>
+<p>This flow is for machine-to-machine (M2M) communication where no user is involved. Your backend server authenticates itself to access another service's API.</p>
+<div class="highlight"><pre><span></span><code>┌────────────────┐                    ┌───────────────────┐
+│  Your Server    │                    │  Auth Server       │
+│  (Client)       │                    │                    │
+│                 │  1. client_id +    │                    │
+│                 │     client_secret  │                    │
+│                 │───────────────────►│                    │
+│                 │                    │                    │
+│                 │  2. Access Token   │                    │
+│                 │◄───────────────────│                    │
+└────────┬───────┘                    └───────────────────┘
+         │
+         │  3. Use access token
+         ▼
+┌────────────────┐
+│ Resource Server │
+│ (API)           │
+└────────────────┘
+</code></pre></div>
+
+<p>No browser, no redirects, no user consent. Just server-to-server authentication.</p>
+<h3>Implementation</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// client-credentials.js</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">OAuth2ClientCredentials</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">({</span><span class="w"> </span><span class="nx">tokenUrl</span><span class="p">,</span><span class="w"> </span><span class="nx">clientId</span><span class="p">,</span><span class="w"> </span><span class="nx">clientSecret</span><span class="p">,</span><span class="w"> </span><span class="nx">scopes</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">tokenUrl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tokenUrl</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">clientId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">clientId</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">clientSecret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">clientSecret</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">scopes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">scopes</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">accessToken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">tokenExpiry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getAccessToken</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Return cached token if still valid (with 60s buffer)</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">accessToken</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">tokenExpiry</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">60000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">accessToken</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">tokenUrl</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/x-www-form-urlencoded&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="c1">// Some providers prefer Basic auth header</span>
+<span class="w">        </span><span class="s1">&#39;Authorization&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Basic &#39;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span>
+<span class="w">          </span><span class="sb">`</span><span class="si">${</span><span class="k">this</span><span class="p">.</span><span class="nx">clientId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="k">this</span><span class="p">.</span><span class="nx">clientSecret</span><span class="si">}</span><span class="sb">`</span>
+<span class="w">        </span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;base64&#39;</span><span class="p">)</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URLSearchParams</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">grant_type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;client_credentials&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">scope</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">scopes</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="s1">&#39; &#39;</span><span class="p">)</span>
+<span class="w">      </span><span class="p">})</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">response</span><span class="p">.</span><span class="nx">ok</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">error</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Token request failed: </span><span class="si">${</span><span class="nx">error</span><span class="p">.</span><span class="nx">error_description</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">error</span><span class="p">.</span><span class="nx">error</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">accessToken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">access_token</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">tokenExpiry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">expires_in</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">accessToken</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">authenticatedFetch</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getAccessToken</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="p">...</span><span class="nx">options</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="p">...</span><span class="nx">options</span><span class="p">.</span><span class="nx">headers</span><span class="p">,</span>
+<span class="w">        </span><span class="s1">&#39;Authorization&#39;</span><span class="o">:</span><span class="w"> </span><span class="sb">`Bearer </span><span class="si">${</span><span class="nx">token</span><span class="si">}</span><span class="sb">`</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage: calling an external API from your backend</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">apiClient</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">OAuth2ClientCredentials</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">tokenUrl</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://auth.example.com/oauth/token&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">clientId</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">API_CLIENT_ID</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">clientSecret</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">API_CLIENT_SECRET</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">scopes</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;read:data&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;write:data&#39;</span><span class="p">]</span>
+<span class="p">});</span>
+
+<span class="c1">// In your service layer</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">fetchExternalData</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">apiClient</span><span class="p">.</span><span class="nx">authenticatedFetch</span><span class="p">(</span>
+<span class="w">    </span><span class="s1">&#39;https://api.example.com/v1/resources&#39;</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Common Use Cases</h3>
+<ul>
+<li>Microservice-to-microservice communication</li>
+<li>Backend cron jobs accessing APIs</li>
+<li>CLI tools that run as service accounts</li>
+<li>Server-side integrations (payment processors, email services)</li>
+</ul>
+<h2>Flow 3: Authorization Code with PKCE</h2>
+<p>PKCE (Proof Key for Code Exchange, pronounced "pixy") was originally designed for mobile and single-page apps that cannot securely store a <code>client_secret</code>. It is now the recommended approach for ALL public clients and is considered best practice even for server-side apps.</p>
+<h3>The Problem PKCE Solves</h3>
+<p>In a mobile app or SPA, you cannot store a <code>client_secret</code> securely. The app's code is visible to anyone. Without PKCE, an attacker who intercepts the authorization code could exchange it for tokens.</p>
+<h3>How PKCE Works</h3>
+<div class="highlight"><pre><span></span><code>┌────────────┐        ┌──────────────┐        ┌───────────────┐
+│  Client     │        │  Auth Server  │        │  Attacker      │
+└─────┬──────┘        └──────┬───────┘        └───────┬───────┘
+      │                      │                        │
+      │ 1. Generate:         │                        │
+      │ code_verifier (rand) │                        │
+      │ code_challenge =     │                        │
+      │   SHA256(verifier)   │                        │
+      │                      │                        │
+      │ 2. Auth request +    │                        │
+      │    code_challenge    │                        │
+      │─────────────────────►│                        │
+      │                      │                        │
+      │ 3. Auth code         │                        │
+      │◄─────────────────────│                        │
+      │                      │        ┌───────────────┤
+      │                      │        │ Intercepts    │
+      │                      │        │ auth code     │
+      │                      │        └───────────────┤
+      │                      │                        │
+      │ 4. Exchange code +   │   Attacker tries code  │
+      │    code_verifier     │   but does NOT have     │
+      │─────────────────────►│   code_verifier!        │
+      │                      │◄───────────────────────│
+      │ 5. Tokens!           │   REJECTED!             │
+      │◄─────────────────────│───────────────────────►│
+      │                      │                        │
+</code></pre></div>
+
+<p>The attacker intercepts the code but cannot exchange it without the <code>code_verifier</code>, which was never transmitted.</p>
+<h3>Implementation</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// pkce-helpers.js</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:crypto&#39;</span><span class="p">);</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">generateCodeVerifier</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 32 bytes = 43 base64url characters (within the 43-128 char spec)</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mf">32</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;base64url&#39;</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">generateCodeChallenge</span><span class="p">(</span><span class="nx">verifier</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">crypto</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">createHash</span><span class="p">(</span><span class="s1">&#39;sha256&#39;</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nx">verifier</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">digest</span><span class="p">(</span><span class="s1">&#39;base64url&#39;</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">generateCodeVerifier</span><span class="p">,</span><span class="w"> </span><span class="nx">generateCodeChallenge</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// pkce-oauth-server.js</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">session</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express-session&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">generateCodeVerifier</span><span class="p">,</span><span class="w"> </span><span class="nx">generateCodeChallenge</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;./pkce-helpers&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">session</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">secret</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">SESSION_SECRET</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;dev-secret&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resave</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">saveUninitialized</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="p">}));</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">AUTH_CONFIG</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">clientId</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">OAUTH_CLIENT_ID</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">authorizationUrl</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://auth.example.com/authorize&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">tokenUrl</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://auth.example.com/oauth/token&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">redirectUri</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;http://localhost:3000/auth/callback&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">scopes</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;openid&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;profile&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;email&#39;</span><span class="p">]</span>
+<span class="p">};</span>
+
+<span class="c1">// Step 1: Start the PKCE flow</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/auth/login&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Generate PKCE pair</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">codeVerifier</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">generateCodeVerifier</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">codeChallenge</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">generateCodeChallenge</span><span class="p">(</span><span class="nx">codeVerifier</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Store verifier in session (needed for token exchange)</span>
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">codeVerifier</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">codeVerifier</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Generate state for CSRF protection</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:crypto&#39;</span><span class="p">).</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mf">16</span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthState</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">state</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URLSearchParams</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">response_type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;code&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">client_id</span><span class="o">:</span><span class="w"> </span><span class="nx">AUTH_CONFIG</span><span class="p">.</span><span class="nx">clientId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">redirect_uri</span><span class="o">:</span><span class="w"> </span><span class="nx">AUTH_CONFIG</span><span class="p">.</span><span class="nx">redirectUri</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">scope</span><span class="o">:</span><span class="w"> </span><span class="nx">AUTH_CONFIG</span><span class="p">.</span><span class="nx">scopes</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="s1">&#39; &#39;</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">state</span><span class="o">:</span><span class="w"> </span><span class="nx">state</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">code_challenge</span><span class="o">:</span><span class="w"> </span><span class="nx">codeChallenge</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">code_challenge_method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;S256&#39;</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">AUTH_CONFIG</span><span class="p">.</span><span class="nx">authorizationUrl</span><span class="si">}</span><span class="sb">?</span><span class="si">${</span><span class="nx">params</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Step 2: Handle callback and exchange code + verifier for tokens</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/auth/callback&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">code</span><span class="p">,</span><span class="w"> </span><span class="nx">state</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Validate state</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">state</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthState</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid state parameter&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Retrieve the stored code verifier</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">codeVerifier</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">codeVerifier</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">codeVerifier</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Missing code verifier. Start the flow again.&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Clean up session</span>
+<span class="w">  </span><span class="ow">delete</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthState</span><span class="p">;</span>
+<span class="w">  </span><span class="ow">delete</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">codeVerifier</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Exchange code + code_verifier for tokens</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">tokenResponse</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">AUTH_CONFIG</span><span class="p">.</span><span class="nx">tokenUrl</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/x-www-form-urlencoded&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URLSearchParams</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">grant_type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;authorization_code&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">client_id</span><span class="o">:</span><span class="w"> </span><span class="nx">AUTH_CONFIG</span><span class="p">.</span><span class="nx">clientId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">code</span><span class="o">:</span><span class="w"> </span><span class="nx">code</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">redirect_uri</span><span class="o">:</span><span class="w"> </span><span class="nx">AUTH_CONFIG</span><span class="p">.</span><span class="nx">redirectUri</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">code_verifier</span><span class="o">:</span><span class="w"> </span><span class="nx">codeVerifier</span><span class="w">  </span><span class="c1">// This proves we started the flow</span>
+<span class="w">      </span><span class="p">})</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">tokens</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tokenResponse</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">tokens</span><span class="p">.</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">tokens</span><span class="p">.</span><span class="nx">error</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">description</span><span class="o">:</span><span class="w"> </span><span class="nx">tokens</span><span class="p">.</span><span class="nx">error_description</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Store tokens securely</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">accessToken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tokens</span><span class="p">.</span><span class="nx">access_token</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">refreshToken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tokens</span><span class="p">.</span><span class="nx">refresh_token</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">idToken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tokens</span><span class="p">.</span><span class="nx">id_token</span><span class="p">;</span><span class="w"> </span><span class="c1">// If using OpenID Connect</span>
+
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="s1">&#39;/dashboard&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Token exchange failed:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Authentication failed&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="mf">3000</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Token Refresh Flow</h2>
+<p>Access tokens expire. Rather than forcing the user to log in again, use the refresh token to get a new access token.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// token-refresh.js</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">TokenManager</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">({</span><span class="w"> </span><span class="nx">tokenUrl</span><span class="p">,</span><span class="w"> </span><span class="nx">clientId</span><span class="p">,</span><span class="w"> </span><span class="nx">clientSecret</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">tokenUrl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tokenUrl</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">clientId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">clientId</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">clientSecret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">clientSecret</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">refreshAccessToken</span><span class="p">(</span><span class="nx">refreshToken</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">tokenUrl</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/x-www-form-urlencoded&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URLSearchParams</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">grant_type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;refresh_token&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">refresh_token</span><span class="o">:</span><span class="w"> </span><span class="nx">refreshToken</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">client_id</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">clientId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">client_secret</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">clientSecret</span>
+<span class="w">      </span><span class="p">})</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Refresh token is expired or revoked</span>
+<span class="w">      </span><span class="c1">// User must re-authenticate</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Refresh failed: </span><span class="si">${</span><span class="nx">data</span><span class="p">.</span><span class="nx">error</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">accessToken</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">access_token</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">refreshToken</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">refresh_token</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">refreshToken</span><span class="p">,</span><span class="w"> </span><span class="c1">// Some providers rotate refresh tokens</span>
+<span class="w">      </span><span class="nx">expiresIn</span><span class="o">:</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">expires_in</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Express middleware for automatic token refresh</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">autoRefreshTokens</span><span class="p">(</span><span class="nx">tokenManager</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">accessToken</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">tokenExpiry</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">next</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Check if token is about to expire (within 5 minutes)</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">fiveMinutes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">tokenExpiry</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">fiveMinutes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">newTokens</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tokenManager</span><span class="p">.</span><span class="nx">refreshAccessToken</span><span class="p">(</span>
+<span class="w">          </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">refreshToken</span>
+<span class="w">        </span><span class="p">);</span>
+<span class="w">        </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">accessToken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">newTokens</span><span class="p">.</span><span class="nx">accessToken</span><span class="p">;</span>
+<span class="w">        </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">refreshToken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">newTokens</span><span class="p">.</span><span class="nx">refreshToken</span><span class="p">;</span>
+<span class="w">        </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">tokenExpiry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="nx">newTokens</span><span class="p">.</span><span class="nx">expiresIn</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Refresh failed, force re-login</span>
+<span class="w">        </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">destroy</span><span class="p">();</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="s1">&#39;/auth/login&#39;</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="nx">next</span><span class="p">();</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Choosing the Right Flow</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────┬─────────────────────────────┐
+│  Application Type            │  Recommended Flow           │
+├──────────────────────────────┼─────────────────────────────┤
+│  Server-side web app         │  Authorization Code         │
+│  (Express, NestJS)           │  (+ PKCE recommended)       │
+├──────────────────────────────┼─────────────────────────────┤
+│  Single-page app (React)     │  Authorization Code + PKCE  │
+│                              │  (no client_secret)         │
+├──────────────────────────────┼─────────────────────────────┤
+│  Mobile / Desktop app        │  Authorization Code + PKCE  │
+│                              │  (no client_secret)         │
+├──────────────────────────────┼─────────────────────────────┤
+│  Machine-to-machine          │  Client Credentials         │
+│  (cron jobs, microservices)  │                             │
+├──────────────────────────────┼─────────────────────────────┤
+│  DEPRECATED: Implicit flow   │  Do NOT use. Replaced by    │
+│  (tokens in URL fragment)    │  Auth Code + PKCE           │
+└──────────────────────────────┴─────────────────────────────┘
+</code></pre></div>
+
+<h2>Security Best Practices</h2>
+<ol>
+<li><strong>Always use the <code>state</code> parameter</strong> to prevent CSRF attacks.</li>
+<li><strong>Always use PKCE</strong> for public clients (SPAs, mobile). Consider it even for confidential clients.</li>
+<li><strong>Never store tokens in localStorage</strong> - Use httpOnly cookies or server-side sessions.</li>
+<li><strong>Keep access tokens short-lived</strong> (15 minutes to 1 hour).</li>
+<li><strong>Store refresh tokens securely</strong> and rotate them when possible.</li>
+<li><strong>Validate the <code>redirect_uri</code></strong> on the authorization server to prevent open redirect attacks.</li>
+<li><strong>Use scopes conservatively</strong> - Request only the permissions you need.</li>
+<li><strong>Implement token revocation</strong> for logout functionality.</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="c1">// Token revocation endpoint</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/auth/logout&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">refreshToken</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Revoke the refresh token at the provider</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s1">&#39;https://auth.example.com/oauth/revoke&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/x-www-form-urlencoded&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URLSearchParams</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">token</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">refreshToken</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">token_type_hint</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;refresh_token&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">client_id</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">OAUTH_CLIENT_ID</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">client_secret</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">OAUTH_CLIENT_SECRET</span>
+<span class="w">      </span><span class="p">})</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">destroy</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Logged out successfully&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Common Grant Type Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Authorization Code</th>
+<th>Client Credentials</th>
+<th>Auth Code + PKCE</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>User involved</td>
+<td>Yes</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Client secret required</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Redirect required</td>
+<td>Yes</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Refresh token</td>
+<td>Yes</td>
+<td>Usually no</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Use case</td>
+<td>Server apps</td>
+<td>M2M</td>
+<td>SPAs, mobile</td>
+</tr>
+<tr>
+<td>Security level</td>
+<td>High</td>
+<td>High</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a GitHub OAuth2 Login</div>
+                    <div class="exercise-desc"><p>Register a GitHub OAuth App, then build an Express server that implements the full Authorization Code flow. The user should be able to click 'Login with GitHub', get redirected, and see their GitHub profile information on a dashboard page. Include the state parameter for CSRF protection.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Register at https://github.com/settings/developers. Set the callback URL to http://localhost:3000/auth/github/callback. Use express-session to store the state parameter and tokens.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement PKCE from Scratch</div>
+                    <div class="exercise-desc"><p>Write a module that generates a code_verifier (43-128 character random string) and derives the code_challenge using SHA-256. Write tests that verify: (1) the verifier is the right length, (2) the challenge is a valid base64url string, (3) the same verifier always produces the same challenge, (4) different verifiers produce different challenges.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use crypto.randomBytes(32).toString('base64url') for the verifier. Use crypto.createHash('sha256').update(verifier).digest('base64url') for the challenge.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Client Credentials Token Cache</div>
+                    <div class="exercise-desc"><p>Build a class that implements the Client Credentials flow with automatic token caching and refresh. It should request a new token only when the cached one is expired or about to expire (within 60 seconds of expiry). Write tests using a mock token endpoint.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Store the token and its expiry time. Before each API call, check if the token is still valid. Use Date.now() + (expires_in * 1000) to calculate expiry.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Token Refresh Middleware</div>
+                    <div class="exercise-desc"><p>Write an Express middleware that checks if the user's access token is about to expire and transparently refreshes it using the refresh token before the request handler runs. If the refresh fails, redirect the user to the login page.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Store tokenExpiry in the session. In the middleware, compare it against Date.now(). If within 5 minutes of expiry, call the token endpoint with grant_type=refresh_token.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">State parameter mismatch error on OAuth callback</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The session storing the state value was lost between the redirect and the callback. This commonly happens when: (1) the session cookie is not being set due to SameSite or Secure attributes, (2) a load balancer routes the callback to a different server instance without shared sessions, or (3) the user took too long and the session expired.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Ensure your session store is shared across instances (use Redis or a database-backed session store). Check that your session cookie settings are correct for your domain. For local development, set `cookie.secure = false`. For production behind a proxy, set `app.set('trust proxy', 1)` and use secure cookies.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Authorization code exchange returns 'invalid_grant' error</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The authorization code has already been used (codes are single-use), the code has expired (typically 10 minutes), or the redirect_uri in the token request does not exactly match the one used in the authorization request.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Ensure you exchange the code immediately upon receiving it. Verify the redirect_uri is identical in both requests (including trailing slashes). Do not retry the code exchange if it fails; redirect the user to start the flow again.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Access token works locally but fails in production with CORS errors</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> When making API calls from the browser, CORS policies block the request. Tokens in the Authorization header trigger a preflight OPTIONS request that the API server may not handle.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> For server-side OAuth flows, make API calls from your backend server, not from the browser. If you must call from the browser, ensure the resource server has proper CORS headers. Better yet, create a proxy endpoint on your server that adds the token and forwards the request.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://www.oauth.com/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">OAuth 2.0 Simplified by Aaron Parecki</div>
+                    
+                    <div class="resource-note">The clearest explanation of OAuth2 available, with practical examples for each flow</div>
+                    
+                </a>
+                
+                <a href="https://datatracker.ietf.org/doc/html/rfc6749" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag specification">specification</div>
+                    <div class="resource-title">RFC 6749 - The OAuth 2.0 Authorization Framework</div>
+                    
+                    <div class="resource-note">The official OAuth2 specification. Dense but authoritative.</div>
+                    
+                </a>
+                
+                <a href="https://datatracker.ietf.org/doc/html/rfc7636" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag specification">specification</div>
+                    <div class="resource-title">RFC 7636 - Proof Key for Code Exchange (PKCE)</div>
+                    
+                    <div class="resource-note">The PKCE specification, essential reading for public client implementations</div>
+                    
+                </a>
+                
+                <a href="https://auth0.com/docs/get-started/authentication-and-authorization-flow/which-oauth-2-0-flow-should-i-use" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Auth0 - Which OAuth 2.0 Flow Should I Use?</div>
+                    
+                    <div class="resource-note">Practical decision guide for choosing the right OAuth2 flow</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/7.2.2-js.html" class="btn">OpenID Connect and Identity Providers &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-7-js.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

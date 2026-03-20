@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Distributed Message Queue (Kafka) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Data & Analytics
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.6.1</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a Distributed Message Queue (Kafka)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a message queue as a massive, distributed notebook with numbered pages. Writers add pages at the end (append-only), readers bookmark where they stopped (offsets), and multiple reading groups can independently track their own progress through the same notebook without interfering with each other.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Distributed Message Queue (Kafka)</h1>
+<h2>Introduction</h2>
+<p>A distributed message queue is the central nervous system of modern data-intensive applications. It decouples producers from consumers, absorbs traffic spikes, guarantees delivery, and enables real-time data pipelines. In this lesson we design a system inspired by Apache Kafka — the industry standard for high-throughput, fault-tolerant event streaming.</p>
+<h2>Requirements</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li>Producers publish messages to named <strong>topics</strong></li>
+<li>Consumers subscribe to topics and receive messages in order</li>
+<li>Messages are persisted durably (survive broker restarts)</li>
+<li>Support <strong>consumer groups</strong> — multiple consumers share the load within a group, but each message is delivered to exactly one consumer per group</li>
+<li>Support message <strong>retention</strong> by time or size (e.g., keep 7 days or 100 GB)</li>
+<li>Consumers can <strong>replay</strong> messages from any offset</li>
+<li>At-least-once delivery guarantee by default; support exactly-once semantics</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li>Throughput: 500,000 messages/second sustained</li>
+<li>Latency: p99 &lt; 10 ms for produce, &lt; 50 ms for end-to-end</li>
+<li>Durability: zero message loss for acknowledged writes</li>
+<li>Availability: 99.99% uptime</li>
+<li>Horizontal scalability: add brokers to increase capacity linearly</li>
+</ul>
+<h2>Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Messages/sec:        500,000
+Average message size: 1 KB
+Data ingestion rate:  500,000 * 1 KB = ~500 MB/s
+Replication factor:   3
+Actual write rate:    500 MB/s * 3 = 1.5 GB/s
+Retention:            7 days
+Storage per day:      500 MB/s * 86,400 = ~43 TB/day
+Total storage (7d):   43 TB * 7 = ~300 TB (before replication)
+With replication:     300 TB * 3 = ~900 TB
+Broker count:         If each broker has 12 TB SSD, need ~75 brokers
+                      Round up to 80 for headroom
+</code></pre></div>
+
+<h2>High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────────────┐
+│                        Producers                                 │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐        │
+│  │ Service A │  │ Service B │  │ Service C │  │ Service D │       │
+│  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘    │
+└────────┼──────────────┼──────────────┼──────────────┼───────────┘
+         │              │              │              │
+         ▼              ▼              ▼              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     Load Balancer / DNS                           │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │
+         ┌───────────────────┼───────────────────┐
+         ▼                   ▼                   ▼
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│   Broker 1      │ │   Broker 2      │ │   Broker 3      │
+│                 │ │                 │ │                 │
+│ Topic-A Part-0  │ │ Topic-A Part-1  │ │ Topic-A Part-2  │
+│ Topic-B Part-1  │ │ Topic-B Part-2  │ │ Topic-B Part-0  │
+│                 │ │                 │ │                 │
+│ Commit Log      │ │ Commit Log      │ │ Commit Log      │
+│ (Append-only)   │ │ (Append-only)   │ │ (Append-only)   │
+└────────┬────────┘ └────────┬────────┘ └────────┬────────┘
+         │                   │                   │
+         └───────────┬───────┘───────────────────┘
+                     │  Replication
+         ┌───────────┼───────────────────┐
+         ▼           ▼                   ▼
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│   Replica 1     │ │   Replica 2     │ │   Replica 3     │
+└─────────────────┘ └─────────────────┘ └─────────────────┘
+                             │
+         ┌───────────────────┼───────────────────┐
+         ▼                   ▼                   ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                        Consumers                                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
+│  │Consumer Grp A │  │Consumer Grp B │  │Consumer Grp C │          │
+│  │ C1  C2  C3   │  │ C1  C2       │  │ C1            │          │
+│  └──────────────┘  └──────────────┘  └──────────────┘           │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│                   Coordination Service                           │
+│                  (ZooKeeper / KRaft)                              │
+│  - Broker membership      - Partition leadership                 │
+│  - Consumer group offsets  - Topic configuration                 │
+└──────────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>Core Concepts</h2>
+<h3>Topics and Partitions</h3>
+<p>A <strong>topic</strong> is a named stream of records. Each topic is divided into <strong>partitions</strong> — ordered, immutable sequences of records. Partitions enable parallelism: each partition can be consumed by one consumer in a group.</p>
+<div class="highlight"><pre><span></span><code>Topic: user-events (3 partitions)
+
+Partition 0: [msg0] [msg3] [msg6] [msg9]  ...
+Partition 1: [msg1] [msg4] [msg7] [msg10] ...
+Partition 2: [msg2] [msg5] [msg8] [msg11] ...
+
+Each message has an offset (sequential ID within partition)
+</code></pre></div>
+
+<h3>Commit Log</h3>
+<p>Each partition is backed by an append-only <strong>commit log</strong> on disk. This is the key insight that makes Kafka fast — sequential disk writes are faster than random memory access on modern hardware.</p>
+<div class="highlight"><pre><span></span><code>Segment files on disk:
+
+partition-0/
+  00000000000000000000.log    (0 - 1,000,000)
+  00000000000001000000.log    (1,000,001 - 2,000,000)
+  00000000000002000000.log    (2,000,001 - ...)
+  00000000000000000000.index  (offset -&gt; position mapping)
+  00000000000000000000.timeindex (timestamp -&gt; offset mapping)
+</code></pre></div>
+
+<h2>API Design</h2>
+<h3>Producer API</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">express</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+
+<span class="c1">// POST /api/v1/topics/:topicName/messages</span>
+<span class="c1">// Publish a message to a topic</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/topics/:topicName/messages&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">topicName</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">,</span><span class="w"> </span><span class="nx">headers</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// key is used for partition assignment (hash(key) % numPartitions)</span>
+<span class="w">  </span><span class="c1">// value is the message payload (Buffer or JSON)</span>
+<span class="w">  </span><span class="c1">// headers are optional key-value metadata</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">messageQueue</span><span class="p">.</span><span class="nx">produce</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="nx">topicName</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">key</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">value</span><span class="p">)),</span>
+<span class="w">    </span><span class="nx">headers</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="nx">topicName</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">partition</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">partition</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">offset</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">offset</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">timestamp</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// POST /api/v1/topics/:topicName/messages/batch</span>
+<span class="c1">// Publish a batch of messages</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/topics/:topicName/messages/batch&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">topicName</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">messages</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span><span class="w"> </span><span class="c1">// Array of { key, value, headers }</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">messageQueue</span><span class="p">.</span><span class="nx">produceBatch</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="nx">topicName</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">messages</span><span class="o">:</span><span class="w"> </span><span class="nx">messages</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">m</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">key</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">m</span><span class="p">.</span><span class="nx">value</span><span class="p">)),</span>
+<span class="w">      </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">headers</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span>
+<span class="w">    </span><span class="p">})),</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Consumer API</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/v1/consumers</span>
+<span class="c1">// Register a consumer in a group</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/consumers&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">groupId</span><span class="p">,</span><span class="w"> </span><span class="nx">topics</span><span class="p">,</span><span class="w"> </span><span class="nx">autoCommit</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">consumer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">messageQueue</span><span class="p">.</span><span class="nx">createConsumer</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">groupId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">topics</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">autoCommit</span><span class="o">:</span><span class="w"> </span><span class="nx">autoCommit</span><span class="w"> </span><span class="o">??</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">sessionTimeout</span><span class="o">:</span><span class="w"> </span><span class="mf">30000</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">heartbeatInterval</span><span class="o">:</span><span class="w"> </span><span class="mf">3000</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">consumerId</span><span class="o">:</span><span class="w"> </span><span class="nx">consumer</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">groupId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">assignedPartitions</span><span class="o">:</span><span class="w"> </span><span class="nx">consumer</span><span class="p">.</span><span class="nx">assignments</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// GET /api/v1/consumers/:consumerId/messages</span>
+<span class="c1">// Poll for new messages</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/consumers/:consumerId/messages&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">consumerId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">maxMessages</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">max</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">100</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">timeoutMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">timeout</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">5000</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">messages</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">messageQueue</span><span class="p">.</span><span class="nx">poll</span><span class="p">(</span><span class="nx">consumerId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">maxMessages</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timeoutMs</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">messages</span><span class="o">:</span><span class="w"> </span><span class="nx">messages</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">m</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">topic</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">partition</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">partition</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">offset</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">offset</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">key</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">m</span><span class="p">.</span><span class="nx">value</span><span class="p">.</span><span class="nx">toString</span><span class="p">()),</span>
+<span class="w">      </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">timestamp</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">headers</span><span class="p">,</span>
+<span class="w">    </span><span class="p">})),</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// POST /api/v1/consumers/:consumerId/offsets</span>
+<span class="c1">// Commit consumer offsets</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/consumers/:consumerId/offsets&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">consumerId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">offsets</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// offsets: [{ topic, partition, offset }]</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">messageQueue</span><span class="p">.</span><span class="nx">commitOffsets</span><span class="p">(</span><span class="nx">consumerId</span><span class="p">,</span><span class="w"> </span><span class="nx">offsets</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">204</span><span class="p">).</span><span class="nx">send</span><span class="p">();</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Topic Management API</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/v1/topics</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/topics&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">partitions</span><span class="p">,</span><span class="w"> </span><span class="nx">replicationFactor</span><span class="p">,</span><span class="w"> </span><span class="nx">retentionMs</span><span class="p">,</span><span class="w"> </span><span class="nx">retentionBytes</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">topic</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">messageQueue</span><span class="p">.</span><span class="nx">createTopic</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">name</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">partitions</span><span class="o">:</span><span class="w"> </span><span class="nx">partitions</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">12</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">replicationFactor</span><span class="o">:</span><span class="w"> </span><span class="nx">replicationFactor</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">3</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">config</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="s1">&#39;retention.ms&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">retentionMs</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">7</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">24</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;retention.bytes&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">retentionBytes</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">-</span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="c1">// unlimited</span>
+<span class="w">      </span><span class="s1">&#39;segment.bytes&#39;</span><span class="o">:</span><span class="w"> </span><span class="mf">1073741824</span><span class="p">,</span><span class="w"> </span><span class="c1">// 1 GB segments</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">topic</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Database Schema</h2>
+<p>The message queue primarily uses an append-only log on the filesystem, but metadata is stored in a coordination service. Here is the metadata schema:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Topic metadata</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">topics</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">partition_count</span><span class="w"> </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">12</span><span class="p">,</span>
+<span class="w">  </span><span class="n">replication_factor</span><span class="w"> </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="n">retention_ms</span><span class="w">    </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">604800000</span><span class="p">,</span>
+<span class="w">  </span><span class="n">retention_bytes</span><span class="w"> </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Partition assignments (which broker owns which partition)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">partition_assignments</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">topic_id</span><span class="w">        </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">topics</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">partition_num</span><span class="w">   </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">leader_broker</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">replica_brokers</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">[]</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- array of broker IDs</span>
+<span class="w">  </span><span class="n">isr</span><span class="w">             </span><span class="nb">TEXT</span><span class="p">[]</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- in-sync replicas</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">(</span><span class="n">topic_id</span><span class="p">,</span><span class="w"> </span><span class="n">partition_num</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- Consumer group offsets</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">consumer_offsets</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">group_id</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">topic_id</span><span class="w">        </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">topics</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">partition_num</span><span class="w">   </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">committed_offset</span><span class="w"> </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">metadata</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span>
+<span class="w">  </span><span class="n">committed_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">group_id</span><span class="p">,</span><span class="w"> </span><span class="n">topic_id</span><span class="p">,</span><span class="w"> </span><span class="n">partition_num</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- Consumer group membership</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">consumer_group_members</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">group_id</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">consumer_id</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">assigned_partitions</span><span class="w"> </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;[]&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">last_heartbeat</span><span class="w">  </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">session_timeout_ms</span><span class="w"> </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">30000</span><span class="p">,</span>
+<span class="w">  </span><span class="n">joined_at</span><span class="w">       </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">(</span><span class="n">group_id</span><span class="p">,</span><span class="w"> </span><span class="n">consumer_id</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_consumer_group_heartbeat</span>
+<span class="w">  </span><span class="k">ON</span><span class="w"> </span><span class="n">consumer_group_members</span><span class="p">(</span><span class="n">group_id</span><span class="p">,</span><span class="w"> </span><span class="n">last_heartbeat</span><span class="p">);</span>
+
+<span class="c1">-- Broker registry</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">brokers</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="k">host</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">port</span><span class="w">            </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">rack</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">),</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;active&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">last_heartbeat</span><span class="w">  </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">registered_at</span><span class="w">   </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Deep Dive: Key Design Decisions</h2>
+<h3>Why Append-Only Logs?</h3>
+<p>Sequential I/O on modern SSDs achieves 500+ MB/s, while random I/O achieves ~50 MB/s. By only appending to logs, we exploit the disk's strongest access pattern.</p>
+<h3>Zero-Copy Transfer</h3>
+<p>When a consumer reads messages, the broker uses <code>sendfile()</code> to transfer data directly from the OS page cache to the network socket, bypassing user space entirely.</p>
+<div class="highlight"><pre><span></span><code>Traditional:   Disk -&gt; Kernel Buffer -&gt; User Buffer -&gt; Socket Buffer -&gt; NIC
+Zero-copy:     Disk -&gt; Kernel Buffer ─────────────────────────────&gt; NIC
+</code></pre></div>
+
+<h3>Consumer Group Rebalancing</h3>
+<p>When a consumer joins or leaves a group, partitions must be reassigned. This is the rebalancing protocol:</p>
+<div class="highlight"><pre><span></span><code>1. Consumer C3 joins Group-A
+2. Coordinator detects membership change
+3. All consumers in Group-A pause
+4. Coordinator runs assignment algorithm:
+   - Range: P0,P1 -&gt; C1; P2,P3 -&gt; C2; P4,P5 -&gt; C3
+   - Round Robin: P0-&gt;C1, P1-&gt;C2, P2-&gt;C3, P3-&gt;C1, P4-&gt;C2, P5-&gt;C3
+5. Each consumer receives its new assignment
+6. Consumers resume from last committed offsets
+</code></pre></div>
+
+<h2>Scaling Strategies</h2>
+<ul>
+<li><strong>More partitions</strong> = more parallelism (but more file handles, more rebalancing overhead)</li>
+<li><strong>More brokers</strong> = more storage and throughput capacity</li>
+<li><strong>Tiered storage</strong>: move old segments to S3/GCS for cheap long-term retention</li>
+<li><strong>Compression</strong>: producer-side compression (gzip, lz4, zstd) reduces network and storage by 60-80%</li>
+<li><strong>Batching</strong>: producers accumulate messages and send in batches to reduce network round trips</li>
+</ul>
+<h2>Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Pros</th>
+<th>Cons</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Append-only log</td>
+<td>Incredible write throughput, simple</td>
+<td>Compaction needed for key-based topics</td>
+</tr>
+<tr>
+<td>Partition-level ordering</td>
+<td>Scales horizontally</td>
+<td>No global ordering across partitions</td>
+</tr>
+<tr>
+<td>Pull-based consumers</td>
+<td>Consumer controls pace, supports replay</td>
+<td>Requires polling, slightly higher latency</td>
+</tr>
+<tr>
+<td>Replication</td>
+<td>Durability, fault tolerance</td>
+<td>3x storage, replication lag</td>
+</tr>
+<tr>
+<td>Consumer group rebalancing</td>
+<td>Automatic scaling</td>
+<td>Stop-the-world pauses during rebalance</td>
+</tr>
+<tr>
+<td>At-least-once default</td>
+<td>Simpler, higher throughput</td>
+<td>Consumers must be idempotent</td>
+</tr>
+</tbody>
+</table>
+<h2>Failure Handling</h2>
+<ul>
+<li><strong>Broker failure</strong>: Leader partition fails over to an ISR (in-sync replica). Unclean leader election can cause data loss.</li>
+<li><strong>Consumer failure</strong>: Session timeout triggers rebalance; partitions reassigned to remaining consumers.</li>
+<li><strong>Network partition</strong>: Split-brain risk. Use <code>min.insync.replicas=2</code> with <code>acks=all</code> to prevent writes when quorum is lost.</li>
+<li><strong>Disk failure</strong>: Replicas on other brokers take over. Replace disk and re-replicate.</li>
+</ul>
+<h2>Summary</h2>
+<p>A distributed message queue like Kafka uses append-only commit logs for extreme write throughput, partitioning for horizontal scale, replication for durability, and consumer groups for parallel processing. The key design insight is treating the log as the fundamental storage abstraction — everything else (replay, retention, consumer coordination) follows naturally from this choice.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Single-Partition Message Queue</div>
+                    <div class="exercise-desc"><p>Implement a simple message queue in Node.js using an append-only file as the commit log. Support produce (append message), consume (read from offset), and commit offset operations. Use fs.appendFile for writes and fs.createReadStream for reads.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Store each message as a line of JSON. Track offsets as byte positions in the file. Use readline to parse messages from a given byte offset.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Consumer Groups</div>
+                    <div class="exercise-desc"><p>Extend your message queue to support consumer groups. Create a topic with 4 partitions and 2 consumers in a group. Messages with the same key should always go to the same partition. When a consumer disconnects, its partitions should be redistributed.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a hash function on the message key to determine the partition. Store consumer-partition assignments in a Map. Implement a simple round-robin rebalance when membership changes.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Benchmark Batching vs Single Writes</div>
+                    <div class="exercise-desc"><p>Write a producer that sends 100,000 messages. Compare throughput and latency when sending one message at a time versus batching 500 messages per write. Measure messages/second and p99 latency for both approaches.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use process.hrtime.bigint() for precise timing. Accumulate messages in an array and flush when the batch is full or a timeout (e.g., 5ms) expires.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Design a Dead Letter Queue</div>
+                    <div class="exercise-desc"><p>Implement a DLQ mechanism: if a consumer fails to process a message after 3 retries, move it to a special dead-letter topic. Include the original topic, partition, offset, error message, and retry count in the DLQ message.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Wrap your consumer processing in a retry loop with exponential backoff. After max retries, publish to a <code>{topic}-dlq</code> topic with enriched metadata.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Consumer group rebalancing causes processing delays and duplicate messages</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Periodic latency spikes in consumer metrics. Duplicate processing of messages after rebalances. Consumer lag spikes visible in monitoring.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> When a consumer joins or leaves, all consumers in the group must pause, revoke their partitions, and receive new assignments. During this window, no messages are processed, and uncommitted messages will be re-delivered.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use cooperative incremental rebalancing (KIP-429) instead of eager rebalancing. Configure longer session timeouts to avoid unnecessary rebalances from transient issues. Use static group membership where consumers have a persistent identity.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Producer throughput degrades as the number of partitions increases</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Network throughput is low despite high CPU usage on the producer. Many small TCP packets visible in network monitoring.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Each partition requires a separate network connection and in-flight request buffer. The producer's linger.ms and batch.size settings may not be tuned for the partition count, causing many small requests.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Increase linger.ms to allow larger batches. Use compression to reduce network overhead. Limit the number of partitions per topic to what is actually needed for consumer parallelism. Use a connection pool with max connections per broker.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Messages are delivered out of order within a partition</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> When retries are enabled and max.in.flight.requests.per.connection > 1, a failed batch can be retried after a subsequent batch succeeds, causing reordering.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Set max.in.flight.requests.per.connection to 1 for strict ordering (sacrifices throughput). Alternatively, enable idempotent producer mode which handles ordering automatically with sequence numbers.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">The Log: What every software engineer should know about real-time data's unifying abstraction</div>
+                    
+                    <div class="resource-note">Jay Kreps' foundational article that inspired Kafka's design</div>
+                    
+                </a>
+                
+                <a href="https://www.oreilly.com/library/view/kafka-the-definitive/9781492043072/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Kafka: The Definitive Guide (2nd Edition)</div>
+                    
+                    <div class="resource-note">Comprehensive guide covering architecture, operations, and streaming</div>
+                    
+                </a>
+                
+                <a href="https://kafka.js.org/docs/getting-started" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">KafkaJS Documentation</div>
+                    
+                    <div class="resource-note">The standard Node.js client for Apache Kafka</div>
+                    
+                </a>
+                
+                <a href="https://dataintensive.net/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Designing Data-Intensive Applications - Chapter 11: Stream Processing</div>
+                    
+                    <div class="resource-note">Martin Kleppmann's deep dive into stream processing and message brokers</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/9.6.2-js.html" class="btn">Design an Email Service (Gmail) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

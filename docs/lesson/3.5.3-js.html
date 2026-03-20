@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connection Pooling and Performance - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-3-js.html">Web Frameworks — Express.js</a> &rsaquo;
+            Database Integration
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">3.5.3</span>
+                <span>~2h</span>
+            </div>
+            <h1>Connection Pooling and Performance</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>A connection pool is like a fleet of rental cars at an airport. Instead of buying a new car (opening a connection) every time someone lands (request arrives) and scrapping it when they leave (closing connection), you maintain a fleet (pool) of cars that travelers check out and return. The fleet size must match demand without exceeding parking capacity (database limits).</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Connection Pooling and Performance</h1>
+<h2>Introduction</h2>
+<p>Database connections are expensive resources. Every connection consumes memory on both the application and database server, and opening/closing connections adds latency. Connection pooling reuses a fixed set of connections across requests, dramatically improving performance and resource utilization. This lesson covers how Prisma manages connections, how to tune pool settings, and performance optimization techniques.</p>
+<h2>How Connection Pooling Works</h2>
+<div class="highlight"><pre><span></span><code>Without Pooling:
+  Request 1 -&gt; Open connection -&gt; Query -&gt; Close connection  (50ms overhead)
+  Request 2 -&gt; Open connection -&gt; Query -&gt; Close connection  (50ms overhead)
+  Request 3 -&gt; Open connection -&gt; Query -&gt; Close connection  (50ms overhead)
+
+With Pooling:
+  Pool: [conn1, conn2, conn3, conn4, conn5]
+
+  Request 1 -&gt; Borrow conn1 -&gt; Query -&gt; Return conn1  (0ms overhead)
+  Request 2 -&gt; Borrow conn2 -&gt; Query -&gt; Return conn2  (0ms overhead)
+  Request 3 -&gt; Borrow conn1 -&gt; Query -&gt; Return conn1  (0ms overhead)
+  (connections are reused)
+
+  If all connections busy:
+  Request 6 -&gt; Wait for available connection -&gt; Borrow -&gt; Query -&gt; Return
+</code></pre></div>
+
+<h2>Prisma Connection Pool</h2>
+<p>Prisma manages a connection pool automatically. Configure it via the connection URL:</p>
+<div class="highlight"><pre><span></span><code># .env
+DATABASE_URL=&quot;postgresql://user:pass@localhost:5432/mydb?connection_limit=10&amp;pool_timeout=10&quot;
+</code></pre></div>
+
+<h3>Key Parameters</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// Connection string parameters:</span>
+<span class="c1">// connection_limit  - Max connections in pool (default: num_cpus * 2 + 1)</span>
+<span class="c1">// pool_timeout      - Seconds to wait for a connection (default: 10)</span>
+<span class="c1">// connect_timeout   - Seconds to wait for DB connection (default: 5)</span>
+
+<span class="c1">// For a typical web server:</span>
+<span class="c1">// Development:  connection_limit=5</span>
+<span class="c1">// Production:   connection_limit=10-20 (depends on DB max_connections)</span>
+</code></pre></div>
+
+<h3>Sizing the Pool</h3>
+<div class="highlight"><pre><span></span><code>Database max_connections (default PostgreSQL: 100)
+
+If you have 3 app server instances:
+  Each instance pool: 100 / 3 = ~30 connections max
+  Recommended: 20 connections per instance (leave headroom)
+
+Rule of thumb: pool_size = (CPU cores * 2) + effective_spindle_count
+For most web apps: 10-20 connections per instance works well
+</code></pre></div>
+
+<h2>Query Performance Optimization</h2>
+<h3>1. Select Only Needed Fields</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// SLOW: fetches all columns including large text fields</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">users</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">findMany</span><span class="p">();</span>
+
+<span class="c1">// FAST: fetch only needed fields</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">users</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">select</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="kt">true</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="kt">true</span><span class="p">,</span><span class="w"> </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="kt">true</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>2. Avoid N+1 Queries</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// N+1 PROBLEM: 1 query for posts + N queries for authors</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">posts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">findMany</span><span class="p">();</span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">posts</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">author</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span><span class="w"> </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="kt">post.authorId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="c1">// This makes a separate query for EACH post!</span>
+<span class="p">}</span>
+
+<span class="c1">// FIXED: Eager load with include (1 query for posts + 1 query for authors)</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">posts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">include</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">author</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">select</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="kt">true</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="kt">true</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>3. Use Pagination</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// NEVER: fetch all records</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">allPosts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">findMany</span><span class="p">();</span>
+
+<span class="c1">// ALWAYS: paginate</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">posts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">skip</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">page</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">take</span><span class="o">:</span><span class="w"> </span><span class="kt">limit</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">orderBy</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">createdAt</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;desc&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>4. Parallel Queries with Promise.all</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// SEQUENTIAL: ~200ms (100ms + 100ms)</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">users</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">count</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">posts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">count</span><span class="p">();</span>
+
+<span class="c1">// PARALLEL: ~100ms (both run simultaneously)</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">userCount</span><span class="p">,</span><span class="w"> </span><span class="nx">postCount</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">([</span>
+<span class="w">  </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">count</span><span class="p">(),</span>
+<span class="w">  </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">count</span><span class="p">(),</span>
+<span class="p">]);</span>
+</code></pre></div>
+
+<h3>5. Batch Operations</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// SLOW: individual creates</span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">users</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="kt">user</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="c1">// FAST: batch create</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">createMany</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="kt">users</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">skipDuplicates</span><span class="o">:</span><span class="w"> </span><span class="kt">true</span><span class="p">,</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Prisma Query Logging</h2>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">log</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">level</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;query&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">emit</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;event&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">level</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;error&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">emit</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;stdout&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="p">});</span>
+
+<span class="c1">// Log slow queries</span>
+<span class="nx">prisma</span><span class="p">.</span><span class="nx">$on</span><span class="p">(</span><span class="s1">&#39;query&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">.</span><span class="nx">duration</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">100</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// &gt; 100ms</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">warn</span><span class="p">(</span><span class="sb">`Slow query (</span><span class="si">${</span><span class="nx">e</span><span class="p">.</span><span class="nx">duration</span><span class="si">}</span><span class="sb">ms): </span><span class="si">${</span><span class="nx">e</span><span class="p">.</span><span class="nx">query</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Middleware for Response Time Monitoring</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// Track and log response times</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">((</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">hrtime</span><span class="p">.</span><span class="nx">bigint</span><span class="p">();</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;finish&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">duration</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Number</span><span class="p">(</span><span class="nx">process</span><span class="p">.</span><span class="nx">hrtime</span><span class="p">.</span><span class="nx">bigint</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">start</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1</span><span class="nx">_000_000</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">duration</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">500</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">warn</span><span class="p">(</span><span class="sb">`Slow request: </span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">method</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">path</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">duration</span><span class="p">.</span><span class="nx">toFixed</span><span class="p">(</span><span class="mf">0</span><span class="p">)</span><span class="si">}</span><span class="sb">ms`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">next</span><span class="p">();</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Connection Management in Production</h2>
+<h3>Health Check with Database</h3>
+<div class="highlight"><pre><span></span><code><span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/health&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`SELECT 1`</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;healthy&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">database</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;connected&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">503</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;unhealthy&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">database</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;disconnected&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Graceful Shutdown</h3>
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">gracefulShutdown</span><span class="p">(</span><span class="nx">signal</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">signal</span><span class="si">}</span><span class="sb"> received. Shutting down gracefully.`</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Stop accepting new requests</span>
+<span class="w">  </span><span class="nx">server</span><span class="p">.</span><span class="nx">close</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Disconnect Prisma (returns connections to pool, then closes them)</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$disconnect</span><span class="p">();</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Database connections closed.&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">process</span><span class="p">.</span><span class="nx">exit</span><span class="p">(</span><span class="mf">0</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Force exit after timeout</span>
+<span class="w">  </span><span class="nx">setTimeout</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Forced shutdown.&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">process</span><span class="p">.</span><span class="nx">exit</span><span class="p">(</span><span class="mf">1</span><span class="p">);</span>
+<span class="w">  </span><span class="p">},</span><span class="w"> </span><span class="mf">15000</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Using PgBouncer for Advanced Pooling</h3>
+<p>For high-scale deployments, use PgBouncer as an external connection pooler between your app and PostgreSQL:</p>
+<div class="highlight"><pre><span></span><code>App Instance 1 (pool: 10) --|
+App Instance 2 (pool: 10) --|--&gt; PgBouncer (pool: 50) --&gt; PostgreSQL (max: 100)
+App Instance 3 (pool: 10) --|
+
+# Connection string with PgBouncer
+DATABASE_URL=&quot;postgresql://user:pass@pgbouncer-host:6432/mydb?pgbouncer=true&quot;
+</code></pre></div>
+
+<p>When using PgBouncer with Prisma, add <code>?pgbouncer=true</code> to your connection string to disable features incompatible with PgBouncer.</p>
+<h2>Common Pitfalls</h2>
+<h3>Connection Pool Exhaustion</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// WRONG: forgetting to await causes connection leaks</span>
+<span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">findMany</span><span class="p">();</span><span class="w"> </span><span class="c1">// Promise not awaited, connection not returned</span>
+
+<span class="c1">// WRONG: long-running transactions hold connections</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$transaction</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">tx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">findMany</span><span class="p">();</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">someSlowExternalApiCall</span><span class="p">();</span><span class="w"> </span><span class="c1">// Connection held during external call!</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{}</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// CORRECT: minimize transaction scope</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">someSlowExternalApiCall</span><span class="p">();</span><span class="w"> </span><span class="c1">// Outside transaction</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$transaction</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">tx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">findMany</span><span class="p">();</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="p">});</span><span class="w"> </span><span class="c1">// Quick DB operations only</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Over-Provisioning the Pool</h3>
+<div class="highlight"><pre><span></span><code>If 5 instances each have pool_size=50:
+  Total connections: 250
+  PostgreSQL default max_connections: 100
+  Result: &quot;too many connections&quot; errors!
+
+Always: total_pools * pool_size &lt; database_max_connections
+</code></pre></div>
+
+<h2>Summary</h2>
+<p>Connection pooling is essential for production database performance. Prisma manages pools automatically, but you must tune the pool size based on your deployment topology. Optimize queries by selecting only needed fields, avoiding N+1 problems, using pagination, running parallel queries, and batching operations. Monitor query performance, implement health checks, and handle shutdown gracefully.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Optimize N+1 Queries</div>
+                    <div class="exercise-desc"><p>Given an Express endpoint that fetches posts and their authors using a loop (N+1 problem), refactor it to use Prisma's include for eager loading. Measure the query count before and after using Prisma's query logging.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Enable query logging with PrismaClient({ log: ['query'] }). Replace the loop with findMany({ include: { author: true } }). Compare the number of SQL queries logged.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Connection Pool Health Monitor</div>
+                    <div class="exercise-desc"><p>Create a /health/db endpoint that checks database connectivity, measures query latency, and reports pool status. If query latency exceeds 500ms or the connection fails, return a 503 status.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use prisma.$queryRaw<code>SELECT 1</code> wrapped in timing logic. Return { status, latency, connected } in the response.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Query Performance Dashboard</div>
+                    <div class="exercise-desc"><p>Add Prisma query logging that tracks all queries over 100ms. Create an in-memory store of slow queries and expose them via a GET /debug/slow-queries endpoint (protected, development only).</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use prisma.$on('query', ...) to capture query events. Store them in an array (limit to last 100). Filter by duration threshold.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">'Timed out fetching a new connection from the connection pool' error</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> All connections in the pool are in use. Requests are waiting longer than pool_timeout for an available connection.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Increase connection_limit in DATABASE_URL. Check for connection leaks (unawaited queries, long transactions). Reduce transaction scope. Consider using PgBouncer.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Database 'too many connections' error in production</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Total connections across all application instances exceed the database's max_connections setting.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Calculate: num_instances * pool_size must be less than max_connections. Reduce pool_size per instance or increase database max_connections. Use PgBouncer for external pooling.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">API responses are slow despite simple queries</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> N+1 query problem — loading relations in a loop instead of using eager loading or joins.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use Prisma's include or select for eager loading. Enable query logging to identify N+1 patterns. Use Promise.all for independent parallel queries.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://www.prisma.io/docs/concepts/components/prisma-client/working-with-prismaclient/connection-management" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Prisma Connection Management</div>
+                    
+                </a>
+                
+                <a href="https://www.prisma.io/docs/concepts/components/prisma-client/working-with-prismaclient/connection-pool" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Prisma Connection Pool</div>
+                    
+                </a>
+                
+                <a href="https://www.prisma.io/docs/guides/performance-and-optimization/connection-management/configure-pg-bouncer" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">PgBouncer with Prisma</div>
+                    
+                </a>
+                
+                <a href="https://www.prisma.io/docs/guides/performance-and-optimization/query-optimization-performance" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Prisma Query Optimization</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/3.5.2-js.html" class="btn">&larr; Repository Pattern in Express</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-3-js.html">&larr; Back to Web Frameworks — Express.js</a>
+        </div>
+    </div>
+</body>
+</html>

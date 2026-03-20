@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Circuit Breakers and Retry Patterns - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-7-js.html">Security & Reliability</a> &rsaquo;
+            Error Handling & Resilience
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">7.6.1</span>
+                <span>~3h</span>
+            </div>
+            <h1>Circuit Breakers and Retry Patterns</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>A circuit breaker works like the electrical breaker box in your house. When a short circuit (failed service) causes too much current (failed requests), the breaker trips and cuts the connection instantly, protecting the entire house (your application) from catching fire (cascading failure). After a cooldown, you can flip the switch to test if the problem is fixed.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Circuit Breakers and Retry Patterns</h1>
+<h2>Why Services Fail (And Why You Should Expect It)</h2>
+<p>In a distributed backend system, failures are not exceptional -- they are inevitable. A database goes down, a third-party API times out, a downstream microservice becomes overloaded. If your Node.js application blindly retries every failed request or keeps hammering an unresponsive service, you amplify the problem instead of containing it.</p>
+<p>Circuit breakers and retry patterns are the two foundational resilience mechanisms that prevent cascading failures and allow your system to degrade gracefully.</p>
+<h2>The Cascading Failure Problem</h2>
+<p>Consider a typical request flow:</p>
+<div class="highlight"><pre><span></span><code>┌────────┐     ┌──────────┐     ┌──────────────┐     ┌──────────────┐
+│ Client │────&gt;│ API GW   │────&gt;│ Order Service│────&gt;│ Payment Svc  │
+└────────┘     └──────────┘     └──────────────┘     └──────────────┘
+                                       │                    │
+                                       │              (timeout!)
+                                       │                    │
+                                       ▼                    ▼
+                                 Threads blocked      Database overloaded
+                                 Memory grows         Connections exhausted
+                                 OOM crash            Total outage
+</code></pre></div>
+
+<p>When Payment Service becomes slow, Order Service threads pile up waiting for responses. Request queues grow, memory consumption spikes, and eventually Order Service itself crashes. This chain reaction is a <strong>cascading failure</strong>.</p>
+<h2>Circuit Breaker Pattern</h2>
+<h3>The Concept</h3>
+<p>A circuit breaker monitors calls to an external dependency. When failures exceed a threshold, the circuit "opens" and immediately rejects subsequent calls without attempting the operation. After a cooldown period, the circuit enters a "half-open" state, allowing a limited number of test requests through. If those succeed, the circuit "closes" and normal operation resumes.</p>
+<div class="highlight"><pre><span></span><code>                    ┌──────────────────────────────────────────┐
+                    │         Circuit Breaker States            │
+                    │                                          │
+                    │   ┌────────┐  failures &gt; threshold       │
+                    │   │        │──────────────────┐          │
+                    │   │ CLOSED │                  │          │
+                    │   │        │&lt;─────┐           │          │
+                    │   └────────┘      │           ▼          │
+                    │    (normal)    success    ┌────────┐     │
+                    │                from       │        │     │
+                    │                half-open  │  OPEN  │     │
+                    │                   │       │        │     │
+                    │                   │       └───┬────┘     │
+                    │                   │    (fail  │          │
+                    │              ┌────┴───┐ fast) │          │
+                    │              │        │       │          │
+                    │              │  HALF  │&lt;──────┘          │
+                    │              │  OPEN  │  after timeout   │
+                    │              │        │                  │
+                    │              └────────┘                  │
+                    │               (test                      │
+                    │                request)                  │
+                    └──────────────────────────────────────────┘
+</code></pre></div>
+
+<p><strong>CLOSED</strong> -- Requests pass through normally. Failures are counted. When the failure count (or failure rate) exceeds a configured threshold within a time window, the circuit trips open.</p>
+<p><strong>OPEN</strong> -- All requests are immediately rejected with an error (or a fallback response). No calls reach the downstream service. A reset timer begins counting down.</p>
+<p><strong>HALF-OPEN</strong> -- After the reset timeout, a limited number of probe requests are allowed through. If they succeed, the circuit closes. If they fail, the circuit reopens.</p>
+<h3>Implementing Circuit Breakers with Opossum</h3>
+<p>Opossum is the most popular circuit breaker library for Node.js. It wraps any async function and adds circuit breaker semantics.</p>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>install<span class="w"> </span>opossum
+</code></pre></div>
+
+<h4>Basic Usage</h4>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">CircuitBreaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;opossum&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">axios</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;axios&#39;</span><span class="p">);</span>
+
+<span class="c1">// The function to protect with a circuit breaker</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">fetchUserProfile</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">axios</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`https://user-service.internal/users/</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">3000</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Create a circuit breaker around the function</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">breaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">CircuitBreaker</span><span class="p">(</span><span class="nx">fetchUserProfile</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">5000</span><span class="p">,</span><span class="w">            </span><span class="c1">// Time in ms before a call is considered failed</span>
+<span class="w">  </span><span class="nx">errorThresholdPercentage</span><span class="o">:</span><span class="w"> </span><span class="mf">50</span><span class="p">,</span><span class="w">  </span><span class="c1">// Trip when 50% of requests fail</span>
+<span class="w">  </span><span class="nx">resetTimeout</span><span class="o">:</span><span class="w"> </span><span class="mf">10000</span><span class="p">,</span><span class="w">      </span><span class="c1">// Try again after 10 seconds</span>
+<span class="w">  </span><span class="nx">volumeThreshold</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span><span class="w">       </span><span class="c1">// Minimum requests before tripping</span>
+<span class="w">  </span><span class="nx">rollingCountTimeout</span><span class="o">:</span><span class="w"> </span><span class="mf">10000</span><span class="p">,</span><span class="w">    </span><span class="c1">// Window for calculating error percentage</span>
+<span class="w">  </span><span class="nx">rollingCountBuckets</span><span class="o">:</span><span class="w"> </span><span class="mf">10</span><span class="p">,</span><span class="w">  </span><span class="c1">// Number of buckets in the rolling window</span>
+<span class="p">});</span>
+
+<span class="c1">// Use the circuit breaker</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">handleGetUser</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">breaker</span><span class="p">.</span><span class="nx">fire</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">user</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;Breaker is open&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">503</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Service temporarily unavailable&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">retryAfter</span><span class="o">:</span><span class="w"> </span><span class="mf">10</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Failed to fetch user profile&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h4>Event Handling and Observability</h4>
+<p>Opossum emits events you should wire into your logging and metrics:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">pino</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;pino&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">logger</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">pino</span><span class="p">();</span>
+
+<span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;success&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">result</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">logger</span><span class="p">.</span><span class="nx">debug</span><span class="p">({</span><span class="w"> </span><span class="nx">service</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user-service&#39;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="s1">&#39;Circuit breaker call succeeded&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;timeout&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">logger</span><span class="p">.</span><span class="nx">warn</span><span class="p">({</span><span class="w"> </span><span class="nx">service</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user-service&#39;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="s1">&#39;Circuit breaker call timed out&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;reject&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">logger</span><span class="p">.</span><span class="nx">warn</span><span class="p">({</span><span class="w"> </span><span class="nx">service</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user-service&#39;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="s1">&#39;Circuit breaker rejected call (open)&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;open&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">logger</span><span class="p">.</span><span class="nx">error</span><span class="p">({</span><span class="w"> </span><span class="nx">service</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user-service&#39;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="s1">&#39;Circuit breaker OPENED&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;halfOpen&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">logger</span><span class="p">.</span><span class="nx">info</span><span class="p">({</span><span class="w"> </span><span class="nx">service</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user-service&#39;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="s1">&#39;Circuit breaker HALF-OPEN, testing...&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">logger</span><span class="p">.</span><span class="nx">info</span><span class="p">({</span><span class="w"> </span><span class="nx">service</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user-service&#39;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="s1">&#39;Circuit breaker CLOSED, service recovered&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;fallback&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">result</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">logger</span><span class="p">.</span><span class="nx">info</span><span class="p">({</span><span class="w"> </span><span class="nx">service</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user-service&#39;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="s1">&#39;Circuit breaker fallback executed&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h4>Fallback Strategies</h4>
+<p>Instead of returning an error when the circuit is open, you can provide a fallback:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Return cached data when circuit is open</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">NodeCache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node-cache&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">cache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">NodeCache</span><span class="p">({</span><span class="w"> </span><span class="nx">stdTTL</span><span class="o">:</span><span class="w"> </span><span class="mf">300</span><span class="w"> </span><span class="p">});</span>
+
+<span class="nx">breaker</span><span class="p">.</span><span class="nx">fallback</span><span class="p">((</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">cached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">cache</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`user:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">cached</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">cached</span><span class="p">,</span><span class="w"> </span><span class="nx">_stale</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;No cached data available&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Cache successful responses</span>
+<span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;success&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">result</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">result</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">id</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">cache</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="sb">`user:</span><span class="si">${</span><span class="nx">result</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">result</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h4>Opossum with Prometheus Metrics</h4>
+<p>Opossum has built-in Prometheus support:</p>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>install<span class="w"> </span>opossum-prometheus
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">CircuitBreakerMetrics</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;opossum-prometheus&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;prom-client&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">register</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">Registry</span><span class="p">();</span>
+<span class="nx">client</span><span class="p">.</span><span class="nx">collectDefaultMetrics</span><span class="p">({</span><span class="w"> </span><span class="nx">register</span><span class="w"> </span><span class="p">});</span>
+
+<span class="c1">// Create metrics for the breaker</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">metrics</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">CircuitBreakerMetrics</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">circuits</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">breaker</span><span class="p">],</span>
+<span class="w">  </span><span class="nx">registry</span><span class="o">:</span><span class="w"> </span><span class="nx">register</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="c1">// Expose metrics endpoint</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/metrics&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="s1">&#39;Content-Type&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">register</span><span class="p">.</span><span class="nx">contentType</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">end</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">register</span><span class="p">.</span><span class="nx">metrics</span><span class="p">());</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<p>This exposes metrics like <code>opossum_circuit_open</code>, <code>opossum_success</code>, <code>opossum_failure</code>, and <code>opossum_timeout</code> that Grafana dashboards can visualize.</p>
+<h3>Multiple Circuit Breakers</h3>
+<p>In a real application, create a separate circuit breaker for each external dependency:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// services/circuitBreakers.js</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">CircuitBreaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;opossum&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">defaultOptions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">5000</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">errorThresholdPercentage</span><span class="o">:</span><span class="w"> </span><span class="mf">50</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resetTimeout</span><span class="o">:</span><span class="w"> </span><span class="mf">15000</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">volumeThreshold</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">createBreaker</span><span class="p">(</span><span class="nx">fn</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">overrides</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">breaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">CircuitBreaker</span><span class="p">(</span><span class="nx">fn</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">...</span><span class="nx">defaultOptions</span><span class="p">,</span>
+<span class="w">    </span><span class="p">...</span><span class="nx">overrides</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">name</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;open&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`[</span><span class="si">${</span><span class="nx">name</span><span class="si">}</span><span class="sb">] Circuit OPENED`</span><span class="p">));</span>
+<span class="w">  </span><span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">info</span><span class="p">(</span><span class="sb">`[</span><span class="si">${</span><span class="nx">name</span><span class="si">}</span><span class="sb">] Circuit CLOSED`</span><span class="p">));</span>
+<span class="w">  </span><span class="nx">breaker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;halfOpen&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">info</span><span class="p">(</span><span class="sb">`[</span><span class="si">${</span><span class="nx">name</span><span class="si">}</span><span class="sb">] Circuit HALF-OPEN`</span><span class="p">));</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">breaker</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">userServiceBreaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">createBreaker</span><span class="p">(</span>
+<span class="w">  </span><span class="nx">fetchUserProfile</span><span class="p">,</span>
+<span class="w">  </span><span class="s1">&#39;user-service&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">3000</span><span class="w"> </span><span class="p">}</span>
+<span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">paymentServiceBreaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">createBreaker</span><span class="p">(</span>
+<span class="w">  </span><span class="nx">processPayment</span><span class="p">,</span>
+<span class="w">  </span><span class="s1">&#39;payment-service&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">10000</span><span class="p">,</span><span class="w"> </span><span class="nx">errorThresholdPercentage</span><span class="o">:</span><span class="w"> </span><span class="mf">30</span><span class="w"> </span><span class="p">}</span>
+<span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">emailServiceBreaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">createBreaker</span><span class="p">(</span>
+<span class="w">  </span><span class="nx">sendEmail</span><span class="p">,</span>
+<span class="w">  </span><span class="s1">&#39;email-service&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">8000</span><span class="p">,</span><span class="w"> </span><span class="nx">errorThresholdPercentage</span><span class="o">:</span><span class="w"> </span><span class="mf">70</span><span class="w"> </span><span class="p">}</span>
+<span class="p">);</span>
+
+<span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">userServiceBreaker</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">paymentServiceBreaker</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">emailServiceBreaker</span><span class="p">,</span>
+<span class="p">};</span>
+</code></pre></div>
+
+<h2>Retry Patterns</h2>
+<p>Retries handle transient failures -- brief network blips, momentary server overloads, or temporary database locks. The key is retrying intelligently.</p>
+<h3>Naive Retry (Do NOT Do This)</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// BAD: Immediate retries with no backoff</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">fetchWithRetry</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">maxRetries</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">3</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">maxRetries</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">axios</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">url</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">i</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">maxRetries</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// Immediately retries -- hammers the server!</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>This approach creates a <strong>retry storm</strong>: when a server is struggling, hundreds of clients retrying simultaneously makes it worse.</p>
+<h3>Exponential Backoff with Jitter</h3>
+<p>The correct approach increases wait time between retries and adds randomness to prevent thundering herd:</p>
+<div class="highlight"><pre><span></span><code>Retry Timeline:
+
+  Attempt 1    Attempt 2         Attempt 3                 Attempt 4
+     │             │                  │                         │
+     ▼             ▼                  ▼                         ▼
+─────X───wait──────X─────wait────────X──────────wait───────────X────&gt;
+         ~1s            ~2s                    ~4s
+     (+ jitter)     (+ jitter)            (+ jitter)
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">retryWithBackoff</span><span class="p">(</span><span class="nx">fn</span><span class="p">,</span><span class="w"> </span><span class="nx">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">maxRetries</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">3</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">baseDelay</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">maxDelay</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">30000</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">factor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">jitter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">retryableErrors</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w">  </span><span class="c1">// null means retry all errors</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">options</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">lastError</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">attempt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">attempt</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">maxRetries</span><span class="p">;</span><span class="w"> </span><span class="nx">attempt</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fn</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">lastError</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span>
+
+<span class="w">      </span><span class="c1">// Check if the error is retryable</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">retryableErrors</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="nx">retryableErrors</span><span class="p">(</span><span class="nx">err</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span><span class="w">  </span><span class="c1">// Non-retryable error, fail immediately</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">attempt</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">maxRetries</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span><span class="w">  </span><span class="c1">// Exhausted all retries</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="c1">// Calculate delay with exponential backoff</span>
+<span class="w">      </span><span class="kd">let</span><span class="w"> </span><span class="nx">delay</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nx">baseDelay</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">pow</span><span class="p">(</span><span class="nx">factor</span><span class="p">,</span><span class="w"> </span><span class="nx">attempt</span><span class="p">),</span><span class="w"> </span><span class="nx">maxDelay</span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// Add jitter to prevent thundering herd</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">jitter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">delay</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">delay</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="mf">0.5</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">random</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">0.5</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">warn</span><span class="p">(</span>
+<span class="w">        </span><span class="sb">`Attempt </span><span class="si">${</span><span class="nx">attempt</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="si">}</span><span class="sb"> failed, retrying in </span><span class="si">${</span><span class="nb">Math</span><span class="p">.</span><span class="nx">round</span><span class="p">(</span><span class="nx">delay</span><span class="p">)</span><span class="si">}</span><span class="sb">ms...`</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span>
+<span class="w">      </span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">resolve</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">setTimeout</span><span class="p">(</span><span class="nx">resolve</span><span class="p">,</span><span class="w"> </span><span class="nx">delay</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">retryWithBackoff</span><span class="p">(</span>
+<span class="w">  </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">axios</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;https://user-service.internal/users/123&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">maxRetries</span><span class="o">:</span><span class="w"> </span><span class="mf">3</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">baseDelay</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">retryableErrors</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Only retry on network errors or 5xx responses</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">err</span><span class="p">.</span><span class="nx">response</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span><span class="w">  </span><span class="c1">// Network error</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">response</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mf">500</span><span class="p">;</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h3>Using async-retry</h3>
+<p>The <code>async-retry</code> package provides a clean API for retries:</p>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>install<span class="w"> </span>async-retry
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">retry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;async-retry&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">axios</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;axios&#39;</span><span class="p">);</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">fetchOrder</span><span class="p">(</span><span class="nx">orderId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">retry</span><span class="p">(</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">bail</span><span class="p">,</span><span class="w"> </span><span class="nx">attemptNumber</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Attempt </span><span class="si">${</span><span class="nx">attemptNumber</span><span class="si">}</span><span class="sb"> to fetch order </span><span class="si">${</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">axios</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span>
+<span class="w">          </span><span class="sb">`https://order-service.internal/orders/</span><span class="si">${</span><span class="nx">orderId</span><span class="si">}</span><span class="sb">`</span>
+<span class="w">        </span><span class="p">);</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// If the error is a 4xx, do NOT retry (client error)</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">response</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">response</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">500</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">bail</span><span class="p">(</span><span class="nx">err</span><span class="p">);</span><span class="w">  </span><span class="c1">// bail() stops retrying and throws immediately</span>
+<span class="w">          </span><span class="k">return</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span><span class="w">  </span><span class="c1">// Throw to trigger a retry</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">retries</span><span class="o">:</span><span class="w"> </span><span class="mf">4</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">factor</span><span class="o">:</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">minTimeout</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">maxTimeout</span><span class="o">:</span><span class="w"> </span><span class="mf">10000</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">randomize</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">onRetry</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">,</span><span class="w"> </span><span class="nx">attempt</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">warn</span><span class="p">(</span><span class="sb">`Retry attempt </span><span class="si">${</span><span class="nx">attempt</span><span class="si">}</span><span class="sb">: </span><span class="si">${</span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Retry with Circuit Breaker</h3>
+<p>The ideal combination: retries handle transient glitches, and the circuit breaker prevents retry storms from killing an already-struggling service.</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">CircuitBreaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;opossum&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">retry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;async-retry&#39;</span><span class="p">);</span>
+
+<span class="c1">// Inner function: retries transient errors</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">fetchWithRetry</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">retry</span><span class="p">(</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">bail</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">axios</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span>
+<span class="w">          </span><span class="sb">`https://user-service.internal/users/</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">          </span><span class="p">{</span><span class="w"> </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">3000</span><span class="w"> </span><span class="p">}</span>
+<span class="w">        </span><span class="p">);</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">response</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">response</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">404</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">bail</span><span class="p">(</span><span class="nx">err</span><span class="p">);</span><span class="w">  </span><span class="c1">// Do not retry 404s</span>
+<span class="w">          </span><span class="k">return</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">retries</span><span class="o">:</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span><span class="w"> </span><span class="nx">minTimeout</span><span class="o">:</span><span class="w"> </span><span class="mf">500</span><span class="p">,</span><span class="w"> </span><span class="nx">factor</span><span class="o">:</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span><span class="w"> </span><span class="nx">randomize</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="c1">// Outer layer: circuit breaker wraps the retry logic</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">userBreaker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">CircuitBreaker</span><span class="p">(</span><span class="nx">fetchWithRetry</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">12000</span><span class="p">,</span><span class="w">  </span><span class="c1">// Account for retry delays</span>
+<span class="w">  </span><span class="nx">errorThresholdPercentage</span><span class="o">:</span><span class="w"> </span><span class="mf">50</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resetTimeout</span><span class="o">:</span><span class="w"> </span><span class="mf">30000</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">volumeThreshold</span><span class="o">:</span><span class="w"> </span><span class="mf">10</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="nx">userBreaker</span><span class="p">.</span><span class="nx">fallback</span><span class="p">((</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Unknown&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">_fallback</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">};</span>
+<span class="p">});</span>
+
+<span class="c1">// Usage in route handler</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/users/:id&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">userBreaker</span><span class="p">.</span><span class="nx">fire</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">user</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">503</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;User service unavailable&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────┐
+│                  Request Flow                     │
+│                                                  │
+│  Request ──&gt; Circuit Breaker ──&gt; Retry Logic     │
+│                    │                   │          │
+│              Is circuit open?    Attempt 1 fail? │
+│                    │                   │          │
+│              YES: fallback       Wait + retry    │
+│              NO: pass through    Attempt 2 fail? │
+│                                       │          │
+│                                  Wait + retry    │
+│                                  Attempt 3 fail? │
+│                                       │          │
+│                                  Report failure  │
+│                                  to breaker      │
+└──────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>Retry Budget Pattern</h2>
+<p>A more advanced approach limits the total percentage of requests that can be retries:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">RetryBudget</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">({</span><span class="w"> </span><span class="nx">windowMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">60000</span><span class="p">,</span><span class="w"> </span><span class="nx">maxRetryRatio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.1</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">windowMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">windowMs</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">maxRetryRatio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">maxRetryRatio</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">requests</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span><span class="w">  </span><span class="c1">// timestamps of all requests</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">retries</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span><span class="w">   </span><span class="c1">// timestamps of retry requests</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">recordRequest</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">_cleanup</span><span class="p">();</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">requests</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">canRetry</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">_cleanup</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">requests</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">retryRatio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">retries</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">requests</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">retryRatio</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">maxRetryRatio</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">recordRetry</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">_cleanup</span><span class="p">();</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">retries</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">());</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">requests</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">_cleanup</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">cutoff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">windowMs</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">requests</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">requests</span><span class="p">.</span><span class="nx">filter</span><span class="p">((</span><span class="nx">t</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">t</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">cutoff</span><span class="p">);</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">retries</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">retries</span><span class="p">.</span><span class="nx">filter</span><span class="p">((</span><span class="nx">t</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">t</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">cutoff</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">budget</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">RetryBudget</span><span class="p">({</span><span class="w"> </span><span class="nx">windowMs</span><span class="o">:</span><span class="w"> </span><span class="mf">60000</span><span class="p">,</span><span class="w"> </span><span class="nx">maxRetryRatio</span><span class="o">:</span><span class="w"> </span><span class="mf">0.1</span><span class="w"> </span><span class="p">});</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">fetchWithBudgetedRetry</span><span class="p">(</span><span class="nx">fn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">budget</span><span class="p">.</span><span class="nx">recordRequest</span><span class="p">();</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fn</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">budget</span><span class="p">.</span><span class="nx">canRetry</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">budget</span><span class="p">.</span><span class="nx">recordRetry</span><span class="p">();</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fn</span><span class="p">();</span><span class="w">  </span><span class="c1">// One retry attempt</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span><span class="w">  </span><span class="c1">// Budget exhausted, no retry</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Idempotency and Retries</h2>
+<p>Retries are only safe for <strong>idempotent</strong> operations. If you retry a non-idempotent operation (like creating an order), you may create duplicates.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Use idempotency keys for non-idempotent operations</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">v4</span><span class="o">:</span><span class="w"> </span><span class="nx">uuidv4</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;uuid&#39;</span><span class="p">);</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">createOrder</span><span class="p">(</span><span class="nx">orderData</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">idempotencyKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">uuidv4</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">retry</span><span class="p">(</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">axios</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span>
+<span class="w">        </span><span class="s1">&#39;https://order-service.internal/orders&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">orderData</span><span class="p">,</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="s1">&#39;Idempotency-Key&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">idempotencyKey</span><span class="p">,</span>
+<span class="w">          </span><span class="p">},</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">retries</span><span class="o">:</span><span class="w"> </span><span class="mf">3</span><span class="p">,</span><span class="w"> </span><span class="nx">minTimeout</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Timeout Patterns</h2>
+<p>Timeouts are the first line of defense. Without them, a slow dependency can hold your connections indefinitely.</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">axios</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;axios&#39;</span><span class="p">);</span>
+
+<span class="c1">// Per-request timeout</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">axios</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">baseURL</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://api.external.com&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">timeout</span><span class="o">:</span><span class="w"> </span><span class="mf">5000</span><span class="p">,</span><span class="w">  </span><span class="c1">// 5 second timeout</span>
+<span class="p">});</span>
+
+<span class="c1">// AbortController for custom timeout logic</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">fetchWithAbort</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">timeoutMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">controller</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">AbortController</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">timeoutId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">setTimeout</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">controller</span><span class="p">.</span><span class="nx">abort</span><span class="p">(),</span><span class="w"> </span><span class="nx">timeoutMs</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">signal</span><span class="o">:</span><span class="w"> </span><span class="nx">controller</span><span class="p">.</span><span class="nx">signal</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">finally</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">clearTimeout</span><span class="p">(</span><span class="nx">timeoutId</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Bulkhead Pattern</h2>
+<p>Limit concurrent calls to an external service to prevent one slow dependency from consuming all your resources:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">Bulkhead</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">maxConcurrent</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">maxConcurrent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">maxConcurrent</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">running</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">queue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">execute</span><span class="p">(</span><span class="nx">fn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">running</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">maxConcurrent</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">resolve</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">queue</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">resolve</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">running</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fn</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">finally</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">running</span><span class="o">--</span><span class="p">;</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">queue</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">queue</span><span class="p">.</span><span class="nx">shift</span><span class="p">();</span>
+<span class="w">        </span><span class="nx">next</span><span class="p">();</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Only allow 10 concurrent requests to the payment service</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">paymentBulkhead</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Bulkhead</span><span class="p">(</span><span class="mf">10</span><span class="p">);</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/checkout&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">paymentBulkhead</span><span class="p">.</span><span class="nx">execute</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span>
+<span class="w">      </span><span class="nx">paymentServiceBreaker</span><span class="p">.</span><span class="nx">fire</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">)</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">503</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Payment service overloaded&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Pattern</th>
+<th>Purpose</th>
+<th>When to Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Circuit Breaker</td>
+<td>Stop calling a failing service</td>
+<td>Downstream service is down/slow</td>
+</tr>
+<tr>
+<td>Retry with Backoff</td>
+<td>Handle transient failures</td>
+<td>Network blips, brief timeouts</td>
+</tr>
+<tr>
+<td>Retry Budget</td>
+<td>Limit retry traffic</td>
+<td>High-traffic systems</td>
+</tr>
+<tr>
+<td>Timeout</td>
+<td>Bound wait time</td>
+<td>Every external call</td>
+</tr>
+<tr>
+<td>Bulkhead</td>
+<td>Limit concurrency</td>
+<td>Protect shared resources</td>
+</tr>
+<tr>
+<td>Idempotency Key</td>
+<td>Safe retries</td>
+<td>Non-idempotent operations</td>
+</tr>
+</tbody>
+</table>
+<p>Combine these patterns in layers: timeouts on every call, retries for transient errors, circuit breakers to protect against sustained outages, and bulkheads to isolate failures.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Circuit Breaker from Scratch</div>
+                    <div class="exercise-desc"><p>Implement a simple CircuitBreaker class in Node.js with three states (CLOSED, OPEN, HALF_OPEN). It should accept a threshold count and reset timeout. Track failure counts, transition states, and provide a fire() method that executes the wrapped function or throws when the circuit is open. Write tests that simulate failures and verify state transitions.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use an internal state variable and counters. In CLOSED state, count failures and trip to OPEN when threshold is exceeded. Use setTimeout to transition from OPEN to HALF_OPEN. In HALF_OPEN, allow one request through and close the circuit on success or reopen on failure.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Opossum with Express Middleware</div>
+                    <div class="exercise-desc"><p>Create an Express middleware factory that wraps any async route handler function with an opossum circuit breaker. The middleware should return a 503 with Retry-After header when the circuit is open, log state transitions using pino, and expose a /health/circuits endpoint that lists all breaker states.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Store breakers in a Map keyed by name. The factory function takes a name, the async function, and options. Return an Express middleware (req, res, next) that calls breaker.fire(). Use breaker.opened, breaker.closed properties to report state.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Exponential Backoff with Jitter Visualization</div>
+                    <div class="exercise-desc"><p>Write a script that simulates 100 clients retrying simultaneously. Compare three strategies: (1) fixed delay, (2) exponential backoff without jitter, (3) exponential backoff with jitter. For each strategy, log the total number of requests hitting the server per second over a 30-second window. Observe how jitter spreads the load.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use an array to track request timestamps. For each simulated client, calculate when each retry would occur. Use full jitter: delay = random(0, baseDelay * 2^attempt). Bucket the timestamps into 1-second intervals and print a histogram.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Retry Budget Implementation</div>
+                    <div class="exercise-desc"><p>Implement a RetryBudget class that tracks the ratio of retries to total requests over a sliding time window. Only allow a retry if retries are below 10% of total requests. Integrate it with the async-retry library. Write tests that verify the budget is enforced under high failure rates.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use two arrays of timestamps (requests and retries). Clean up entries older than the window on each check. The canRetry() method returns true only when retries.length / requests.length &lt; maxRetryRatio.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Circuit breaker never closes after the downstream service recovers</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The resetTimeout is too long, or the half-open probe requests are failing because the service returns errors on the first request after recovery (e.g., cold start). Another common cause is that the health check endpoint recovers but the actual operation endpoint has not.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Reduce the resetTimeout to test recovery sooner (e.g., 10-15 seconds instead of 60). Ensure the half-open probe hits a lightweight operation. Monitor the breaker state with events and metrics. In opossum, verify your volumeThreshold is not too high for low-traffic services.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Retry storms overload a recovering service and cause it to fail again</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> All clients retry simultaneously after their backoff timers expire, or jitter is not implemented. A service that was just recovering gets hit with a spike of retry traffic and goes down again.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Always use jitter with exponential backoff. Implement a retry budget to cap total retry traffic at 10-20% of normal request volume. Combine retries with a circuit breaker so that when failures reach a threshold, retries stop entirely. Consider adding server-side rate limiting with Retry-After headers.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Non-idempotent operations produce duplicate side effects on retry</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Retrying a POST request that creates a resource (order, payment, email) without an idempotency key causes the operation to execute multiple times.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Generate a unique idempotency key on the client side and include it in the request header. The server must check this key before processing: if the key was already seen, return the cached response. Store idempotency keys in Redis with a TTL. Only retry operations that are naturally idempotent (GET, PUT, DELETE) without extra safeguards.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://nodeshift.dev/opossum/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Opossum Circuit Breaker Documentation</div>
+                    
+                    <div class="resource-note">Official docs for the most popular Node.js circuit breaker library</div>
+                    
+                </a>
+                
+                <a href="https://pragprog.com/titles/mnee2/release-it-second-edition/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Release It! by Michael Nygard</div>
+                    
+                    <div class="resource-note">The definitive book on stability patterns including circuit breakers, bulkheads, and timeouts</div>
+                    
+                </a>
+                
+                <a href="https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">AWS Architecture Blog: Exponential Backoff and Jitter</div>
+                    
+                    <div class="resource-note">AWS analysis of different jitter strategies with graphs and performance comparisons</div>
+                    
+                </a>
+                
+                <a href="https://github.com/vercel/async-retry" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag github">github</div>
+                    <div class="resource-title">async-retry npm package</div>
+                    
+                    <div class="resource-note">Clean retry utility from Vercel with built-in exponential backoff</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/7.6.2-js.html" class="btn">Graceful Degradation and Health Checks &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-7-js.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

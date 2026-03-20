@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Circuit Breakers and Retry Patterns - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-py.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-py.html">Security & Reliability</a> &rsaquo;
+            Error Handling & Resilience
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.6.1</span>
+                <span>~3h</span>
+            </div>
+            <h1>Circuit Breakers and Retry Patterns</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a circuit breaker like a smart traffic light at a road that frequently floods. Normally, the light is green (closed state) and cars pass through. When the road floods (the downstream service fails), the light turns red (open state), preventing cars from driving into floodwater and getting stuck. Periodically, the light turns yellow (half-open state) to let one car test if the road has drained — if it gets through, the light goes green again; if not, it stays red. Meanwhile, exponential backoff with jitter is like asking people to return at randomly staggered times rather than having everyone rush back the moment the road reopens.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Circuit Breakers and Retry Patterns</h1>
+<p>In distributed systems, failure is not a matter of <em>if</em> but <em>when</em>. Services go down, networks partition, databases become overloaded, and third-party APIs become unresponsive. Without proper resilience patterns, a single failing dependency can cascade through your entire system, turning a minor issue into a full-scale outage. Circuit breakers and retry patterns are two of the most critical tools in a backend engineer's resilience toolkit.</p>
+<h2>The Problem: Cascading Failures</h2>
+<p>Imagine a microservices architecture where Service A calls Service B, which calls Service C. If Service C becomes slow (responding in 30 seconds instead of 100ms), Service B's threads pile up waiting for responses. Service B's response times degrade, causing Service A's threads to pile up as well. Within minutes, your entire system is effectively down — not because anything crashed, but because resources are exhausted waiting for a single slow dependency.</p>
+<p>This is a <strong>cascading failure</strong>, and it is one of the most dangerous failure modes in distributed systems.</p>
+<h2>Naive Retries: Making Things Worse</h2>
+<p>The first instinct when a request fails is to retry it. But naive retries can amplify the problem dramatically:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">call_service</span><span class="p">(</span><span class="n">url</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Naive retry — DO NOT use this in production.&quot;&quot;&quot;</span>
+    <span class="n">max_retries</span> <span class="o">=</span> <span class="mi">3</span>
+    <span class="k">for</span> <span class="n">attempt</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">max_retries</span><span class="p">):</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+            <span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+            <span class="k">return</span> <span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+        <span class="k">except</span> <span class="n">requests</span><span class="o">.</span><span class="n">RequestException</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">attempt</span> <span class="o">==</span> <span class="n">max_retries</span> <span class="o">-</span> <span class="mi">1</span><span class="p">:</span>
+                <span class="k">raise</span>
+            <span class="c1"># Immediate retry with no delay!</span>
+            <span class="k">continue</span>
+</code></pre></div>
+
+<p>If a service is handling 1,000 requests per second and each request retries 3 times on failure, the failing service now receives 3,000 requests per second — exactly when it is least able to handle them. This is called a <strong>retry storm</strong>, and it can prevent a struggling service from ever recovering.</p>
+<h2>The Circuit Breaker Pattern</h2>
+<p>The circuit breaker pattern, popularized by Michael Nygard in <em>Release It!</em> and later by Netflix's Hystrix library, draws a direct analogy from electrical circuit breakers. When a circuit detects dangerous conditions, it "trips" to prevent further damage.</p>
+<h3>Three States</h3>
+<p>A circuit breaker operates in three states:</p>
+<p><strong>1. Closed (Normal Operation)</strong>
+Requests flow through normally. The circuit breaker monitors for failures. When failures exceed a configured threshold (e.g., 5 failures in 60 seconds, or a 50% failure rate), the circuit breaker transitions to the Open state.</p>
+<p><strong>2. Open (Failing Fast)</strong>
+All requests are immediately rejected without calling the downstream service. This gives the failing service time to recover and prevents resource exhaustion in the calling service. After a configured timeout period (e.g., 30 seconds), the circuit breaker transitions to Half-Open.</p>
+<p><strong>3. Half-Open (Testing Recovery)</strong>
+A limited number of requests are allowed through to test whether the downstream service has recovered. If these requests succeed, the circuit breaker transitions back to Closed. If they fail, it transitions back to Open.</p>
+<h3>Custom Circuit Breaker Implementation</h3>
+<p>Let us build a circuit breaker from scratch to understand the internals:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">threading</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">Enum</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Callable</span><span class="p">,</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Optional</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">functools</span><span class="w"> </span><span class="kn">import</span> <span class="n">wraps</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">CircuitState</span><span class="p">(</span><span class="n">Enum</span><span class="p">):</span>
+    <span class="n">CLOSED</span> <span class="o">=</span> <span class="s2">&quot;closed&quot;</span>
+    <span class="n">OPEN</span> <span class="o">=</span> <span class="s2">&quot;open&quot;</span>
+    <span class="n">HALF_OPEN</span> <span class="o">=</span> <span class="s2">&quot;half_open&quot;</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">CircuitBreakerError</span><span class="p">(</span><span class="ne">Exception</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Raised when the circuit breaker is open.&quot;&quot;&quot;</span>
+    <span class="k">pass</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">CircuitBreaker</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">failure_threshold</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">5</span><span class="p">,</span>
+        <span class="n">recovery_timeout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">30.0</span><span class="p">,</span>
+        <span class="n">half_open_max_calls</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+        <span class="n">expected_exceptions</span><span class="p">:</span> <span class="nb">tuple</span> <span class="o">=</span> <span class="p">(</span><span class="ne">Exception</span><span class="p">,),</span>
+    <span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_failure_threshold</span> <span class="o">=</span> <span class="n">failure_threshold</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_recovery_timeout</span> <span class="o">=</span> <span class="n">recovery_timeout</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_half_open_max_calls</span> <span class="o">=</span> <span class="n">half_open_max_calls</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_expected_exceptions</span> <span class="o">=</span> <span class="n">expected_exceptions</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">CLOSED</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_failure_count</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_last_failure_time</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_half_open_calls</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Lock</span><span class="p">()</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">state</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">CircuitState</span><span class="p">:</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">OPEN</span><span class="p">:</span>
+                <span class="c1"># Check if recovery timeout has elapsed</span>
+                <span class="k">if</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">_last_failure_time</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_recovery_timeout</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">HALF_OPEN</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_half_open_calls</span> <span class="o">=</span> <span class="mi">0</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_handle_success</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">HALF_OPEN</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_half_open_calls</span> <span class="o">+=</span> <span class="mi">1</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_half_open_calls</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_half_open_max_calls</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">CLOSED</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_failure_count</span> <span class="o">=</span> <span class="mi">0</span>
+            <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">CLOSED</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_failure_count</span> <span class="o">=</span> <span class="mi">0</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_handle_failure</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_failure_count</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_last_failure_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">HALF_OPEN</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">OPEN</span>
+            <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_failure_count</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_failure_threshold</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">OPEN</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">call</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">func</span><span class="p">:</span> <span class="n">Callable</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
+        <span class="n">current_state</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">state</span>
+
+        <span class="k">if</span> <span class="n">current_state</span> <span class="o">==</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">OPEN</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">CircuitBreakerError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;Circuit breaker is OPEN. Call rejected. &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;Recovery in </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_recovery_timeout</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="bp">self</span><span class="o">.</span><span class="n">_last_failure_time</span><span class="p">)</span><span class="si">:</span><span class="s2">.1f</span><span class="si">}</span><span class="s2">s&quot;</span>
+            <span class="p">)</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">func</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_handle_success</span><span class="p">()</span>
+            <span class="k">return</span> <span class="n">result</span>
+        <span class="k">except</span> <span class="bp">self</span><span class="o">.</span><span class="n">_expected_exceptions</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_handle_failure</span><span class="p">()</span>
+            <span class="k">raise</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">func</span><span class="p">:</span> <span class="n">Callable</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Callable</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Use as a decorator.&quot;&quot;&quot;</span>
+        <span class="nd">@wraps</span><span class="p">(</span><span class="n">func</span><span class="p">)</span>
+        <span class="k">def</span><span class="w"> </span><span class="nf">wrapper</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">call</span><span class="p">(</span><span class="n">func</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">wrapper</span>
+
+
+<span class="c1"># Usage as a decorator</span>
+<span class="n">service_b_breaker</span> <span class="o">=</span> <span class="n">CircuitBreaker</span><span class="p">(</span>
+    <span class="n">failure_threshold</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+    <span class="n">recovery_timeout</span><span class="o">=</span><span class="mf">30.0</span><span class="p">,</span>
+    <span class="n">expected_exceptions</span><span class="o">=</span><span class="p">(</span><span class="n">requests</span><span class="o">.</span><span class="n">RequestException</span><span class="p">,),</span>
+<span class="p">)</span>
+
+<span class="nd">@service_b_breaker</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">call_service_b</span><span class="p">(</span><span class="n">payload</span><span class="p">):</span>
+    <span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;http://service-b/api/process&quot;</span><span class="p">,</span> <span class="n">json</span><span class="o">=</span><span class="n">payload</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+    <span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+
+
+<span class="c1"># Usage in application code</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">call_service_b</span><span class="p">({</span><span class="s2">&quot;order_id&quot;</span><span class="p">:</span> <span class="mi">12345</span><span class="p">})</span>
+<span class="k">except</span> <span class="n">CircuitBreakerError</span><span class="p">:</span>
+    <span class="c1"># Return cached data, default value, or graceful degradation</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">get_cached_result</span><span class="p">(</span><span class="mi">12345</span><span class="p">)</span>
+<span class="k">except</span> <span class="n">requests</span><span class="o">.</span><span class="n">RequestException</span><span class="p">:</span>
+    <span class="c1"># The request was attempted but failed</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">handle_request_failure</span><span class="p">()</span>
+</code></pre></div>
+
+<h3>Using pybreaker</h3>
+<p>The <code>pybreaker</code> library provides a production-ready circuit breaker implementation:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">pybreaker</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
+
+<span class="c1"># Define a listener for monitoring</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">CircuitBreakerMonitor</span><span class="p">(</span><span class="n">pybreaker</span><span class="o">.</span><span class="n">CircuitBreakerListener</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">state_change</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">cb</span><span class="p">,</span> <span class="n">old_state</span><span class="p">,</span> <span class="n">new_state</span><span class="p">):</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Circuit breaker &#39;</span><span class="si">{</span><span class="n">cb</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39; state changed: </span><span class="si">{</span><span class="n">old_state</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2"> -&gt; </span><span class="si">{</span><span class="n">new_state</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">failure</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">cb</span><span class="p">,</span> <span class="n">exc</span><span class="p">):</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Circuit breaker &#39;</span><span class="si">{</span><span class="n">cb</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39; recorded failure: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">success</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">cb</span><span class="p">):</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Circuit breaker &#39;</span><span class="si">{</span><span class="n">cb</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39; recorded success&quot;</span><span class="p">)</span>
+
+
+<span class="c1"># Create the circuit breaker</span>
+<span class="n">db_breaker</span> <span class="o">=</span> <span class="n">pybreaker</span><span class="o">.</span><span class="n">CircuitBreaker</span><span class="p">(</span>
+    <span class="n">fail_max</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>                    <span class="c1"># Open after 5 failures</span>
+    <span class="n">reset_timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">,</span>              <span class="c1"># Try half-open after 30 seconds</span>
+    <span class="n">exclude</span><span class="o">=</span><span class="p">[</span><span class="ne">ValueError</span><span class="p">],</span>          <span class="c1"># Don&#39;t count these as failures</span>
+    <span class="n">listeners</span><span class="o">=</span><span class="p">[</span><span class="n">CircuitBreakerMonitor</span><span class="p">()],</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;database&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="nd">@db_breaker</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">query_database</span><span class="p">(</span><span class="n">query</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Execute a database query with circuit breaker protection.&quot;&quot;&quot;</span>
+    <span class="n">connection</span> <span class="o">=</span> <span class="n">get_db_connection</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">connection</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">query</span><span class="p">)</span>
+</code></pre></div>
+
+<h2>Retry Patterns Done Right</h2>
+<h3>Exponential Backoff with Jitter</h3>
+<p>When retries are necessary, exponential backoff prevents retry storms by increasing the delay between attempts. Adding <strong>jitter</strong> (randomness) prevents synchronized retries from multiple clients:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">random</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Callable</span><span class="p">,</span> <span class="n">TypeVar</span><span class="p">,</span> <span class="n">Any</span>
+
+<span class="n">T</span> <span class="o">=</span> <span class="n">TypeVar</span><span class="p">(</span><span class="s2">&quot;T&quot;</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">retry_with_backoff</span><span class="p">(</span>
+    <span class="n">func</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="n">T</span><span class="p">],</span>
+    <span class="n">max_retries</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">3</span><span class="p">,</span>
+    <span class="n">base_delay</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.0</span><span class="p">,</span>
+    <span class="n">max_delay</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">60.0</span><span class="p">,</span>
+    <span class="n">exponential_base</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">2.0</span><span class="p">,</span>
+    <span class="n">jitter</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="n">retryable_exceptions</span><span class="p">:</span> <span class="nb">tuple</span> <span class="o">=</span> <span class="p">(</span><span class="ne">Exception</span><span class="p">,),</span>
+    <span class="o">*</span><span class="n">args</span><span class="p">,</span>
+    <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">T</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Retry a function with exponential backoff and optional jitter.</span>
+
+<span class="sd">    Delay formula: min(max_delay, base_delay * exponential_base ** attempt)</span>
+<span class="sd">    With jitter:  random uniform between 0 and the computed delay</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">last_exception</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="k">for</span> <span class="n">attempt</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">max_retries</span> <span class="o">+</span> <span class="mi">1</span><span class="p">):</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">func</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">retryable_exceptions</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="n">last_exception</span> <span class="o">=</span> <span class="n">e</span>
+            <span class="k">if</span> <span class="n">attempt</span> <span class="o">==</span> <span class="n">max_retries</span><span class="p">:</span>
+                <span class="k">break</span>
+
+            <span class="c1"># Calculate delay with exponential backoff</span>
+            <span class="n">delay</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">max_delay</span><span class="p">,</span> <span class="n">base_delay</span> <span class="o">*</span> <span class="p">(</span><span class="n">exponential_base</span> <span class="o">**</span> <span class="n">attempt</span><span class="p">))</span>
+
+            <span class="c1"># Add full jitter (recommended by AWS)</span>
+            <span class="k">if</span> <span class="n">jitter</span><span class="p">:</span>
+                <span class="n">delay</span> <span class="o">=</span> <span class="n">random</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">delay</span><span class="p">)</span>
+
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Attempt </span><span class="si">{</span><span class="n">attempt</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="si">}</span><span class="s2"> failed: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">. Retrying in </span><span class="si">{</span><span class="n">delay</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">s...&quot;</span><span class="p">)</span>
+            <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">delay</span><span class="p">)</span>
+
+    <span class="k">raise</span> <span class="n">last_exception</span>
+
+
+<span class="c1"># Usage</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">retry_with_backoff</span><span class="p">(</span>
+    <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">,</span>
+    <span class="n">max_retries</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+    <span class="n">base_delay</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span>
+    <span class="n">retryable_exceptions</span><span class="o">=</span><span class="p">(</span><span class="n">requests</span><span class="o">.</span><span class="n">ConnectionError</span><span class="p">,</span> <span class="n">requests</span><span class="o">.</span><span class="n">Timeout</span><span class="p">),</span>
+    <span class="n">url</span><span class="o">=</span><span class="s2">&quot;http://service-b/api/data&quot;</span><span class="p">,</span>
+    <span class="n">timeout</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p>The <strong>jitter strategies</strong> commonly discussed are:
+- <strong>Full Jitter</strong>: <code>random(0, delay)</code> — recommended by most experts, spreads retries most evenly
+- <strong>Equal Jitter</strong>: <code>delay/2 + random(0, delay/2)</code> — guarantees a minimum wait
+- <strong>Decorrelated Jitter</strong>: <code>min(max_delay, random(base_delay, previous_delay * 3))</code> — each retry is independent of the base calculation</p>
+<h3>Using the Tenacity Library</h3>
+<p>The <code>tenacity</code> library is the gold standard for retries in Python:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">tenacity</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">retry</span><span class="p">,</span>
+    <span class="n">stop_after_attempt</span><span class="p">,</span>
+    <span class="n">wait_exponential_jitter</span><span class="p">,</span>
+    <span class="n">retry_if_exception_type</span><span class="p">,</span>
+    <span class="n">before_sleep_log</span><span class="p">,</span>
+    <span class="n">after_log</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+
+<span class="nd">@retry</span><span class="p">(</span>
+    <span class="n">stop</span><span class="o">=</span><span class="n">stop_after_attempt</span><span class="p">(</span><span class="mi">4</span><span class="p">),</span>
+    <span class="n">wait</span><span class="o">=</span><span class="n">wait_exponential_jitter</span><span class="p">(</span>
+        <span class="n">initial</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>       <span class="c1"># Start with 1 second</span>
+        <span class="nb">max</span><span class="o">=</span><span class="mi">60</span><span class="p">,</span>          <span class="c1"># Cap at 60 seconds</span>
+        <span class="n">jitter</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>        <span class="c1"># Add up to 5 seconds of jitter</span>
+    <span class="p">),</span>
+    <span class="n">retry</span><span class="o">=</span><span class="n">retry_if_exception_type</span><span class="p">((</span><span class="ne">ConnectionError</span><span class="p">,</span> <span class="ne">TimeoutError</span><span class="p">)),</span>
+    <span class="n">before_sleep</span><span class="o">=</span><span class="n">before_sleep_log</span><span class="p">(</span><span class="n">logger</span><span class="p">,</span> <span class="n">logging</span><span class="o">.</span><span class="n">WARNING</span><span class="p">),</span>
+<span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">fetch_user_profile</span><span class="p">(</span><span class="n">user_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+    <span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">&quot;http://user-service/api/users/</span><span class="si">{</span><span class="n">user_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="n">timeout</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+
+
+<span class="c1"># Tenacity also supports async</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">tenacity</span><span class="w"> </span><span class="kn">import</span> <span class="n">retry</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">aiohttp</span>
+
+<span class="nd">@retry</span><span class="p">(</span>
+    <span class="n">stop</span><span class="o">=</span><span class="n">stop_after_attempt</span><span class="p">(</span><span class="mi">3</span><span class="p">),</span>
+    <span class="n">wait</span><span class="o">=</span><span class="n">wait_exponential_jitter</span><span class="p">(</span><span class="n">initial</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="nb">max</span><span class="o">=</span><span class="mi">30</span><span class="p">),</span>
+    <span class="n">retry</span><span class="o">=</span><span class="n">retry_if_exception_type</span><span class="p">(</span><span class="n">aiohttp</span><span class="o">.</span><span class="n">ClientError</span><span class="p">),</span>
+<span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">async_fetch</span><span class="p">(</span><span class="n">url</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+    <span class="k">async</span> <span class="k">with</span> <span class="n">aiohttp</span><span class="o">.</span><span class="n">ClientSession</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+        <span class="k">async</span> <span class="k">with</span> <span class="n">session</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="n">aiohttp</span><span class="o">.</span><span class="n">ClientTimeout</span><span class="p">(</span><span class="n">total</span><span class="o">=</span><span class="mi">5</span><span class="p">))</span> <span class="k">as</span> <span class="n">resp</span><span class="p">:</span>
+            <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+            <span class="k">return</span> <span class="k">await</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+</code></pre></div>
+
+<h3>Retry Budgets</h3>
+<p>A <strong>retry budget</strong> limits the total number of retries across all requests as a percentage of total traffic. This prevents retry storms even when many requests fail simultaneously:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">threading</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections</span><span class="w"> </span><span class="kn">import</span> <span class="n">deque</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">RetryBudget</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Limits retries to a percentage of recent requests.</span>
+<span class="sd">    For example, a 20% budget means if 100 requests were made</span>
+<span class="sd">    in the last minute, only 20 retries are allowed.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">budget_percent</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">20.0</span><span class="p">,</span> <span class="n">window_seconds</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">60.0</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_budget_percent</span> <span class="o">=</span> <span class="n">budget_percent</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_window_seconds</span> <span class="o">=</span> <span class="n">window_seconds</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_requests</span><span class="p">:</span> <span class="n">deque</span> <span class="o">=</span> <span class="n">deque</span><span class="p">()</span>   <span class="c1"># timestamps of all requests</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_retries</span><span class="p">:</span> <span class="n">deque</span> <span class="o">=</span> <span class="n">deque</span><span class="p">()</span>    <span class="c1"># timestamps of retries</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Lock</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_clean_window</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">cutoff</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">_window_seconds</span>
+        <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">_requests</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_requests</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">cutoff</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_requests</span><span class="o">.</span><span class="n">popleft</span><span class="p">()</span>
+        <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">_retries</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_retries</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">cutoff</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_retries</span><span class="o">.</span><span class="n">popleft</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">record_request</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_requests</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">())</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">can_retry</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_clean_window</span><span class="p">()</span>
+            <span class="n">total_requests</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_requests</span><span class="p">)</span>
+            <span class="n">total_retries</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_retries</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">total_requests</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="k">return</span> <span class="kc">True</span>
+            <span class="n">allowed_retries</span> <span class="o">=</span> <span class="n">total_requests</span> <span class="o">*</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_budget_percent</span> <span class="o">/</span> <span class="mf">100.0</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">total_retries</span> <span class="o">&lt;</span> <span class="n">allowed_retries</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">record_retry</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_retries</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">())</span>
+
+
+<span class="c1"># Usage</span>
+<span class="n">budget</span> <span class="o">=</span> <span class="n">RetryBudget</span><span class="p">(</span><span class="n">budget_percent</span><span class="o">=</span><span class="mf">20.0</span><span class="p">,</span> <span class="n">window_seconds</span><span class="o">=</span><span class="mf">60.0</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">make_request_with_budget</span><span class="p">(</span><span class="n">url</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+    <span class="n">budget</span><span class="o">.</span><span class="n">record_request</span><span class="p">()</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+    <span class="k">except</span> <span class="n">requests</span><span class="o">.</span><span class="n">RequestException</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">budget</span><span class="o">.</span><span class="n">can_retry</span><span class="p">():</span>
+            <span class="n">budget</span><span class="o">.</span><span class="n">record_retry</span><span class="p">()</span>
+            <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">&quot;Retry budget exhausted&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2>The Bulkhead Pattern</h2>
+<p>The bulkhead pattern (named after ship compartments that prevent flooding from spreading) isolates different dependencies so that a failure in one does not consume all resources:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">concurrent.futures</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Callable</span><span class="p">,</span> <span class="n">Any</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">Bulkhead</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Limits concurrent calls to a dependency using a thread pool.</span>
+<span class="sd">    If the pool is exhausted, new calls are rejected immediately</span>
+<span class="sd">    rather than queuing and consuming more resources.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">max_concurrent</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">10</span><span class="p">,</span> <span class="n">max_queue</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">5</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="n">name</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_executor</span> <span class="o">=</span> <span class="n">concurrent</span><span class="o">.</span><span class="n">futures</span><span class="o">.</span><span class="n">ThreadPoolExecutor</span><span class="p">(</span>
+            <span class="n">max_workers</span><span class="o">=</span><span class="n">max_concurrent</span><span class="p">,</span>
+            <span class="n">thread_name_prefix</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;bulkhead-</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_semaphore</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Semaphore</span><span class="p">(</span><span class="n">max_concurrent</span> <span class="o">+</span> <span class="n">max_queue</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">execute</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">func</span><span class="p">:</span> <span class="n">Callable</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="n">timeout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">30.0</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_semaphore</span><span class="o">.</span><span class="n">acquire</span><span class="p">(</span><span class="n">blocking</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;Bulkhead &#39;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39; is full. Rejecting request.&quot;</span>
+            <span class="p">)</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">future</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_executor</span><span class="o">.</span><span class="n">submit</span><span class="p">(</span><span class="n">func</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">future</span><span class="o">.</span><span class="n">result</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">concurrent</span><span class="o">.</span><span class="n">futures</span><span class="o">.</span><span class="n">TimeoutError</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">TimeoutError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;Bulkhead &#39;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39; call timed out after </span><span class="si">{</span><span class="n">timeout</span><span class="si">}</span><span class="s2">s&quot;</span>
+            <span class="p">)</span>
+        <span class="k">finally</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_semaphore</span><span class="o">.</span><span class="n">release</span><span class="p">()</span>
+
+
+<span class="c1"># Separate bulkheads for different dependencies</span>
+<span class="n">db_bulkhead</span> <span class="o">=</span> <span class="n">Bulkhead</span><span class="p">(</span><span class="s2">&quot;database&quot;</span><span class="p">,</span> <span class="n">max_concurrent</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span> <span class="n">max_queue</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+<span class="n">api_bulkhead</span> <span class="o">=</span> <span class="n">Bulkhead</span><span class="p">(</span><span class="s2">&quot;external-api&quot;</span><span class="p">,</span> <span class="n">max_concurrent</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">max_queue</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+
+<span class="c1"># If the external API is slow, it only exhausts its own bulkhead</span>
+<span class="c1"># The database calls continue working normally</span>
+<span class="n">db_result</span> <span class="o">=</span> <span class="n">db_bulkhead</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">query_database</span><span class="p">,</span> <span class="s2">&quot;SELECT * FROM users&quot;</span><span class="p">)</span>
+<span class="n">api_result</span> <span class="o">=</span> <span class="n">api_bulkhead</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">call_external_api</span><span class="p">,</span> <span class="n">payload</span><span class="p">)</span>
+</code></pre></div>
+
+<h2>Timeout Strategies</h2>
+<p>Timeouts are the foundation of all resilience patterns. Without timeouts, circuit breakers and retries are meaningless because a single hung connection can block resources indefinitely.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">signal</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">TimeoutError</span><span class="p">(</span><span class="ne">Exception</span><span class="p">):</span>
+    <span class="k">pass</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">with_timeout</span><span class="p">(</span><span class="n">seconds</span><span class="p">:</span> <span class="nb">float</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Decorator to enforce a hard timeout on any function (Unix only).&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">decorator</span><span class="p">(</span><span class="n">func</span><span class="p">):</span>
+        <span class="k">def</span><span class="w"> </span><span class="nf">handler</span><span class="p">(</span><span class="n">signum</span><span class="p">,</span> <span class="n">frame</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">TimeoutError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Function </span><span class="si">{</span><span class="n">func</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s2"> timed out after </span><span class="si">{</span><span class="n">seconds</span><span class="si">}</span><span class="s2">s&quot;</span><span class="p">)</span>
+
+        <span class="nd">@wraps</span><span class="p">(</span><span class="n">func</span><span class="p">)</span>
+        <span class="k">def</span><span class="w"> </span><span class="nf">wrapper</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+            <span class="n">old_handler</span> <span class="o">=</span> <span class="n">signal</span><span class="o">.</span><span class="n">signal</span><span class="p">(</span><span class="n">signal</span><span class="o">.</span><span class="n">SIGALRM</span><span class="p">,</span> <span class="n">handler</span><span class="p">)</span>
+            <span class="n">signal</span><span class="o">.</span><span class="n">setitimer</span><span class="p">(</span><span class="n">signal</span><span class="o">.</span><span class="n">ITIMER_REAL</span><span class="p">,</span> <span class="n">seconds</span><span class="p">)</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">func</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+            <span class="k">finally</span><span class="p">:</span>
+                <span class="n">signal</span><span class="o">.</span><span class="n">setitimer</span><span class="p">(</span><span class="n">signal</span><span class="o">.</span><span class="n">ITIMER_REAL</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+                <span class="n">signal</span><span class="o">.</span><span class="n">signal</span><span class="p">(</span><span class="n">signal</span><span class="o">.</span><span class="n">SIGALRM</span><span class="p">,</span> <span class="n">old_handler</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">wrapper</span>
+    <span class="k">return</span> <span class="n">decorator</span>
+
+
+<span class="c1"># Layered timeouts — each layer has its own, progressively shorter</span>
+<span class="c1"># Overall request: 10s</span>
+<span class="c1"># Circuit breaker: 8s</span>
+<span class="c1"># Individual HTTP call: 5s</span>
+<span class="c1"># Database query: 3s</span>
+</code></pre></div>
+
+<p>A key principle: <strong>set timeouts at every layer</strong>, and make inner timeouts shorter than outer ones. If your HTTP client has a 5-second timeout, your API gateway should have a slightly higher timeout (e.g., 7 seconds) to account for processing overhead.</p>
+<h2>Combining Circuit Breakers with Retries</h2>
+<p>The most robust approach combines both patterns. Retries handle transient errors while the circuit breaker handles sustained failures:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">tenacity</span><span class="w"> </span><span class="kn">import</span> <span class="n">retry</span><span class="p">,</span> <span class="n">stop_after_attempt</span><span class="p">,</span> <span class="n">wait_exponential_jitter</span><span class="p">,</span> <span class="n">retry_if_exception_type</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">pybreaker</span>
+
+<span class="c1"># Circuit breaker wraps the raw call</span>
+<span class="n">service_breaker</span> <span class="o">=</span> <span class="n">pybreaker</span><span class="o">.</span><span class="n">CircuitBreaker</span><span class="p">(</span>
+    <span class="n">fail_max</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+    <span class="n">reset_timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">,</span>
+    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;payment-service&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+
+
+<span class="nd">@service_breaker</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">_call_payment_service</span><span class="p">(</span><span class="n">order_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">amount</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Raw call protected by circuit breaker.&quot;&quot;&quot;</span>
+    <span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+        <span class="s2">&quot;http://payment-service/api/charge&quot;</span><span class="p">,</span>
+        <span class="n">json</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;order_id&quot;</span><span class="p">:</span> <span class="n">order_id</span><span class="p">,</span> <span class="s2">&quot;amount&quot;</span><span class="p">:</span> <span class="n">amount</span><span class="p">},</span>
+        <span class="n">timeout</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+
+
+<span class="c1"># Retry wraps the circuit breaker call</span>
+<span class="c1"># IMPORTANT: Do NOT retry on CircuitBreakerError — the circuit is open for a reason</span>
+<span class="nd">@retry</span><span class="p">(</span>
+    <span class="n">stop</span><span class="o">=</span><span class="n">stop_after_attempt</span><span class="p">(</span><span class="mi">3</span><span class="p">),</span>
+    <span class="n">wait</span><span class="o">=</span><span class="n">wait_exponential_jitter</span><span class="p">(</span><span class="n">initial</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="nb">max</span><span class="o">=</span><span class="mi">10</span><span class="p">),</span>
+    <span class="n">retry</span><span class="o">=</span><span class="n">retry_if_exception_type</span><span class="p">((</span><span class="ne">ConnectionError</span><span class="p">,</span> <span class="ne">TimeoutError</span><span class="p">)),</span>
+<span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">charge_payment</span><span class="p">(</span><span class="n">order_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">amount</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Retryable call with circuit breaker protection.&quot;&quot;&quot;</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">_call_payment_service</span><span class="p">(</span><span class="n">order_id</span><span class="p">,</span> <span class="n">amount</span><span class="p">)</span>
+    <span class="k">except</span> <span class="n">pybreaker</span><span class="o">.</span><span class="n">CircuitBreakerError</span><span class="p">:</span>
+        <span class="c1"># Don&#39;t retry — fall back immediately</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;pending&quot;</span><span class="p">,</span> <span class="s2">&quot;message&quot;</span><span class="p">:</span> <span class="s2">&quot;Payment service unavailable&quot;</span><span class="p">}</span>
+
+
+<span class="c1"># Application code</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">process_order</span><span class="p">(</span><span class="n">order_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">amount</span><span class="p">:</span> <span class="nb">float</span><span class="p">):</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">charge_payment</span><span class="p">(</span><span class="n">order_id</span><span class="p">,</span> <span class="n">amount</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;status&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="s2">&quot;pending&quot;</span><span class="p">:</span>
+        <span class="c1"># Queue for later processing</span>
+        <span class="n">enqueue_payment_retry</span><span class="p">(</span><span class="n">order_id</span><span class="p">,</span> <span class="n">amount</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">result</span>
+</code></pre></div>
+
+<p>Notice the critical design decision: <strong>retries wrap the circuit breaker, not the other way around</strong>, and we <strong>never retry when the circuit is open</strong>. Retrying against an open circuit is wasteful since we already know the dependency is down.</p>
+<h2>Real-World Lessons from Netflix Hystrix</h2>
+<p>Netflix's Hystrix library (now in maintenance mode, succeeded by Resilience4j) established several principles that remain best practices:</p>
+<ol>
+<li><strong>Fail fast</strong>: When the circuit is open, return immediately. Do not queue requests.</li>
+<li><strong>Fallbacks everywhere</strong>: Every protected call should have a fallback — cached data, default values, or a simplified response.</li>
+<li><strong>Monitor everything</strong>: Track success rate, latency percentiles, circuit breaker state changes, and thread pool utilization.</li>
+<li><strong>Isolate by dependency</strong>: Each external dependency gets its own circuit breaker and thread pool (bulkhead).</li>
+<li><strong>Request collapsing</strong>: Batch multiple requests to the same dependency to reduce load.</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="c1"># Production-grade resilient service client</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">ResilientServiceClient</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">service_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">base_url</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">service_name</span> <span class="o">=</span> <span class="n">service_name</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">base_url</span> <span class="o">=</span> <span class="n">base_url</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">circuit_breaker</span> <span class="o">=</span> <span class="n">pybreaker</span><span class="o">.</span><span class="n">CircuitBreaker</span><span class="p">(</span>
+            <span class="n">fail_max</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+            <span class="n">reset_timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">,</span>
+            <span class="n">name</span><span class="o">=</span><span class="n">service_name</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">bulkhead</span> <span class="o">=</span> <span class="n">Bulkhead</span><span class="p">(</span><span class="n">service_name</span><span class="p">,</span> <span class="n">max_concurrent</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">retry_budget</span> <span class="o">=</span> <span class="n">RetryBudget</span><span class="p">(</span><span class="n">budget_percent</span><span class="o">=</span><span class="mf">20.0</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_cache</span> <span class="o">=</span> <span class="p">{}</span>  <span class="c1"># Simple cache for fallbacks</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">get</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">cache_key</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">retry_budget</span><span class="o">.</span><span class="n">record_request</span><span class="p">()</span>
+        <span class="n">url</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">base_url</span><span class="si">}{</span><span class="n">path</span><span class="si">}</span><span class="s2">&quot;</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">bulkhead</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_protected_get</span><span class="p">,</span> <span class="n">url</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span>
+            <span class="p">)</span>
+        <span class="k">except</span> <span class="n">pybreaker</span><span class="o">.</span><span class="n">CircuitBreakerError</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fallback</span><span class="p">(</span><span class="n">cache_key</span><span class="p">,</span> <span class="s2">&quot;circuit_open&quot;</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">retry_budget</span><span class="o">.</span><span class="n">can_retry</span><span class="p">():</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">retry_budget</span><span class="o">.</span><span class="n">record_retry</span><span class="p">()</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">bulkhead</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_protected_get</span><span class="p">,</span> <span class="n">url</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span>
+                    <span class="p">)</span>
+                <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+                    <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fallback</span><span class="p">(</span><span class="n">cache_key</span><span class="p">,</span> <span class="s2">&quot;retry_failed&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fallback</span><span class="p">(</span><span class="n">cache_key</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">e</span><span class="p">))</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_protected_get</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nd">@self</span><span class="o">.</span><span class="n">circuit_breaker</span>
+        <span class="k">def</span><span class="w"> </span><span class="nf">_get</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+            <span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+            <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+            <span class="k">return</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">_get</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_fallback</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">cache_key</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">reason</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">cache_key</span> <span class="ow">and</span> <span class="n">cache_key</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cache</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">{</span><span class="o">**</span><span class="bp">self</span><span class="o">.</span><span class="n">_cache</span><span class="p">[</span><span class="n">cache_key</span><span class="p">],</span> <span class="s2">&quot;_fallback&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;_reason&quot;</span><span class="p">:</span> <span class="n">reason</span><span class="p">}</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="s2">&quot;Service unavailable&quot;</span><span class="p">,</span> <span class="s2">&quot;_fallback&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;_reason&quot;</span><span class="p">:</span> <span class="n">reason</span><span class="p">}</span>
+</code></pre></div>
+
+<h2>Testing Resilience Patterns</h2>
+<p>Resilience patterns must be tested — otherwise you are only hoping they work when disaster strikes:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">pytest</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">unittest.mock</span><span class="w"> </span><span class="kn">import</span> <span class="n">patch</span><span class="p">,</span> <span class="n">MagicMock</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_circuit_breaker_opens_after_threshold</span><span class="p">():</span>
+    <span class="n">breaker</span> <span class="o">=</span> <span class="n">CircuitBreaker</span><span class="p">(</span><span class="n">failure_threshold</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">recovery_timeout</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">failing_func</span><span class="p">():</span>
+        <span class="k">raise</span> <span class="ne">ConnectionError</span><span class="p">(</span><span class="s2">&quot;Connection refused&quot;</span><span class="p">)</span>
+
+    <span class="c1"># First 3 calls fail and trip the breaker</span>
+    <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">3</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">pytest</span><span class="o">.</span><span class="n">raises</span><span class="p">(</span><span class="ne">ConnectionError</span><span class="p">):</span>
+            <span class="n">breaker</span><span class="o">.</span><span class="n">call</span><span class="p">(</span><span class="n">failing_func</span><span class="p">)</span>
+
+    <span class="c1"># 4th call should be rejected by the circuit breaker</span>
+    <span class="k">assert</span> <span class="n">breaker</span><span class="o">.</span><span class="n">state</span> <span class="o">==</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">OPEN</span>
+    <span class="k">with</span> <span class="n">pytest</span><span class="o">.</span><span class="n">raises</span><span class="p">(</span><span class="n">CircuitBreakerError</span><span class="p">):</span>
+        <span class="n">breaker</span><span class="o">.</span><span class="n">call</span><span class="p">(</span><span class="n">failing_func</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_circuit_breaker_recovers</span><span class="p">():</span>
+    <span class="n">breaker</span> <span class="o">=</span> <span class="n">CircuitBreaker</span><span class="p">(</span><span class="n">failure_threshold</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">recovery_timeout</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">failing_func</span><span class="p">():</span>
+        <span class="k">raise</span> <span class="ne">ConnectionError</span><span class="p">(</span><span class="s2">&quot;Connection refused&quot;</span><span class="p">)</span>
+
+    <span class="c1"># Trip the breaker</span>
+    <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">pytest</span><span class="o">.</span><span class="n">raises</span><span class="p">(</span><span class="ne">ConnectionError</span><span class="p">):</span>
+            <span class="n">breaker</span><span class="o">.</span><span class="n">call</span><span class="p">(</span><span class="n">failing_func</span><span class="p">)</span>
+
+    <span class="k">assert</span> <span class="n">breaker</span><span class="o">.</span><span class="n">state</span> <span class="o">==</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">OPEN</span>
+
+    <span class="c1"># Wait for recovery timeout</span>
+    <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">1.1</span><span class="p">)</span>
+
+    <span class="k">assert</span> <span class="n">breaker</span><span class="o">.</span><span class="n">state</span> <span class="o">==</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">HALF_OPEN</span>
+
+    <span class="c1"># Successful call should close the circuit</span>
+    <span class="n">breaker</span><span class="o">.</span><span class="n">call</span><span class="p">(</span><span class="k">lambda</span><span class="p">:</span> <span class="s2">&quot;success&quot;</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="n">breaker</span><span class="o">.</span><span class="n">state</span> <span class="o">==</span> <span class="n">CircuitState</span><span class="o">.</span><span class="n">CLOSED</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_retry_budget_limits_retries</span><span class="p">():</span>
+    <span class="n">budget</span> <span class="o">=</span> <span class="n">RetryBudget</span><span class="p">(</span><span class="n">budget_percent</span><span class="o">=</span><span class="mf">10.0</span><span class="p">,</span> <span class="n">window_seconds</span><span class="o">=</span><span class="mf">60.0</span><span class="p">)</span>
+
+    <span class="c1"># Record 10 requests</span>
+    <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">10</span><span class="p">):</span>
+        <span class="n">budget</span><span class="o">.</span><span class="n">record_request</span><span class="p">()</span>
+
+    <span class="c1"># Budget allows 10% = 1 retry</span>
+    <span class="k">assert</span> <span class="n">budget</span><span class="o">.</span><span class="n">can_retry</span><span class="p">()</span> <span class="ow">is</span> <span class="kc">True</span>
+    <span class="n">budget</span><span class="o">.</span><span class="n">record_retry</span><span class="p">()</span>
+
+    <span class="c1"># Second retry should be denied</span>
+    <span class="k">assert</span> <span class="n">budget</span><span class="o">.</span><span class="n">can_retry</span><span class="p">()</span> <span class="ow">is</span> <span class="kc">False</span>
+
+
+<span class="c1"># Chaos testing — inject failures randomly</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">random</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">chaos_middleware</span><span class="p">(</span><span class="n">func</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Randomly inject failures for resilience testing.&quot;&quot;&quot;</span>
+    <span class="nd">@wraps</span><span class="p">(</span><span class="n">func</span><span class="p">)</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">wrapper</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="n">failure_rate</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;CHAOS_FAILURE_RATE&quot;</span><span class="p">,</span> <span class="s2">&quot;0&quot;</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">random</span><span class="o">.</span><span class="n">random</span><span class="p">()</span> <span class="o">&lt;</span> <span class="n">failure_rate</span><span class="p">:</span>
+            <span class="n">failure_type</span> <span class="o">=</span> <span class="n">random</span><span class="o">.</span><span class="n">choice</span><span class="p">([</span><span class="s2">&quot;timeout&quot;</span><span class="p">,</span> <span class="s2">&quot;error&quot;</span><span class="p">,</span> <span class="s2">&quot;slow&quot;</span><span class="p">])</span>
+            <span class="k">if</span> <span class="n">failure_type</span> <span class="o">==</span> <span class="s2">&quot;timeout&quot;</span><span class="p">:</span>
+                <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">30</span><span class="p">)</span>
+                <span class="k">raise</span> <span class="ne">TimeoutError</span><span class="p">(</span><span class="s2">&quot;Chaos: simulated timeout&quot;</span><span class="p">)</span>
+            <span class="k">elif</span> <span class="n">failure_type</span> <span class="o">==</span> <span class="s2">&quot;error&quot;</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ConnectionError</span><span class="p">(</span><span class="s2">&quot;Chaos: simulated connection error&quot;</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">random</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">10</span><span class="p">))</span>  <span class="c1"># Slow response</span>
+        <span class="k">return</span> <span class="n">func</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">wrapper</span>
+</code></pre></div>
+
+<h2>Summary of Best Practices</h2>
+<ol>
+<li><strong>Always set timeouts</strong> — on every network call, at every layer.</li>
+<li><strong>Use exponential backoff with full jitter</strong> for retries.</li>
+<li><strong>Implement retry budgets</strong> to prevent retry storms across your fleet.</li>
+<li><strong>Deploy circuit breakers</strong> for every external dependency.</li>
+<li><strong>Never retry on open circuits</strong> — respect the circuit breaker's decision.</li>
+<li><strong>Use bulkheads</strong> to isolate failures between dependencies.</li>
+<li><strong>Provide fallbacks</strong> — cached data, defaults, or degraded functionality.</li>
+<li><strong>Monitor and alert</strong> on circuit breaker state changes.</li>
+<li><strong>Test your resilience patterns</strong> with chaos engineering and fault injection.</li>
+<li><strong>Combine patterns thoughtfully</strong>: retries for transient errors, circuit breakers for sustained failures, bulkheads for isolation, and timeouts as the foundation for all of them.</li>
+</ol>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Configurable Circuit Breaker</div>
+                    <div class="exercise-desc"><p>Implement a circuit breaker class that supports: (1) configurable failure threshold and recovery timeout, (2) a sliding window for failure counting (only count failures within the last N seconds rather than total), (3) success threshold in half-open state (require M consecutive successes before closing), and (4) event callbacks for state transitions. Write tests demonstrating all state transitions.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a deque with timestamps for the sliding window. For the success threshold in half-open state, add a counter that resets on failure. For callbacks, accept a dictionary mapping state transitions to callable objects.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Decorrelated Jitter Retry</div>
+                    <div class="exercise-desc"><p>Build a retry decorator that implements the decorrelated jitter algorithm: sleep = min(cap, random_between(base, sleep * 3)), where sleep starts at base. Compare it against full jitter and equal jitter by running 100 simulated retries for each strategy and plotting (or printing) the distribution of wait times at each retry attempt.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Track the previous sleep time across retries since decorrelated jitter depends on the last delay value, not the attempt number. Use random.uniform(base, prev_sleep * 3) and clamp to your maximum. Store all generated delays in a list per strategy for comparison.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Combine Circuit Breaker, Retry, and Bulkhead</div>
+                    <div class="exercise-desc"><p>Create a ResilientClient class that wraps HTTP calls with all three patterns: a circuit breaker (open after 3 failures, 15-second recovery), retry with exponential backoff (max 2 retries, do NOT retry on CircuitBreakerError), and a bulkhead (max 5 concurrent requests). Write a load test that simulates 50 concurrent requests against a mock server that fails 60% of the time, and verify that the circuit opens, retries are bounded, and the bulkhead rejects excess requests.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use concurrent.futures.ThreadPoolExecutor to simulate concurrent load. The bulkhead should be the outermost layer (limits concurrency), retry in the middle (handles transient failures), and the circuit breaker innermost (wraps the actual HTTP call). Use unittest.mock to simulate the failing server.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Retry Budget with Per-Endpoint Tracking</div>
+                    <div class="exercise-desc"><p>Extend the RetryBudget class to track budgets per endpoint (e.g., /api/users vs /api/orders). Each endpoint should have its own budget percentage, and there should also be a global budget that caps total retries across all endpoints. Write tests showing that a single bad endpoint cannot exhaust the global retry budget.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a dictionary of endpoint -&gt; deque for per-endpoint tracking plus a global deque for all retries. The can_retry method should check both the per-endpoint budget AND the global budget, returning True only if both allow it.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Circuit breaker never closes again after opening</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> The circuit breaker opens correctly on failures but all subsequent requests are permanently rejected with CircuitBreakerError, even after the downstream service recovers. Logs show the breaker entering HALF_OPEN but never returning to CLOSED.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The half-open state is not properly detecting successful calls. Common causes include: (1) the success handler checks for CLOSED state instead of HALF_OPEN, (2) the recovery timeout check has an off-by-one error, or (3) a race condition between state checking and request execution in multithreaded code.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Ensure your state transition logic explicitly handles the HALF_OPEN -> CLOSED transition on success. Use proper locking around state changes. Verify the recovery timeout comparison uses >= rather than > to avoid edge cases. Add logging on every state transition to trace the issue.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <h1>Bug: checking for wrong state in success handler</h1>
+<p>def _handle_success(self):
+    if self._state == CircuitState.CLOSED:  # Wrong! Should check HALF_OPEN
+        self._failure_count = 0</p>
+<h1>Fix:</h1>
+<p>def _handle_success(self):
+    with self._lock:
+        if self._state == CircuitState.HALF_OPEN:
+            self._state = CircuitState.CLOSED
+            self._failure_count = 0
+        elif self._state == CircuitState.CLOSED:
+            self._failure_count = 0</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Retry storms overwhelming a recovering service</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> After a downstream service restarts, it immediately becomes overloaded again. Traffic graphs show periodic spikes corresponding to retry waves. The service enters a cycle of recovery and failure.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Retries are configured per-request without a global budget. When a service recovers, all backed-up clients retry simultaneously. Additionally, if all clients use identical backoff delays (no jitter), retries synchronize and hit the service in waves.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement a retry budget that limits retries to a percentage of total traffic (typically 10-20%). Always use full jitter with exponential backoff to decorrelate retry timing across clients. Consider adding a circuit breaker that prevents retries entirely when the failure rate is high enough.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Bulkhead thread pool silently dropping requests under load</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Requests to a specific dependency time out even though the dependency is healthy. Thread pool utilization shows 100%. Memory usage grows steadily because futures are queuing without bound. Other dependencies served by the same application remain responsive (confirming bulkhead isolation is working for them).
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The ThreadPoolExecutor's default behavior when the work queue is full depends on the configuration. If max_workers is too low or the queue is unbounded, you either reject too aggressively or accumulate unbounded memory usage. Additionally, if the timeout on future.result() is not set, threads can hang indefinitely.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Always set explicit timeouts on future.result(). Use a semaphore to implement admission control before submitting to the executor. Size your bulkhead based on the expected latency of the dependency: max_concurrent = target_throughput * p99_latency. Monitor the rejection rate and tune accordingly.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <h1>Problem: no admission control, no timeout</h1>
+<p>executor = ThreadPoolExecutor(max_workers=10)
+future = executor.submit(call_service)  # Queues unboundedly
+result = future.result()  # Blocks forever if the call hangs</p>
+<h1>Fix: semaphore for admission control + timeout</h1>
+<p>semaphore = threading.Semaphore(15)  # 10 workers + 5 queue
+if not semaphore.acquire(blocking=False):
+    raise RuntimeError("Bulkhead full")
+try:
+    future = executor.submit(call_service)
+    result = future.result(timeout=10)
+finally:
+    semaphore.release()</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://pragprog.com/titles/mnee2/release-it-second-edition/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">Release It! by Michael Nygard</div>
+                    
+                    <div class="resource-note">The definitive book on stability patterns including circuit breakers, bulkheads, and timeouts. Chapter 5 covers these patterns in depth with real-world war stories.</div>
+                    
+                </a>
+                
+                <a href="https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Exponential Backoff and Jitter (AWS Architecture Blog)</div>
+                    
+                    <div class="resource-note">The seminal article comparing full jitter, equal jitter, and decorrelated jitter strategies with simulations showing their relative effectiveness.</div>
+                    
+                </a>
+                
+                <a href="https://tenacity.readthedocs.io/en/latest/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">Tenacity Documentation</div>
+                    
+                    <div class="resource-note">Comprehensive docs for the most popular Python retry library. Covers all retry strategies, custom callbacks, and async support.</div>
+                    
+                </a>
+                
+                <a href="https://resilience4j.readme.io/docs/getting-started" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag tutorial">tutorial</div>
+                    <div class="resource-title">Resilience4j User Guide</div>
+                    
+                    <div class="resource-note">While Java-focused, Resilience4j's documentation is an excellent resource for understanding circuit breaker, bulkhead, rate limiter, and retry patterns conceptually. It is the successor to Netflix Hystrix.</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/8.6.2-py.html" class="btn">Graceful Degradation and Health Checks &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-py.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

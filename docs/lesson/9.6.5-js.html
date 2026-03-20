@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a CI/CD Pipeline (GitHub Actions) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Data & Analytics
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.6.5</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design a CI/CD Pipeline (GitHub Actions)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a CI/CD system as a factory assembly line manager. When an order arrives (code push), the manager reads the blueprint (YAML workflow), assigns tasks to available workers (runners), some tasks can happen in parallel (lint and test), others must wait for prerequisites (deploy waits for build). The manager monitors every worker in real-time (log streaming), replaces broken workers instantly (ephemeral VMs), and reports the final quality status to the customer (GitHub status check).</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a CI/CD Pipeline (GitHub Actions)</h1>
+<h2>Introduction</h2>
+<p>Continuous Integration and Continuous Deployment (CI/CD) is the backbone of modern software delivery. A CI/CD pipeline automatically builds, tests, and deploys code changes, enabling teams to ship software rapidly and reliably. In this lesson we design a system like GitHub Actions — a cloud-hosted CI/CD platform that executes workflows triggered by events (push, pull request, schedule) on ephemeral compute instances.</p>
+<h2>Requirements</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li>Users define <strong>workflows</strong> as YAML configuration files in their repositories</li>
+<li>Workflows are <strong>triggered</strong> by events: push, pull request, tag, schedule (cron), manual dispatch</li>
+<li>Each workflow contains one or more <strong>jobs</strong> that run in parallel or with dependencies</li>
+<li>Each job contains sequential <strong>steps</strong> (shell commands or reusable actions)</li>
+<li>Jobs run in isolated <strong>environments</strong> (containers or VMs) with configurable OS and tools</li>
+<li>Support <strong>secrets</strong> management for API keys, tokens, and credentials</li>
+<li>Support <strong>caching</strong> of dependencies (node_modules, .m2, pip cache)</li>
+<li>Support <strong>artifacts</strong> — upload/download build outputs between jobs</li>
+<li>Real-time <strong>log streaming</strong> during execution</li>
+<li>Support <strong>matrix builds</strong> (test across Node 18, 20, 22 simultaneously)</li>
+<li>Support <strong>self-hosted runners</strong> alongside cloud runners</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li>10 million workflow runs per day</li>
+<li>Job startup time: &lt; 30 seconds (from queue to first step execution)</li>
+<li>Log streaming latency: &lt; 2 seconds</li>
+<li>99.95% availability for the control plane</li>
+<li>Support 100,000 concurrent job executions</li>
+<li>Zero data leakage between jobs from different repositories</li>
+</ul>
+<h2>Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Workflow runs/day:       10,000,000
+Avg jobs per workflow:   3
+Total jobs/day:          30,000,000
+Jobs/second:             30M / 86,400 = ~350 jobs/s
+Peak jobs/second:        ~1,000 jobs/s (business hours)
+
+Avg job duration:        5 minutes
+Concurrent jobs:         350 jobs/s * 300s = ~105,000
+Peak concurrent:         1,000 * 300 = ~300,000
+
+Log volume:
+  Avg log per job:       2 MB
+  Total logs/day:        30M * 2 MB = 60 TB/day
+  Log retention:         90 days = ~5.4 PB
+
+Artifact storage:
+  20% of jobs produce artifacts, avg 50 MB
+  30M * 0.2 * 50 MB = 300 TB/day
+  Retention: 30 days (configurable)
+
+Runner compute:
+  105,000 concurrent * 2 vCPU avg = 210,000 vCPUs
+  105,000 concurrent * 7 GB RAM avg = ~735 TB RAM
+</code></pre></div>
+
+<h2>High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────────────┐
+│                        Event Sources                             │
+│  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐  ┌──────────┐  │
+│  │ git    │  │  PR    │  │  Tag   │  │  Cron  │  │ Manual   │  │
+│  │ push   │  │ event  │  │ create │  │ sched  │  │ dispatch │  │
+│  └───┬────┘  └───┬────┘  └───┬────┘  └───┬────┘  └────┬─────┘  │
+└──────┼───────────┼───────────┼───────────┼────────────┼─────────┘
+       │           │           │           │            │
+       ▼           ▼           ▼           ▼            ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                  Webhook / Event Ingestion                        │
+│              (High-availability, idempotent)                     │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    Workflow Engine                                │
+│                                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
+│  │ Event Router │  │ YAML Parser  │  │  DAG Builder │           │
+│  │ (match       │  │ (validate &amp;  │  │  (job deps   │           │
+│  │  triggers)   │  │  parse)      │  │   graph)     │           │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘           │
+└─────────┼────────────────┼────────────────┼─────────────────────┘
+          │                │                │
+          ▼                ▼                ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     Job Scheduler                                │
+│  ┌────────────────────────────────────────────────────────┐      │
+│  │  Priority Queue (by plan tier, queue time, repo size)  │      │
+│  └────────────────────────┬───────────────────────────────┘      │
+│                           │                                      │
+│  ┌────────────────────────┴───────────────────────────────┐      │
+│  │  Runner Allocator (match labels, OS, architecture)     │      │
+│  └────────────────────────┬───────────────────────────────┘      │
+└───────────────────────────┼──────────────────────────────────────┘
+                            │
+         ┌──────────────────┼──────────────────┐
+         ▼                  ▼                  ▼
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│  Runner Pool    │ │  Runner Pool    │ │  Self-Hosted    │
+│  (Linux)        │ │  (macOS)        │ │  Runners        │
+│                 │ │                 │ │                 │
+│ ┌─────────────┐ │ │ ┌─────────────┐ │ │ ┌─────────────┐ │
+│ │ VM/Container│ │ │ │ VM/Container│ │ │ │ User Machine│ │
+│ │             │ │ │ │             │ │ │ │             │ │
+│ │ Clone repo  │ │ │ │ Clone repo  │ │ │ │ Clone repo  │ │
+│ │ Run steps   │ │ │ │ Run steps   │ │ │ │ Run steps   │ │
+│ │ Stream logs │ │ │ │ Stream logs │ │ │ │ Stream logs │ │
+│ │ Upload arts │ │ │ │ Upload arts │ │ │ │ Upload arts │ │
+│ └─────────────┘ │ │ └─────────────┘ │ │ └─────────────┘ │
+│ ┌─────────────┐ │ │ ┌─────────────┐ │ └─────────────────┘
+│ │ VM/Container│ │ │ │ VM/Container│ │
+│ └─────────────┘ │ │ └─────────────┘ │
+└─────────────────┘ └─────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│                      Supporting Services                         │
+│                                                                  │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
+│  │  Secrets  │  │  Cache   │  │ Artifact │  │   Log Storage    │ │
+│  │  Vault    │  │  Service │  │  Store   │  │   (S3 + Stream)  │ │
+│  │(encrypted)│  │  (S3)    │  │  (S3)    │  │                  │ │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>API Design</h2>
+<h3>Workflow Trigger API</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">YAML</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;yaml&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">express</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+
+<span class="c1">// POST /api/v1/webhooks/github</span>
+<span class="c1">// Receives GitHub webhook events</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/webhooks/github&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Verify webhook signature</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">signature</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">headers</span><span class="p">[</span><span class="s1">&#39;x-hub-signature-256&#39;</span><span class="p">];</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">expected</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`sha256=</span><span class="si">${</span><span class="nx">crypto</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">createHmac</span><span class="p">(</span><span class="s1">&#39;sha256&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">WEBHOOK_SECRET</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">update</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">))</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">digest</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">crypto</span><span class="p">.</span><span class="nx">timingSafeEqual</span><span class="p">(</span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">signature</span><span class="p">),</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">expected</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">401</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid signature&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">event</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">headers</span><span class="p">[</span><span class="s1">&#39;x-github-event&#39;</span><span class="p">];</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">payload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Enqueue event for async processing</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">eventQueue</span><span class="p">.</span><span class="nx">produce</span><span class="p">(</span><span class="s1">&#39;webhook-events&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">payload</span><span class="p">.</span><span class="nx">repository</span><span class="p">.</span><span class="nx">full_name</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">event</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">payload</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">receivedAt</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Return immediately (webhook timeout is 10s)</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">202</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;accepted&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// POST /api/v1/repos/:owner/:repo/actions/workflows/:workflowId/dispatches</span>
+<span class="c1">// Manually trigger a workflow</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/repos/:owner/:repo/actions/workflows/:workflowId/dispatches&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">owner</span><span class="p">,</span><span class="w"> </span><span class="nx">repo</span><span class="p">,</span><span class="w"> </span><span class="nx">workflowId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ref</span><span class="p">,</span><span class="w"> </span><span class="nx">inputs</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">workflow</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">workflowService</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">owner</span><span class="p">,</span><span class="w"> </span><span class="nx">repo</span><span class="p">,</span><span class="w"> </span><span class="nx">workflowId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">workflow</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Workflow not found&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// Validate inputs against workflow definition</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">validationErrors</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">validateInputs</span><span class="p">(</span><span class="nx">workflow</span><span class="p">.</span><span class="nx">inputs</span><span class="p">,</span><span class="w"> </span><span class="nx">inputs</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">validationErrors</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">422</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">errors</span><span class="o">:</span><span class="w"> </span><span class="nx">validationErrors</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">run</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">workflowEngine</span><span class="p">.</span><span class="nx">trigger</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">owner</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">repo</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">workflowId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">ref</span><span class="o">:</span><span class="w"> </span><span class="nx">ref</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;main&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">event</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;workflow_dispatch&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">inputs</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">triggeredBy</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">run</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;queued&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">url</span><span class="o">:</span><span class="w"> </span><span class="sb">`/api/v1/repos/</span><span class="si">${</span><span class="nx">owner</span><span class="si">}</span><span class="sb">/</span><span class="si">${</span><span class="nx">repo</span><span class="si">}</span><span class="sb">/actions/runs/</span><span class="si">${</span><span class="nx">run</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h3>Run Management API</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// GET /api/v1/repos/:owner/:repo/actions/runs</span>
+<span class="c1">// List workflow runs</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/repos/:owner/:repo/actions/runs&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">owner</span><span class="p">,</span><span class="w"> </span><span class="nx">repo</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="p">,</span><span class="w"> </span><span class="nx">branch</span><span class="p">,</span><span class="w"> </span><span class="nx">event</span><span class="p">,</span><span class="w"> </span><span class="nx">page</span><span class="p">,</span><span class="w"> </span><span class="nx">per_page</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">runs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">runService</span><span class="p">.</span><span class="nx">list</span><span class="p">(</span><span class="nx">owner</span><span class="p">,</span><span class="w"> </span><span class="nx">repo</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">status</span><span class="p">,</span><span class="w">     </span><span class="c1">// &#39;queued&#39;, &#39;in_progress&#39;, &#39;completed&#39;, &#39;failure&#39;</span>
+<span class="w">    </span><span class="nx">branch</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">event</span><span class="p">,</span><span class="w">      </span><span class="c1">// &#39;push&#39;, &#39;pull_request&#39;, &#39;schedule&#39;</span>
+<span class="w">    </span><span class="nx">page</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">page</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">perPage</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">per_page</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">30</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">total_count</span><span class="o">:</span><span class="w"> </span><span class="nx">runs</span><span class="p">.</span><span class="nx">total</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">workflow_runs</span><span class="o">:</span><span class="w"> </span><span class="nx">runs</span><span class="p">.</span><span class="nx">items</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">run</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">run</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="nx">run</span><span class="p">.</span><span class="nx">workflowName</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="nx">run</span><span class="p">.</span><span class="nx">status</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">conclusion</span><span class="o">:</span><span class="w"> </span><span class="nx">run</span><span class="p">.</span><span class="nx">conclusion</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">head_branch</span><span class="o">:</span><span class="w"> </span><span class="nx">run</span><span class="p">.</span><span class="nx">branch</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">head_sha</span><span class="o">:</span><span class="w"> </span><span class="nx">run</span><span class="p">.</span><span class="nx">commitSha</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">event</span><span class="o">:</span><span class="w"> </span><span class="nx">run</span><span class="p">.</span><span class="nx">event</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">created_at</span><span class="o">:</span><span class="w"> </span><span class="nx">run</span><span class="p">.</span><span class="nx">createdAt</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">updated_at</span><span class="o">:</span><span class="w"> </span><span class="nx">run</span><span class="p">.</span><span class="nx">updatedAt</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">run_started_at</span><span class="o">:</span><span class="w"> </span><span class="nx">run</span><span class="p">.</span><span class="nx">startedAt</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">jobs_url</span><span class="o">:</span><span class="w"> </span><span class="sb">`/api/v1/repos/</span><span class="si">${</span><span class="nx">owner</span><span class="si">}</span><span class="sb">/</span><span class="si">${</span><span class="nx">repo</span><span class="si">}</span><span class="sb">/actions/runs/</span><span class="si">${</span><span class="nx">run</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">/jobs`</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">logs_url</span><span class="o">:</span><span class="w"> </span><span class="sb">`/api/v1/repos/</span><span class="si">${</span><span class="nx">owner</span><span class="si">}</span><span class="sb">/</span><span class="si">${</span><span class="nx">repo</span><span class="si">}</span><span class="sb">/actions/runs/</span><span class="si">${</span><span class="nx">run</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">/logs`</span><span class="p">,</span>
+<span class="w">    </span><span class="p">})),</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// GET /api/v1/repos/:owner/:repo/actions/runs/:runId/jobs/:jobId/logs</span>
+<span class="c1">// Stream job logs in real-time via SSE</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/repos/:owner/:repo/actions/runs/:runId/jobs/:jobId/logs&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">runId</span><span class="p">,</span><span class="w"> </span><span class="nx">jobId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">setHeader</span><span class="p">(</span><span class="s1">&#39;Content-Type&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;text/event-stream&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">setHeader</span><span class="p">(</span><span class="s1">&#39;Cache-Control&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;no-cache&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">setHeader</span><span class="p">(</span><span class="s1">&#39;Connection&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;keep-alive&#39;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Send existing logs first</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">existingLogs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">logService</span><span class="p">.</span><span class="nx">getJobLogs</span><span class="p">(</span><span class="nx">runId</span><span class="p">,</span><span class="w"> </span><span class="nx">jobId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">line</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">existingLogs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">res</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="sb">`data: </span><span class="si">${</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">line</span><span class="p">)</span><span class="si">}</span><span class="sb">\n\n`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Subscribe to live log stream</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">unsubscribe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">logStream</span><span class="p">.</span><span class="nx">subscribe</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">runId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">jobId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">line</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">res</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="sb">`data: </span><span class="si">${</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">line</span><span class="p">)</span><span class="si">}</span><span class="sb">\n\n`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// Clean up on disconnect</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">unsubscribe</span><span class="p">();</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Workflow definitions (cached from YAML in repo)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">workflows</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">repo_owner</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">repo_name</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">file_path</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- .github/workflows/ci.yml</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">triggers</span><span class="w">        </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">          </span><span class="c1">-- {push: {branches: [&#39;main&#39;]}}</span>
+<span class="w">  </span><span class="n">raw_yaml</span><span class="w">        </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">parsed_config</span><span class="w">   </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">commit_sha</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">40</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_active</span><span class="w">       </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">TRUE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">(</span><span class="n">repo_owner</span><span class="p">,</span><span class="w"> </span><span class="n">repo_name</span><span class="p">,</span><span class="w"> </span><span class="n">file_path</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- Workflow runs</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">workflow_runs</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">workflow_id</span><span class="w">     </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">workflows</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">run_number</span><span class="w">      </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;queued&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">conclusion</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">),</span><span class="w">  </span><span class="c1">-- &#39;success&#39;, &#39;failure&#39;, &#39;cancelled&#39;, &#39;skipped&#39;</span>
+<span class="w">  </span><span class="n">event</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">branch</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span>
+<span class="w">  </span><span class="n">commit_sha</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">40</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">commit_message</span><span class="w">  </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">triggered_by</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span>
+<span class="w">  </span><span class="n">inputs</span><span class="w">          </span><span class="n">JSONB</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">started_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">completed_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_runs_workflow</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">workflow_runs</span><span class="p">(</span><span class="n">workflow_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_runs_repo_status</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">workflow_runs</span><span class="p">(</span><span class="n">status</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_runs_commit</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">workflow_runs</span><span class="p">(</span><span class="n">commit_sha</span><span class="p">);</span>
+
+<span class="c1">-- Jobs within a run</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">jobs</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">run_id</span><span class="w">          </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">workflow_runs</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;queued&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">conclusion</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">),</span>
+<span class="w">  </span><span class="n">runner_id</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span>
+<span class="w">  </span><span class="n">runner_os</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;ubuntu-latest&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">runner_labels</span><span class="w">   </span><span class="nb">TEXT</span><span class="p">[]</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">depends_on</span><span class="w">      </span><span class="n">UUID</span><span class="p">[]</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span><span class="w">  </span><span class="c1">-- job IDs this job depends on</span>
+<span class="w">  </span><span class="n">matrix_values</span><span class="w">   </span><span class="n">JSONB</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">started_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">completed_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_jobs_run</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">jobs</span><span class="p">(</span><span class="n">run_id</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_jobs_status</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">jobs</span><span class="p">(</span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;queued&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Steps within a job</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">steps</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">job_id</span><span class="w">          </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">jobs</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">step_number</span><span class="w">     </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;pending&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">conclusion</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">),</span>
+<span class="w">  </span><span class="n">command</span><span class="w">         </span><span class="nb">TEXT</span><span class="p">,</span><span class="w">           </span><span class="c1">-- shell command or action reference</span>
+<span class="w">  </span><span class="n">action_ref</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">),</span><span class="w">  </span><span class="c1">-- &#39;actions/checkout@v4&#39;</span>
+<span class="w">  </span><span class="n">environment</span><span class="w">     </span><span class="n">JSONB</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">started_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">completed_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_steps_job</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">steps</span><span class="p">(</span><span class="n">job_id</span><span class="p">,</span><span class="w"> </span><span class="n">step_number</span><span class="p">);</span>
+
+<span class="c1">-- Secrets (encrypted)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">secrets</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">repo_owner</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">repo_name</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">encrypted_value</span><span class="w"> </span><span class="n">BYTEA</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">key_id</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- KMS key used for encryption</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">(</span><span class="n">repo_owner</span><span class="p">,</span><span class="w"> </span><span class="n">repo_name</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- Runner pool</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">runners</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="k">type</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- &#39;cloud&#39;, &#39;self-hosted&#39;</span>
+<span class="w">  </span><span class="n">os</span><span class="w">              </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">architecture</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- &#39;x64&#39;, &#39;arm64&#39;</span>
+<span class="w">  </span><span class="n">labels</span><span class="w">          </span><span class="nb">TEXT</span><span class="p">[]</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;idle&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">current_job_id</span><span class="w">  </span><span class="n">UUID</span><span class="p">,</span>
+<span class="w">  </span><span class="n">last_heartbeat</span><span class="w">  </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_runners_available</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">runners</span><span class="p">(</span><span class="n">os</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">)</span>
+<span class="w">  </span><span class="k">WHERE</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;idle&#39;</span><span class="p">;</span>
+</code></pre></div>
+
+<h2>Deep Dive: Job Execution Lifecycle</h2>
+<div class="highlight"><pre><span></span><code>1. Event received (git push)
+        │
+        ▼
+2. Match workflow triggers
+   (push to &#39;main&#39; branch matches &quot;on: push: branches: [main]&quot;)
+        │
+        ▼
+3. Parse YAML, build job DAG
+        │
+   ┌────┴──────────────────────────┐
+   │  Job: lint      Job: test     │
+   │  (no deps)      (no deps)     │
+   │      \              /         │
+   │       \            /          │
+   │        ▼          ▼           │
+   │      Job: build               │
+   │      (needs: [lint, test])    │
+   │            │                  │
+   │            ▼                  │
+   │      Job: deploy              │
+   │      (needs: [build])         │
+   └───────────────────────────────┘
+        │
+        ▼
+4. Enqueue jobs with no dependencies (lint, test)
+        │
+        ▼
+5. Runner Allocator:
+   - Find idle runner matching labels + OS
+   - If none: provision new VM/container (&lt; 30s)
+   - Assign job to runner
+        │
+        ▼
+6. Runner executes:
+   a. Clone repository at commit SHA
+   b. Restore cache (node_modules)
+   c. Execute steps sequentially
+   d. Stream logs to log service
+   e. Upload artifacts
+   f. Report status
+        │
+        ▼
+7. On job completion:
+   - Check DAG: are all dependencies of &#39;build&#39; complete?
+   - If yes, enqueue &#39;build&#39;
+   - If any dependency failed, skip dependent jobs
+        │
+        ▼
+8. On run completion:
+   - Update run status
+   - Post status check to GitHub
+   - Send notifications
+   - Clean up runner (destroy VM or reset container)
+</code></pre></div>
+
+<h2>Scaling Strategies</h2>
+<ul>
+<li><strong>Autoscaling runner pools</strong>: Scale VM pools based on queue depth. Use warm pools of pre-provisioned VMs for fast startup.</li>
+<li><strong>Multi-region</strong>: Deploy runner pools in multiple cloud regions. Route jobs to the nearest region for lower latency on git clones.</li>
+<li><strong>Cache layers</strong>: Use a distributed cache (S3 + local SSD) for dependency caches. Cache docker images in a regional registry.</li>
+<li><strong>Log aggregation</strong>: Stream logs to S3 via Kinesis/Kafka. Serve recent logs from memory, older logs from S3.</li>
+<li><strong>Database sharding</strong>: Shard workflow_runs and jobs tables by repository to distribute write load.</li>
+<li><strong>Prioritization</strong>: Paid plans get priority in the queue. Use a multi-level priority queue.</li>
+</ul>
+<h2>Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Pros</th>
+<th>Cons</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ephemeral VMs per job</td>
+<td>Perfect isolation, clean state</td>
+<td>Slow startup, expensive</td>
+</tr>
+<tr>
+<td>Container-based runners</td>
+<td>Fast startup (seconds)</td>
+<td>Weaker isolation, shared kernel</td>
+</tr>
+<tr>
+<td>Central job queue</td>
+<td>Simple, fair scheduling</td>
+<td>Single point of contention at scale</td>
+</tr>
+<tr>
+<td>YAML-based workflow config</td>
+<td>Version controlled, familiar</td>
+<td>Complex syntax, hard to debug</td>
+</tr>
+<tr>
+<td>Pull-based runner architecture</td>
+<td>Runners behind firewalls work</td>
+<td>Polling overhead, slight latency</td>
+</tr>
+<tr>
+<td>Pre-provisioned warm pool</td>
+<td>Fast job start (&lt;10s)</td>
+<td>Idle cost, resource waste</td>
+</tr>
+</tbody>
+</table>
+<h2>Security Considerations</h2>
+<ul>
+<li>Secrets are encrypted at rest with per-repository KMS keys</li>
+<li>Secrets are masked in log output (pattern match and redact)</li>
+<li>Fork PRs run with read-only permissions (no access to secrets)</li>
+<li>Runners are single-use (destroyed after each job) to prevent cross-job data leakage</li>
+<li>Network isolation between jobs using firewall rules</li>
+<li>Rate limiting on API and webhook endpoints</li>
+</ul>
+<h2>Summary</h2>
+<p>A CI/CD pipeline like GitHub Actions is an event-driven system with a workflow engine at its core. Events trigger workflow parsing and job DAG construction, a scheduler matches jobs to runners from an autoscaling pool, runners execute steps in isolated environments while streaming logs, and the system orchestrates job dependencies to completion. The key design challenges are fast job startup (warm VM pools), reliable log streaming (event-driven architecture), secure secrets management, and scaling to handle hundreds of thousands of concurrent jobs.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Simple Workflow Engine</div>
+                    <div class="exercise-desc"><p>Create a Node.js workflow engine that parses a YAML workflow file, builds a job dependency DAG, and executes jobs in the correct order. Jobs with no dependencies run in parallel. If a job fails, dependent jobs are skipped. Each job runs a shell command and reports success/failure.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the 'yaml' npm package to parse YAML. Build an adjacency list for the DAG. Use a queue initialized with jobs that have no dependencies. When a job completes, check if its dependents now have all dependencies satisfied.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Real-Time Log Streaming</div>
+                    <div class="exercise-desc"><p>Build a log streaming system using Server-Sent Events (SSE). A 'runner' process writes log lines to a Redis Pub/Sub channel. A 'server' process subscribes to the channel and streams lines to connected HTTP clients. Support multiple concurrent viewers of the same job's logs.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use ioredis for Redis pub/sub. Create an SSE endpoint that subscribes to a Redis channel named after the job ID. Use res.write('data: ...\n\n') for SSE format. Handle client disconnect to clean up subscriptions.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build a Job Scheduler with Priority Queue</div>
+                    <div class="exercise-desc"><p>Implement a multi-level priority job scheduler. Jobs from paid plans get priority 1, free plans get priority 3, and queued time is used as a tiebreaker (FIFO within same priority). Match jobs to runners based on OS and label requirements.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a min-heap or sorted array as the priority queue. The priority key is (plan_priority, queue_timestamp). When a runner becomes available, pop the highest-priority matching job from the queue.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Job startup time exceeds 2 minutes during peak hours</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Users see jobs stuck in 'queued' status for minutes. Queue depth spikes during peak hours. User complaints about slow CI.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The runner pool is exhausted and new VMs must be provisioned on-demand. Cloud provider VM provisioning takes 60-120 seconds. The autoscaler reacts too slowly to sudden spikes.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Maintain a warm pool of pre-provisioned VMs (10-20% above current demand). Implement predictive autoscaling based on historical patterns (e.g., spike at 9 AM PST on weekdays). Use container-based runners for fast startup when VMs are unavailable. Offer a 'fast start' option using shared runners that are always available.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Log streaming disconnects and shows incomplete output</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Log viewer shows partial output. Users must refresh to see new logs. Log gaps during long-running steps like builds.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> SSE connections are dropped by load balancer idle timeouts (60 seconds). Long-running steps produce no output for extended periods, causing the connection to be considered idle.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Send SSE heartbeat comments every 15 seconds to keep connections alive. Implement reconnection logic on the client using the Last-Event-ID header. Store all log lines in durable storage (S3) so clients can fetch missed lines on reconnect. Use a log buffer that replays from the last seen line ID.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Secrets are accidentally exposed in log output</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> A workflow step echoes environment variables or a debug command prints the process environment, including injected secrets.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement a log redaction layer that pattern-matches all known secret values and replaces them with '***'. Apply redaction at the runner level before logs leave the machine. Additionally, warn users when a step's exit code indicates potential secret exposure. Never pass secrets as command-line arguments (visible in /proc).
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://docs.github.com/en/actions" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">GitHub Actions Documentation</div>
+                    
+                    <div class="resource-note">Official documentation covering workflow syntax, runners, and best practices</div>
+                    
+                </a>
+                
+                <a href="https://github.blog/2022-05-19-behind-the-scenes-github-actions/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">How GitHub Actions Runs Your Workflows</div>
+                    
+                    <div class="resource-note">Behind-the-scenes look at the architecture of GitHub Actions</div>
+                    
+                </a>
+                
+                <a href="https://continuousdelivery.com/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Continuous Delivery (Jez Humble & David Farley)</div>
+                    
+                    <div class="resource-note">The foundational book on CI/CD practices and pipeline design</div>
+                    
+                </a>
+                
+                <a href="https://firecracker-microvm.github.io/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Firecracker MicroVMs</div>
+                    
+                    <div class="resource-note">The lightweight VM technology used by AWS Lambda and similar CI/CD systems for fast, secure isolation</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.6.4-js.html" class="btn">&larr; Design a Recommendation Engine</a>
+            
+            
+            <a href="/backend-learning/lesson/9.6.6-js.html" class="btn">Design a Multi-Tenant SaaS Platform &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

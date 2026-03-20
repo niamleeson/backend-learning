@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Ticket Booking System (Ticketmaster) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            E-Commerce & Marketplace
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.3.4</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a Ticket Booking System (Ticketmaster)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of buying concert tickets like entering a physical box office that only has 5 windows. When a hot show goes on sale, thousands of people show up. Instead of a mob rushing the windows, security sets up a line (the virtual queue). They hand out numbered tickets so everyone knows their position. Every few minutes, a batch of people is let into the lobby (admitted). In the lobby, you have 15 minutes to pick your seats at a kiosk (the hold). The kiosk puts a sticky note on your chosen seats so nobody else can grab them. If you do not pay within 15 minutes, the sticky notes are removed and those seats go back to available. This is exactly how the system works: the queue shapes traffic, holds are temporary claims, and the final purchase is the only permanent action.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Ticket Booking System (Ticketmaster)</h1>
+<h2>Introduction</h2>
+<p>Designing a ticket booking system like Ticketmaster is a fascinating system design problem because it combines the challenges of e-commerce with extreme concurrency and time pressure. When a popular concert goes on sale, millions of users compete for a limited number of tickets within seconds. Unlike hotel rooms where availability is spread across dates, event tickets create massive thundering herd problems at a single point in time. The system must handle these spikes gracefully, prevent double-selling, and provide a fair user experience.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li><strong>Event Browsing</strong>: Browse/search events by location, date, category, artist</li>
+<li><strong>Venue &amp; Seating</strong>: Display venue maps with seat sections, view from seat</li>
+<li><strong>Ticket Selection</strong>: Select specific seats or best-available in a section</li>
+<li><strong>Temporary Hold</strong>: Reserve selected tickets for a limited time (e.g., 10 minutes)</li>
+<li><strong>Checkout</strong>: Purchase held tickets with payment processing</li>
+<li><strong>Queue System</strong>: Virtual waiting room for high-demand events</li>
+<li><strong>Ticket Transfer</strong>: Transfer/resell tickets to other users</li>
+<li><strong>QR Codes</strong>: Generate unique QR codes for entry</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li><strong>Scalability</strong>: Handle 10M+ concurrent users for a single popular event</li>
+<li><strong>Latency</strong>: Seat map load &lt; 500ms, seat selection &lt; 200ms</li>
+<li><strong>Consistency</strong>: Absolutely no double-selling of the same seat</li>
+<li><strong>Fairness</strong>: Users who arrive first should get tickets first (queue system)</li>
+<li><strong>Availability</strong>: 99.99% uptime, especially during on-sale events</li>
+</ul>
+<h2>Step 2: Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Assumptions:
+- 500K events/year, average capacity 5,000 seats
+- Top 1% of events (5,000) generate 90% of traffic
+- Popular event on-sale: 10M users in queue, 50K seats
+- On-sale window: first 5 minutes see 80% of traffic
+- Normal operations: 1M daily active users
+
+Peak Traffic (popular event on-sale):
+- Concurrent users: 10M
+- Queue check requests: 10M * 1 req/2sec = 5M QPS
+- Seat map requests: 500K/min (users entering from queue)
+- Seat hold requests: 50K in 5 min = ~170 TPS
+- Checkout: 50K in 10 min = ~83 TPS
+
+Normal Traffic:
+- Search/browse: 1M * 5 pages = 5M/day = ~58 QPS
+- Ticket purchases: 100K/day = ~1.2 TPS
+
+Storage:
+- Events: 500K * 10KB = ~5GB
+- Venue/seats: 10K venues * 50K seats * 200 bytes = ~100GB
+- Tickets: 500K events * 5K seats * 500 bytes = ~1.25TB/year
+- Orders: 100K/day * 2KB * 365 = ~73GB/year
+</code></pre></div>
+
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────┐     ┌──────────────┐     ┌──────────────┐
+│  Client   │────&gt;│   CDN        │────&gt;│  API Gateway  │
+│ (Web/App) │     │ (static,     │     │ (auth, rate   │
+└──────────┘     │  seat maps)  │     │  limit)       │
+                 └──────────────┘     └──────┬───────┘
+                                             │
+                          ┌──────────────────┼──────────────────┐
+                          │                  │                  │
+                   ┌──────┴──────┐    ┌──────┴──────┐    ┌─────┴──────┐
+                   │   Queue     │    │   Booking   │    │   Event    │
+                   │   Service   │    │   Service   │    │   Service  │
+                   │             │    │             │    │            │
+                   └──────┬──────┘    └──────┬──────┘    └─────┬──────┘
+                          │                  │                 │
+                   ┌──────┴──────┐    ┌──────┴──────┐    ┌────┴───────┐
+                   │   Redis     │    │  Inventory  │    │  Event DB  │
+                   │  (queue +   │    │  Service    │    │ (Postgres) │
+                   │   state)    │    │             │    └────────────┘
+                   └─────────────┘    └──────┬──────┘
+                                             │
+                                      ┌──────┴──────┐
+                                      │   Ticket    │
+                                      │    DB       │
+                                      │ (Postgres)  │
+                                      └──────┬──────┘
+                                             │
+                                      ┌──────┴──────┐
+                                      │   Payment   │
+                                      │   Service   │
+                                      └──────┬──────┘
+                                             │
+                                      ┌──────┴──────┐
+                                      │Notification │
+                                      │  Service    │
+                                      └─────────────┘
+
+                   ┌──────────────────────────────────┐
+                   │     Seat Map Service             │
+                   │  (pre-rendered SVGs + live       │
+                   │   availability overlay via WS)   │
+                   └──────────────────────────────────┘
+</code></pre></div>
+
+<h2>Step 4: API Design</h2>
+<h3>Virtual Queue System</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;node:crypto&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// POST /api/events/:eventId/queue/join</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/events/:eventId/queue/join&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">eventId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Check if event is in on-sale mode</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">event</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">eventService</span><span class="p">.</span><span class="nx">getEvent</span><span class="p">(</span><span class="nx">eventId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">event</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;ON_SALE&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Event is not on sale&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Check if user is already in queue</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">zscore</span><span class="p">(</span><span class="sb">`queue:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">queueToken</span><span class="o">:</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">hget</span><span class="p">(</span><span class="sb">`queue:tokens:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">position</span><span class="o">:</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getQueuePosition</span><span class="p">(</span><span class="nx">eventId</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">estimatedWait</span><span class="o">:</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getEstimatedWait</span><span class="p">(</span><span class="nx">eventId</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">),</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Add to sorted set with timestamp as score</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">queueToken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomUUID</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">multi</span><span class="p">()</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">zadd</span><span class="p">(</span><span class="sb">`queue:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">hset</span><span class="p">(</span><span class="sb">`queue:tokens:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">queueToken</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">position</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getQueuePosition</span><span class="p">(</span><span class="nx">eventId</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">queueToken</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">position</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">estimatedWait</span><span class="o">:</span><span class="w"> </span><span class="nx">position</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span><span class="w"> </span><span class="c1">// ~2 seconds per person</span>
+<span class="w">    </span><span class="nx">totalInQueue</span><span class="o">:</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">zcard</span><span class="p">(</span><span class="sb">`queue:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">),</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// GET /api/events/:eventId/queue/status</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/events/:eventId/queue/status&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">eventId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">position</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getQueuePosition</span><span class="p">(</span><span class="nx">eventId</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">position</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Not in queue&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Check if user has been admitted</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">admitted</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">sismember</span><span class="p">(</span><span class="sb">`queue:admitted:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">position</span><span class="o">:</span><span class="w"> </span><span class="nx">admitted</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mf">0</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="nx">position</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">admitted</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">estimatedWait</span><span class="o">:</span><span class="w"> </span><span class="nx">admitted</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mf">0</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="nx">position</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">ticketsRemaining</span><span class="o">:</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getTicketsRemaining</span><span class="p">(</span><span class="nx">eventId</span><span class="p">),</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">getQueuePosition</span><span class="p">(</span><span class="nx">eventId</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">rank</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">zrank</span><span class="p">(</span><span class="sb">`queue:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">rank</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">rank</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Queue processor: admits users in batches</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">processQueue</span><span class="p">(</span><span class="nx">eventId</span><span class="p">,</span><span class="w"> </span><span class="nx">batchSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">100</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">ticketsRemaining</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getTicketsRemaining</span><span class="p">(</span><span class="nx">eventId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">ticketsRemaining</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Pop next batch from queue</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">nextUsers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">zrange</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`queue:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">batchSize</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">nextUsers</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Mark as admitted</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">nextUsers</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">sadd</span><span class="p">(</span><span class="sb">`queue:admitted:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">zrem</span><span class="p">(</span><span class="sb">`queue:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// Set admission expiry (15 minutes to complete purchase)</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">nextUsers</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">setex</span><span class="p">(</span><span class="sb">`queue:admission:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="mf">900</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;1&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Seat Selection &amp; Hold</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/events/:eventId/tickets/hold</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/events/:eventId/tickets/hold&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">eventId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">seatIds</span><span class="p">,</span><span class="w"> </span><span class="nx">sectionId</span><span class="p">,</span><span class="w"> </span><span class="nx">quantity</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Verify user is admitted from queue</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">admitted</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">sismember</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`queue:admitted:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">admitted</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Not admitted from queue&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Release any existing holds by this user</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">releaseUserHolds</span><span class="p">(</span><span class="nx">eventId</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">selectedSeats</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">seatIds</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">seatIds</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Specific seat selection</span>
+<span class="w">    </span><span class="nx">selectedSeats</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">seatIds</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Best available in section</span>
+<span class="w">    </span><span class="nx">selectedSeats</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">findBestAvailable</span><span class="p">(</span><span class="nx">eventId</span><span class="p">,</span><span class="w"> </span><span class="nx">sectionId</span><span class="p">,</span><span class="w"> </span><span class="nx">quantity</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">selectedSeats</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">quantity</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">409</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Not enough seats available&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Attempt atomic hold using Redis</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">holdId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomUUID</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">holdExpiry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">600</span><span class="p">;</span><span class="w"> </span><span class="c1">// 10 minutes</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">seatId</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">selectedSeats</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// SET NX ensures only one user can hold a seat</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">held</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span>
+<span class="w">      </span><span class="sb">`hold:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">seatId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">      </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">holdId</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">seatId</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">      </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">holdExpiry</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;NX&#39;</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">    </span><span class="nx">results</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span><span class="w"> </span><span class="nx">seatId</span><span class="p">,</span><span class="w"> </span><span class="nx">held</span><span class="o">:</span><span class="w"> </span><span class="nx">held</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;OK&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">successfulHolds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">held</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">failedHolds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="o">!</span><span class="nx">r</span><span class="p">.</span><span class="nx">held</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// If not all seats could be held, release the ones that were</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">failedHolds</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">seatIds</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">hold</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">successfulHolds</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">del</span><span class="p">(</span><span class="sb">`hold:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">hold</span><span class="p">.</span><span class="nx">seatId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">409</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Some seats are no longer available&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">unavailableSeats</span><span class="o">:</span><span class="w"> </span><span class="nx">failedHolds</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">h</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">h</span><span class="p">.</span><span class="nx">seatId</span><span class="p">),</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Store hold reference for user</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">setex</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`user:hold:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">holdExpiry</span><span class="p">,</span>
+<span class="w">    </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">holdId</span><span class="p">,</span><span class="w"> </span><span class="nx">seatIds</span><span class="o">:</span><span class="w"> </span><span class="nx">successfulHolds</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">h</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">h</span><span class="p">.</span><span class="nx">seatId</span><span class="p">)</span><span class="w"> </span><span class="p">})</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">holdId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">seats</span><span class="o">:</span><span class="w"> </span><span class="nx">successfulHolds</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">h</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">h</span><span class="p">.</span><span class="nx">seatId</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">expiresIn</span><span class="o">:</span><span class="w"> </span><span class="nx">holdExpiry</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">expiresAt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">holdExpiry</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1000</span><span class="p">).</span><span class="nx">toISOString</span><span class="p">(),</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">findBestAvailable</span><span class="p">(</span><span class="nx">eventId</span><span class="p">,</span><span class="w"> </span><span class="nx">sectionId</span><span class="p">,</span><span class="w"> </span><span class="nx">quantity</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Get all seats in section that are not held or sold</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">allSeats</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">seat</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">eventId</span><span class="p">,</span><span class="w"> </span><span class="nx">sectionId</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;AVAILABLE&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">orderBy</span><span class="o">:</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nx">row</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;asc&#39;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">number</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;asc&#39;</span><span class="w"> </span><span class="p">}],</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Filter out seats with active holds in Redis</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">available</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">seat</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">allSeats</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">held</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">exists</span><span class="p">(</span><span class="sb">`hold:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">seat</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">held</span><span class="p">)</span><span class="w"> </span><span class="nx">available</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">seat</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">available</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">quantity</span><span class="p">)</span><span class="w"> </span><span class="k">break</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">available</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Checkout</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/events/:eventId/tickets/purchase</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/events/:eventId/tickets/purchase&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">authenticate</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">eventId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">holdId</span><span class="p">,</span><span class="w"> </span><span class="nx">paymentMethodId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 1. Verify the hold exists and belongs to this user</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">holdData</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`user:hold:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">holdData</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">410</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Hold expired. Please select seats again.&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">hold</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">holdData</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">hold</span><span class="p">.</span><span class="nx">holdId</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">holdId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid hold&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 2. Verify all seats are still held by this user</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">seatId</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">hold</span><span class="p">.</span><span class="nx">seatIds</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">seatHold</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`hold:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">seatId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">seatHold</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">410</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Hold expired for some seats&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">parsed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">seatHold</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">parsed</span><span class="p">.</span><span class="nx">userId</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">409</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Seat hold conflict&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 3. Get pricing</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">seats</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">seat</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="ow">in</span><span class="o">:</span><span class="w"> </span><span class="nx">hold</span><span class="p">.</span><span class="nx">seatIds</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">include</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">section</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">seats</span><span class="p">.</span><span class="nx">reduce</span><span class="p">((</span><span class="nx">sum</span><span class="p">,</span><span class="w"> </span><span class="nx">s</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">sum</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">s</span><span class="p">.</span><span class="nx">section</span><span class="p">.</span><span class="nx">price</span><span class="p">),</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">serviceFee</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">0.15</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">grandTotal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">totalPrice</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">serviceFee</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 4. Process payment</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">payment</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">paymentService</span><span class="p">.</span><span class="nx">charge</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="nx">grandTotal</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">currency</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;USD&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">paymentMethodId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">metadata</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">eventId</span><span class="p">,</span><span class="w"> </span><span class="nx">seatIds</span><span class="o">:</span><span class="w"> </span><span class="nx">hold</span><span class="p">.</span><span class="nx">seatIds</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">payment</span><span class="p">.</span><span class="nx">success</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">402</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Payment failed&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">reason</span><span class="o">:</span><span class="w"> </span><span class="nx">payment</span><span class="p">.</span><span class="nx">reason</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 5. Create order and tickets in database</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$transaction</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">tx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Mark seats as sold</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">seat</span><span class="p">.</span><span class="nx">updateMany</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="ow">in</span><span class="o">:</span><span class="w"> </span><span class="nx">hold</span><span class="p">.</span><span class="nx">seatIds</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;SOLD&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">soldAt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">()</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// Create order</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">order</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">eventId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">totalPrice</span><span class="o">:</span><span class="w"> </span><span class="nx">grandTotal</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">paymentId</span><span class="o">:</span><span class="w"> </span><span class="nx">payment</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;CONFIRMED&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">tickets</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">create</span><span class="o">:</span><span class="w"> </span><span class="nx">seats</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">seat</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">            </span><span class="nx">seatId</span><span class="o">:</span><span class="w"> </span><span class="nx">seat</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">barcode</span><span class="o">:</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomUUID</span><span class="p">(),</span>
+<span class="w">            </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;VALID&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="p">})),</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">include</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">tickets</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">include</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">seat</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">order</span><span class="p">;</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// 6. Clean up holds</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">seatId</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">hold</span><span class="p">.</span><span class="nx">seatIds</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">del</span><span class="p">(</span><span class="sb">`hold:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">seatId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">del</span><span class="p">(</span><span class="sb">`user:hold:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// 7. Send confirmation</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">notificationQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;ticket-confirmation&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">orderId</span><span class="o">:</span><span class="w"> </span><span class="nx">order</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">order</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 5: Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Events</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">events</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">venue_id</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">venues</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">name</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">500</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">description</span><span class="w">   </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">artist</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">300</span><span class="p">),</span>
+<span class="w">    </span><span class="n">category</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">),</span><span class="w">        </span><span class="c1">-- CONCERT, SPORTS, THEATER, etc.</span>
+<span class="w">    </span><span class="n">event_date</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">on_sale_date</span><span class="w">  </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">status</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;UPCOMING&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">-- UPCOMING, ON_SALE, SOLD_OUT, COMPLETED, CANCELLED</span>
+<span class="w">    </span><span class="n">total_seats</span><span class="w">   </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">sold_seats</span><span class="w">    </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Venues</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">venues</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">name</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">300</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">city</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">),</span>
+<span class="w">    </span><span class="n">country</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">),</span>
+<span class="w">    </span><span class="n">capacity</span><span class="w">      </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">seat_map_url</span><span class="w">  </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">500</span><span class="p">)</span><span class="w">       </span><span class="c1">-- SVG seat map</span>
+<span class="p">);</span>
+
+<span class="c1">-- Sections (e.g., &quot;Orchestra&quot;, &quot;Mezzanine&quot;, &quot;General Admission&quot;)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">sections</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">event_id</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">events</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">name</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">price</span><span class="w">         </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">capacity</span><span class="w">      </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span>
+<span class="p">);</span>
+
+<span class="c1">-- Seats (pre-generated for each event)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">seats</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">event_id</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">events</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">section_id</span><span class="w">    </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">sections</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="k">row</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">5</span><span class="p">),</span>
+<span class="w">    </span><span class="nb">number</span><span class="w">        </span><span class="nb">INTEGER</span><span class="p">,</span>
+<span class="w">    </span><span class="n">status</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;AVAILABLE&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">-- AVAILABLE, HELD, SOLD, BLOCKED</span>
+<span class="w">    </span><span class="n">sold_at</span><span class="w">       </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">    </span><span class="k">UNIQUE</span><span class="p">(</span><span class="n">event_id</span><span class="p">,</span><span class="w"> </span><span class="n">section_id</span><span class="p">,</span><span class="w"> </span><span class="k">row</span><span class="p">,</span><span class="w"> </span><span class="nb">number</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_seats_available</span>
+<span class="w">    </span><span class="k">ON</span><span class="w"> </span><span class="n">seats</span><span class="p">(</span><span class="n">event_id</span><span class="p">,</span><span class="w"> </span><span class="n">section_id</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">)</span>
+<span class="w">    </span><span class="k">WHERE</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;AVAILABLE&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Orders</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">user_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">event_id</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">events</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">total_price</span><span class="w">   </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">12</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">payment_id</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">),</span>
+<span class="w">    </span><span class="n">status</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;CONFIRMED&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">-- CONFIRMED, REFUNDED, CANCELLED</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Tickets</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">tickets</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">order_id</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">orders</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">seat_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">seats</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">barcode</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">status</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;VALID&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">-- VALID, USED, TRANSFERRED, CANCELLED</span>
+<span class="w">    </span><span class="n">transferred_to</span><span class="w"> </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_tickets_barcode</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">tickets</span><span class="p">(</span><span class="n">barcode</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Step 6: Deep Dive - Virtual Queue</h2>
+<p>The virtual queue is the most critical component for high-demand events.</p>
+<div class="highlight"><pre><span></span><code>On-Sale Flow:
+
+1. Before on-sale time:
+   Users land on event page -&gt; redirected to waiting room
+
+2. At on-sale time:
+   All waiting users get random positions (fair lottery)
+   New arrivals join end of queue
+
+3. Queue processing:
+   Batch of N users admitted every few seconds
+   Admitted users have 15 min to select + purchase
+
+4. After purchase/timeout:
+   Slot freed, next batch admitted
+
+┌────────────────────────────────────────────────┐
+│                Virtual Queue                    │
+│                                                │
+│  Waiting Room ──&gt; Queue ──&gt; Admitted ──&gt; Shop  │
+│  (pre-sale)      (FIFO)    (15 min)    (buy)  │
+│                                                │
+│  10M users       Sorted    500 active   Seat   │
+│  waiting         by time   at a time    map +  │
+│                                         hold   │
+└────────────────────────────────────────────────┘
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// Fair queue initialization: randomize positions for users who joined before on-sale</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">initializeQueue</span><span class="p">(</span><span class="nx">eventId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">waitingRoom</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">smembers</span><span class="p">(</span><span class="sb">`waiting:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Shuffle for fairness</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">shuffled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">waitingRoom</span><span class="p">.</span><span class="nx">sort</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">random</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">0.5</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Add to sorted set with sequential scores</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">shuffled</span><span class="p">.</span><span class="nx">forEach</span><span class="p">((</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">index</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">zadd</span><span class="p">(</span><span class="sb">`queue:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">index</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// Clean up waiting room</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">del</span><span class="p">(</span><span class="sb">`waiting:</span><span class="si">${</span><span class="nx">eventId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Start queue processor</span>
+<span class="w">  </span><span class="nx">startQueueProcessor</span><span class="p">(</span><span class="nx">eventId</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">startQueueProcessor</span><span class="p">(</span><span class="nx">eventId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">interval</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">setInterval</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">remaining</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getTicketsRemaining</span><span class="p">(</span><span class="nx">eventId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">remaining</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">clearInterval</span><span class="p">(</span><span class="nx">interval</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">processQueue</span><span class="p">(</span><span class="nx">eventId</span><span class="p">,</span><span class="w"> </span><span class="mf">100</span><span class="p">);</span><span class="w"> </span><span class="c1">// admit 100 users per batch</span>
+<span class="w">  </span><span class="p">},</span><span class="w"> </span><span class="mf">3000</span><span class="p">);</span><span class="w"> </span><span class="c1">// every 3 seconds</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 7: Scaling Strategies</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────┐
+│              Scaling for On-Sale Events                │
+├──────────────────────────────────────────────────────┤
+│ CDN:           Cache seat maps, event pages, assets  │
+│                (reduces origin traffic by 90%)        │
+│                                                      │
+│ Queue Service: Redis Cluster (handles 5M QPS polls)  │
+│                Horizontally scaled stateless workers  │
+│                                                      │
+│ Booking:       Isolated per-event instances           │
+│                Auto-scale based on on-sale schedule   │
+│                                                      │
+│ Database:      Read replicas for event/venue data    │
+│                Seats table partitioned by event_id    │
+│                                                      │
+│ Holds:         Redis (fast, auto-expiring)           │
+│                Not in Postgres (too much churn)       │
+└──────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>Step 8: Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Queue fairness</td>
+<td>First-come first-served</td>
+<td>Random lottery for pre-sale</td>
+<td>Lottery for pre-sale, FIFO after</td>
+</tr>
+<tr>
+<td>Seat holds</td>
+<td>Database (durable)</td>
+<td>Redis with TTL (ephemeral)</td>
+<td>Redis (auto-expires, fast)</td>
+</tr>
+<tr>
+<td>Seat selection</td>
+<td>User picks specific seat</td>
+<td>System assigns best available</td>
+<td>Both options</td>
+</tr>
+<tr>
+<td>Inventory tracking</td>
+<td>Per-seat rows</td>
+<td>Counter per section (GA)</td>
+<td>Per-seat for reserved, counter for GA</td>
+</tr>
+<tr>
+<td>Peak handling</td>
+<td>Over-provision always</td>
+<td>Auto-scale per event</td>
+<td>Auto-scale with pre-warming</td>
+</tr>
+<tr>
+<td>Double-sell prevention</td>
+<td>DB transactions</td>
+<td>Redis SET NX</td>
+<td>Redis for holds, DB for final sale</td>
+</tr>
+</tbody>
+</table>
+<h2>Summary</h2>
+<p>A ticket booking system has two distinct modes: normal operations (low traffic, standard CRUD) and on-sale events (extreme traffic spike, thundering herd). The virtual queue absorbs the spike, admitting users in controlled batches. Redis handles the ephemeral state (queue positions, seat holds) with automatic expiration. The database handles the permanent state (orders, tickets). The key patterns are: virtual queue for traffic shaping, Redis SET NX for atomic seat holds, time-limited holds with automatic release, and database transactions for final purchase. Always separate the hot path (queue polling) from the critical path (payment processing).</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Virtual Queue</div>
+                    <div class="exercise-desc"><p>Implement a virtual queue system using Redis sorted sets. Support join, check position, and batch admission. Test with 10,000 simulated users joining the queue and being admitted in batches of 50 every 2 seconds. Track metrics: queue depth over time, average wait time, admission rate.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use ZADD with timestamp scores for ordering. Use ZRANGE + ZREM for batch admission. Use SISMEMBER for checking admission status. Run the queue processor as a setInterval loop.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Atomic Seat Hold with Redis</div>
+                    <div class="exercise-desc"><p>Build a seat hold service that uses Redis SET NX to ensure only one user can hold a seat at a time. Implement: hold acquisition (10 min TTL), hold release, hold extension, and automatic expiry. Test with 100 concurrent users trying to hold the same seat.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>redis.set(key, value, 'EX', 600, 'NX')</code> for atomic hold. Return failure immediately if NX fails. Use a Lua script if you need to atomically hold multiple seats.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Seat Map Availability Service</div>
+                    <div class="exercise-desc"><p>Create an API that returns real-time seat availability for a venue section. Combine database state (SOLD) with Redis state (HELD) to produce the current availability view. Implement a WebSocket endpoint that pushes availability updates as seats are held or released.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Query the database for sold seats, then check Redis for held seats, then merge. Use a Redis pub/sub channel to broadcast hold/release events to WebSocket subscribers.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Seat holds expiring during checkout, causing users to lose their tickets</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Users report completing payment but receiving 'seats no longer available' errors. High cart abandonment rate on the checkout page.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The 10-minute hold timer expires while the user is entering payment information or the payment processor is slow. The seats return to available and another user grabs them.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Extend the hold when checkout begins (add 5 more minutes). Show a countdown timer on the client. Use a shorter initial hold (7 min for browsing) and extend on checkout initiation. Allow the user to re-hold the same seats if they expired within the last 60 seconds.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Queue position jumps erratically or users get pushed back in the queue</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Using a Redis sorted set score based on timestamp, but clock skew between multiple application servers causes inconsistent ordering. Or the queue position is calculated incorrectly when batches are admitted.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use a single atomic counter (INCR) for position assignment instead of timestamps. Alternatively, use a centralized time source. Calculate position as ZRANK relative to the remaining queue, not absolute position.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">System crashes under load when a popular event goes on sale</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Queue polling (every 2 seconds per user) creates massive read load on Redis. Without proper rate limiting, 10M users polling creates 5M QPS. The API gateway and Redis cannot handle the load.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use longer polling intervals with jitter (2-5 seconds, randomized). Cache queue positions in local memory for 1 second. Use CDN for the waiting room page. Implement WebSocket for push-based position updates instead of client polling. Pre-warm Redis cluster before on-sale events.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://tech.ticketmaster.com/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag blog">blog</div>
+                    <div class="resource-title">Ticketmaster Tech Blog: The Wait Room</div>
+                    
+                    <div class="resource-note">Insights into how Ticketmaster handles on-sale traffic spikes with virtual queues</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/commands/set/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis SET NX Documentation</div>
+                    
+                    <div class="resource-note">The SET command with NX flag is the foundation of distributed locking used for seat holds</div>
+                    
+                </a>
+                
+                <a href="https://aws.amazon.com/solutions/case-studies/ticketmaster/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag case-study">case-study</div>
+                    <div class="resource-title">Designing for Scale: High-Traffic Event Systems</div>
+                    
+                    <div class="resource-note">AWS case study on Ticketmaster's cloud architecture for handling millions of concurrent users</div>
+                    
+                </a>
+                
+                <a href="https://dataintensive.net/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Martin Kleppmann - Designing Data-Intensive Applications (Chapter 8: Distributed Systems)</div>
+                    
+                    <div class="resource-note">Covers distributed locking, clock skew, and consistency challenges relevant to real-time booking systems</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.3.3-js.html" class="btn">&larr; Design a Hotel Booking System (Booking.com)</a>
+            
+            
+            <a href="/backend-learning/lesson/9.3.5-js.html" class="btn">Design a Food Delivery System (DoorDash) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

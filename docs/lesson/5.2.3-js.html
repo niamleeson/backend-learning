@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Subscriptions, DataLoaders, and N+1 Prevention - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-5-js.html">API Design & Architecture</a> &rsaquo;
+            GraphQL with Apollo Server
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">5.2.3</span>
+                <span>~3h</span>
+            </div>
+            <h1>Subscriptions, DataLoaders, and N+1 Prevention</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>DataLoader is like a mail carrier who waits until everyone on the street has put their letters in the mailbox, then does one trip to the post office with all the letters -- instead of making a separate trip for each letter. Subscriptions are like subscribing to a newspaper: instead of checking the newsstand every hour, the paper is delivered to your door whenever a new edition is printed.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Subscriptions, DataLoaders, and N+1 Prevention</h1>
+<p>This lesson tackles two critical GraphQL challenges: real-time data with subscriptions and the infamous N+1 query problem solved by DataLoader.</p>
+<h2>The N+1 Problem</h2>
+<p>Consider this query:</p>
+<div class="highlight"><pre><span></span><code><span class="k">query</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">posts</span><span class="p">(</span><span class="n">limit</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">title</span>
+<span class="w">    </span><span class="n">author</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">name</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Without DataLoader, this executes:</p>
+<div class="highlight"><pre><span></span><code>1 query:  SELECT * FROM posts LIMIT 10
+10 queries: SELECT * FROM users WHERE id = 1
+            SELECT * FROM users WHERE id = 2
+            SELECT * FROM users WHERE id = 1  (duplicate!)
+            SELECT * FROM users WHERE id = 3
+            ...etc
+= 11 queries total (1 + N)
+</code></pre></div>
+
+<h2>DataLoader: Batching and Caching</h2>
+<p>DataLoader collects all individual requests within a single tick of the event loop and batches them into one query.</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">DataLoader</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;dataloader&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@prisma/client&#39;</span><span class="p">;</span>
+
+<span class="c1">// Batch function: receives array of keys, returns array of results in same order</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">batchUsers</span><span class="p">(</span><span class="nx">prisma</span><span class="o">:</span><span class="w"> </span><span class="kt">PrismaClient</span><span class="p">,</span><span class="w"> </span><span class="nx">ids</span><span class="o">:</span><span class="w"> </span><span class="kt">readonly</span><span class="w"> </span><span class="kt">string</span><span class="p">[])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">users</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="ow">in</span><span class="o">:</span><span class="w"> </span><span class="p">[...</span><span class="nx">ids</span><span class="p">]</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// IMPORTANT: Return results in the SAME ORDER as the input ids</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">userMap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">(</span><span class="nx">users</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">u</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">[</span><span class="nx">u</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">u</span><span class="p">]));</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">ids</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">id</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">userMap</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">id</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="kc">null</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="c1">// Create loaders (one per request!)</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">createLoaders</span><span class="p">(</span><span class="nx">prisma</span><span class="o">:</span><span class="w"> </span><span class="kt">PrismaClient</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">userLoader</span><span class="o">:</span><span class="w"> </span><span class="kt">new</span><span class="w"> </span><span class="nx">DataLoader</span><span class="o">&lt;</span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">User</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="kc">null</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">      </span><span class="p">(</span><span class="nx">ids</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">batchUsers</span><span class="p">(</span><span class="nx">prisma</span><span class="p">,</span><span class="w"> </span><span class="nx">ids</span><span class="p">)</span>
+<span class="w">    </span><span class="p">),</span>
+
+<span class="w">    </span><span class="nx">postsByAuthorLoader</span><span class="o">:</span><span class="w"> </span><span class="kt">new</span><span class="w"> </span><span class="nx">DataLoader</span><span class="o">&lt;</span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">Post</span><span class="p">[]</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">      </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">authorIds</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">posts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">          </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">authorId</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="ow">in</span><span class="o">:</span><span class="w"> </span><span class="p">[...</span><span class="nx">authorIds</span><span class="p">]</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">grouped</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="o">&lt;</span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">Post</span><span class="p">[]</span><span class="o">&gt;</span><span class="p">();</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">posts</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">grouped</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">post</span><span class="p">.</span><span class="nx">authorId</span><span class="p">))</span><span class="w"> </span><span class="nx">grouped</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">post</span><span class="p">.</span><span class="nx">authorId</span><span class="p">,</span><span class="w"> </span><span class="p">[]);</span>
+<span class="w">          </span><span class="nx">grouped</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">post</span><span class="p">.</span><span class="nx">authorId</span><span class="p">)</span><span class="o">!</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">post</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">authorIds</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">id</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">grouped</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">id</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">[]);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">),</span>
+
+<span class="w">    </span><span class="nx">commentsByPostLoader</span><span class="o">:</span><span class="w"> </span><span class="kt">new</span><span class="w"> </span><span class="nx">DataLoader</span><span class="o">&lt;</span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">Comment</span><span class="p">[]</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">      </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">postIds</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">comments</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">comment</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">          </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">postId</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="ow">in</span><span class="o">:</span><span class="w"> </span><span class="p">[...</span><span class="nx">postIds</span><span class="p">]</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">grouped</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="o">&lt;</span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">Comment</span><span class="p">[]</span><span class="o">&gt;</span><span class="p">();</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">comment</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">comments</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">grouped</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">comment</span><span class="p">.</span><span class="nx">postId</span><span class="p">))</span><span class="w"> </span><span class="nx">grouped</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">comment</span><span class="p">.</span><span class="nx">postId</span><span class="p">,</span><span class="w"> </span><span class="p">[]);</span>
+<span class="w">          </span><span class="nx">grouped</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">comment</span><span class="p">.</span><span class="nx">postId</span><span class="p">)</span><span class="o">!</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">comment</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">postIds</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">id</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">grouped</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">id</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">[]);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">),</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Integrating DataLoader with Context</h3>
+<div class="highlight"><pre><span></span><code><span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span>
+<span class="w">  </span><span class="s1">&#39;/graphql&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">express</span><span class="p">.</span><span class="nx">json</span><span class="p">(),</span>
+<span class="w">  </span><span class="nx">expressMiddleware</span><span class="p">(</span><span class="nx">server</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="kt">async</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Create NEW loaders for each request (caching is per-request)</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">extractUserId</span><span class="p">(</span><span class="nx">req</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">prisma</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">loaders</span><span class="o">:</span><span class="w"> </span><span class="kt">createLoaders</span><span class="p">(</span><span class="nx">prisma</span><span class="p">),</span>
+<span class="w">      </span><span class="p">};</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">})</span>
+<span class="p">);</span>
+
+<span class="c1">// Use loaders in resolvers</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">resolvers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">Post</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">author</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">post</span><span class="p">,</span><span class="w"> </span><span class="nx">_args</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">loaders</span><span class="p">.</span><span class="nx">userLoader</span><span class="p">.</span><span class="nx">load</span><span class="p">(</span><span class="nx">post</span><span class="p">.</span><span class="nx">authorId</span><span class="p">);</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">comments</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">post</span><span class="p">,</span><span class="w"> </span><span class="nx">_args</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">loaders</span><span class="p">.</span><span class="nx">commentsByPostLoader</span><span class="p">.</span><span class="nx">load</span><span class="p">(</span><span class="nx">post</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">User</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">posts</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">user</span><span class="p">,</span><span class="w"> </span><span class="nx">_args</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">loaders</span><span class="p">.</span><span class="nx">postsByAuthorLoader</span><span class="p">.</span><span class="nx">load</span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">};</span>
+</code></pre></div>
+
+<p>Now the same query executes:</p>
+<div class="highlight"><pre><span></span><code>1 query: SELECT * FROM posts LIMIT 10
+1 query: SELECT * FROM users WHERE id IN (1, 2, 3)  -- batched &amp; deduplicated!
+= 2 queries total
+</code></pre></div>
+
+<h3>DataLoader Execution Flow</h3>
+<div class="highlight"><pre><span></span><code>Tick 1: Resolve post[0].author -&gt; loader.load(&#39;user-1&#39;)
+         Resolve post[1].author -&gt; loader.load(&#39;user-2&#39;)
+         Resolve post[2].author -&gt; loader.load(&#39;user-1&#39;)  // cached!
+         ...all 10 posts queue loads
+
+Tick 2: DataLoader executes batch function
+         batchUsers([&#39;user-1&#39;, &#39;user-2&#39;, &#39;user-3&#39;])
+         One SQL query, results distributed to all waiting resolvers
+</code></pre></div>
+
+<h2>GraphQL Subscriptions</h2>
+<p>Subscriptions enable real-time, server-pushed updates over WebSocket connections.</p>
+<div class="highlight"><pre><span></span><code><span class="k">type</span><span class="w"> </span><span class="err">Subscription</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nl">postCreated</span><span class="p">:</span><span class="w"> </span><span class="n">Post</span><span class="err">!</span>
+<span class="w">  </span><span class="n">commentAdded</span><span class="p">(</span><span class="n">postId</span><span class="p">:</span><span class="w"> </span><span class="no">ID</span><span class="err">!</span><span class="p">)</span><span class="err">:</span><span class="w"> </span><span class="n">Comment</span><span class="err">!</span>
+<span class="w">  </span><span class="n">userStatusChanged</span><span class="p">(</span><span class="n">userId</span><span class="p">:</span><span class="w"> </span><span class="no">ID</span><span class="err">!</span><span class="p">)</span><span class="err">:</span><span class="w"> </span><span class="n">UserStatus</span><span class="err">!</span>
+<span class="p">}</span>
+
+<span class="k">type</span><span class="w"> </span><span class="err">UserStatus</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nl">userId</span><span class="p">:</span><span class="w"> </span><span class="n">ID</span><span class="err">!</span>
+<span class="w">  </span><span class="nl">online</span><span class="p">:</span><span class="w"> </span><span class="n">Boolean</span><span class="err">!</span>
+<span class="w">  </span><span class="nl">lastSeen</span><span class="p">:</span><span class="w"> </span><span class="n">DateTime</span><span class="err">!</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Setting Up Subscriptions with graphql-ws</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ApolloServer</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@apollo/server&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">expressMiddleware</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@apollo/server/express4&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">createServer</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;http&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">WebSocketServer</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ws&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">useServer</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;graphql-ws/lib/use/ws&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">makeExecutableSchema</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@graphql-tools/schema&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PubSub</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;graphql-subscriptions&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">pubsub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PubSub</span><span class="p">();</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">schema</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">makeExecutableSchema</span><span class="p">({</span><span class="w"> </span><span class="nx">typeDefs</span><span class="p">,</span><span class="w"> </span><span class="nx">resolvers</span><span class="w"> </span><span class="p">});</span>
+
+<span class="c1">// HTTP server for queries and mutations</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">httpServer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">createServer</span><span class="p">(</span><span class="nx">app</span><span class="p">);</span>
+
+<span class="c1">// WebSocket server for subscriptions</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">wsServer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebSocketServer</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">server</span><span class="o">:</span><span class="w"> </span><span class="kt">httpServer</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">path</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;/graphql&#39;</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">wsServerCleanup</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">useServer</span><span class="p">(</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">schema</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="kt">async</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Authenticate WebSocket connections</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">connectionParams</span><span class="o">?</span><span class="p">.</span><span class="nx">authorization</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="kt">string</span><span class="p">;</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">token</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">verifyToken</span><span class="p">(</span><span class="nx">token</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">prisma</span><span class="p">,</span><span class="w"> </span><span class="nx">loaders</span><span class="o">:</span><span class="w"> </span><span class="kt">createLoaders</span><span class="p">(</span><span class="nx">prisma</span><span class="p">)</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">onConnect</span><span class="o">:</span><span class="w"> </span><span class="kt">async</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Client connected&#39;</span><span class="p">);</span>
+<span class="w">      </span><span class="c1">// Return false to reject the connection</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">onDisconnect</span><span class="o">:</span><span class="w"> </span><span class="kt">async</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Client disconnected&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">wsServer</span>
+<span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">ApolloServer</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">schema</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">plugins</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">async</span><span class="w"> </span><span class="nx">serverWillStart</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">async</span><span class="w"> </span><span class="nx">drainServer</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">await</span><span class="w"> </span><span class="nx">wsServerCleanup</span><span class="p">.</span><span class="nx">dispose</span><span class="p">();</span>
+<span class="w">          </span><span class="p">},</span>
+<span class="w">        </span><span class="p">};</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="p">});</span>
+
+<span class="k">await</span><span class="w"> </span><span class="nx">server</span><span class="p">.</span><span class="nx">start</span><span class="p">();</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="s1">&#39;/graphql&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">json</span><span class="p">(),</span><span class="w"> </span><span class="nx">expressMiddleware</span><span class="p">(</span><span class="nx">server</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="kt">async</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="cm">/* ... */</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">}));</span>
+<span class="nx">httpServer</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="mf">4000</span><span class="p">);</span>
+</code></pre></div>
+
+<h3>Subscription Resolvers with PubSub</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">EVENTS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">POST_CREATED</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST_CREATED&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">COMMENT_ADDED</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;COMMENT_ADDED&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">USER_STATUS_CHANGED</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;USER_STATUS_CHANGED&#39;</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">resolvers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">Subscription</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">postCreated</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">subscribe</span><span class="o">:</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">pubsub</span><span class="p">.</span><span class="nx">asyncIterableIterator</span><span class="p">([</span><span class="nx">EVENTS</span><span class="p">.</span><span class="nx">POST_CREATED</span><span class="p">]),</span>
+<span class="w">    </span><span class="p">},</span>
+
+<span class="w">    </span><span class="nx">commentAdded</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">subscribe</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">_parent</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Filter: only get comments for a specific post</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">pubsub</span><span class="p">.</span><span class="nx">asyncIterableIterator</span><span class="p">([</span><span class="sb">`</span><span class="si">${</span><span class="nx">EVENTS</span><span class="p">.</span><span class="nx">COMMENT_ADDED</span><span class="si">}</span><span class="sb">.</span><span class="si">${</span><span class="nx">args</span><span class="p">.</span><span class="nx">postId</span><span class="si">}</span><span class="sb">`</span><span class="p">]);</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+
+<span class="w">    </span><span class="nx">userStatusChanged</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">subscribe</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">_parent</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">pubsub</span><span class="p">.</span><span class="nx">asyncIterableIterator</span><span class="p">([</span><span class="sb">`</span><span class="si">${</span><span class="nx">EVENTS</span><span class="p">.</span><span class="nx">USER_STATUS_CHANGED</span><span class="si">}</span><span class="sb">.</span><span class="si">${</span><span class="nx">args</span><span class="p">.</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">]);</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">},</span>
+
+<span class="w">  </span><span class="nx">Mutation</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">createPost</span><span class="o">:</span><span class="w"> </span><span class="kt">async</span><span class="w"> </span><span class="p">(</span><span class="nx">_parent</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">prisma</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">args</span><span class="p">.</span><span class="nx">input</span><span class="p">,</span><span class="w"> </span><span class="nx">authorId</span><span class="o">:</span><span class="w"> </span><span class="kt">context.userId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="nx">include</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">author</span><span class="o">:</span><span class="w"> </span><span class="kt">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">});</span>
+
+<span class="w">      </span><span class="c1">// Publish event to all subscribers</span>
+<span class="w">      </span><span class="nx">pubsub</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="nx">EVENTS</span><span class="p">.</span><span class="nx">POST_CREATED</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">postCreated</span><span class="o">:</span><span class="w"> </span><span class="kt">post</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">post</span><span class="p">;</span>
+<span class="w">    </span><span class="p">},</span>
+
+<span class="w">    </span><span class="nx">addComment</span><span class="o">:</span><span class="w"> </span><span class="kt">async</span><span class="w"> </span><span class="p">(</span><span class="nx">_parent</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">comment</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">prisma</span><span class="p">.</span><span class="nx">comment</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">text</span><span class="o">:</span><span class="w"> </span><span class="kt">args.text</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">postId</span><span class="o">:</span><span class="w"> </span><span class="kt">args.postId</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">authorId</span><span class="o">:</span><span class="w"> </span><span class="kt">context.userId</span><span class="p">,</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nx">include</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">author</span><span class="o">:</span><span class="w"> </span><span class="kt">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">});</span>
+
+<span class="w">      </span><span class="c1">// Publish to post-specific channel</span>
+<span class="w">      </span><span class="nx">pubsub</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">EVENTS</span><span class="p">.</span><span class="nx">COMMENT_ADDED</span><span class="si">}</span><span class="sb">.</span><span class="si">${</span><span class="nx">args</span><span class="p">.</span><span class="nx">postId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">commentAdded</span><span class="o">:</span><span class="w"> </span><span class="kt">comment</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">comment</span><span class="p">;</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">};</span>
+</code></pre></div>
+
+<h3>Production PubSub with Redis</h3>
+<p>The in-memory <code>PubSub</code> only works for single-server setups. For production, use Redis:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">RedisPubSub</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;graphql-redis-subscriptions&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">pubsub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">RedisPubSub</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">publisher</span><span class="o">:</span><span class="w"> </span><span class="kt">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">({</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;localhost&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="kt">6379</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">  </span><span class="nx">subscriber</span><span class="o">:</span><span class="w"> </span><span class="kt">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">({</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;localhost&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="kt">6379</span><span class="w"> </span><span class="p">}),</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Filtering Subscriptions</h3>
+<p>Use <code>withFilter</code> for fine-grained subscription filtering:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">withFilter</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;graphql-subscriptions&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">resolvers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">Subscription</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">commentAdded</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">subscribe</span><span class="o">:</span><span class="w"> </span><span class="kt">withFilter</span><span class="p">(</span>
+<span class="w">        </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">pubsub</span><span class="p">.</span><span class="nx">asyncIterableIterator</span><span class="p">([</span><span class="nx">EVENTS</span><span class="p">.</span><span class="nx">COMMENT_ADDED</span><span class="p">]),</span>
+<span class="w">        </span><span class="p">(</span><span class="nx">payload</span><span class="p">,</span><span class="w"> </span><span class="nx">variables</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="c1">// Only send to clients watching this specific post</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="nx">payload</span><span class="p">.</span><span class="nx">commentAdded</span><span class="p">.</span><span class="nx">postId</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">variables</span><span class="p">.</span><span class="nx">postId</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">),</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">};</span>
+</code></pre></div>
+
+<h2>Performance Monitoring</h2>
+<p>Track N+1 issues with query logging:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Prisma query logging</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">log</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">emit</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;event&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">level</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;query&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="p">});</span>
+
+<span class="nx">prisma</span><span class="p">.</span><span class="nx">$on</span><span class="p">(</span><span class="s1">&#39;query&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Query: </span><span class="si">${</span><span class="nx">e</span><span class="p">.</span><span class="nx">query</span><span class="si">}</span><span class="sb"> (</span><span class="si">${</span><span class="nx">e</span><span class="p">.</span><span class="nx">duration</span><span class="si">}</span><span class="sb">ms)`</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Implement DataLoaders for a Blog API</div>
+                    <div class="exercise-desc"><p>Create DataLoaders for: users by ID, posts by author ID, comments by post ID, and likes count by post ID. Integrate them into Apollo Server context. Verify with Prisma query logging that N+1 queries are eliminated.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>The batch function must return results in the exact same order as the input keys. Use a Map to look up results by key.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build Real-Time Comments with Subscriptions</div>
+                    <div class="exercise-desc"><p>Add a commentAdded subscription that pushes new comments to clients watching a specific post. Use graphql-ws for the WebSocket transport. Test by opening two browser tabs to Apollo Sandbox.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use withFilter to ensure clients only receive comments for the post they are subscribed to.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Add Subscription Authentication</div>
+                    <div class="exercise-desc"><p>Implement authentication for WebSocket connections. Clients should pass a JWT token in connectionParams. Reject connections with invalid tokens. Include the authenticated user in the subscription context.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the onConnect callback in useServer to validate the token and return false to reject invalid connections.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">DataLoader returns results in wrong order</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The batch function does not return results in the same order as the input keys.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Create a Map from the batch query results, then map over the input keys to return results in order: keys.map(id => resultMap.get(id) || null).
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Subscriptions work in development but not in production</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The in-memory PubSub does not work across multiple server instances.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use graphql-redis-subscriptions with a shared Redis instance. All server instances publish and subscribe through Redis.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">DataLoader cache returns stale data after mutations</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> DataLoader caches results per request, but if a mutation updates a record and the same request queries it again, the cached (old) version is returned.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Clear specific DataLoader keys after mutations: context.loaders.userLoader.clear(userId). Or create fresh loaders per request (which is the recommended pattern).
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://github.com/graphql/dataloader" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">DataLoader GitHub Repository</div>
+                    
+                </a>
+                
+                <a href="https://www.apollographql.com/docs/apollo-server/data/subscriptions/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Apollo Subscriptions</div>
+                    
+                </a>
+                
+                <a href="https://github.com/enisdenjo/graphql-ws" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">graphql-ws - WebSocket Transport</div>
+                    
+                </a>
+                
+                <a href="https://shopify.engineering/solving-the-n-1-problem-for-graphql-through-batching" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Solving the N+1 Problem in GraphQL</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/5.2.2-js.html" class="btn">&larr; Apollo Server: Resolvers, Context, and Directives</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-5-js.html">&larr; Back to API Design & Architecture</a>
+        </div>
+    </div>
+</body>
+</html>

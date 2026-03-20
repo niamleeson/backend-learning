@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Apollo Server: Resolvers, Context, and Directives - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-5-js.html">API Design & Architecture</a> &rsaquo;
+            GraphQL with Apollo Server
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">5.2.2</span>
+                <span>~3h</span>
+            </div>
+            <h1>Apollo Server: Resolvers, Context, and Directives</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of resolvers as a team of specialized workers on an assembly line. The parent resolver hands off its result to child resolvers, who each do their specific job (fetch comments, look up the author, etc.). Context is the shared toolbox everyone on the line has access to -- the wrench (database), the badge scanner (auth), and the parts catalog (DataLoader).</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Apollo Server: Resolvers, Context, and Directives</h1>
+<p>Apollo Server is the most popular GraphQL server implementation for Node.js. This lesson covers advanced resolver patterns, context management for authentication, and custom directives for reusable schema logic.</p>
+<h2>Resolver Architecture</h2>
+<p>Every field in a GraphQL schema has a resolver. Resolvers follow a specific signature:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">type</span><span class="w"> </span><span class="nx">Resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="nx">parent</span><span class="o">:</span><span class="w"> </span><span class="kt">any</span><span class="p">,</span><span class="w">       </span><span class="c1">// Result from the parent resolver</span>
+<span class="w">  </span><span class="nx">args</span><span class="o">:</span><span class="w"> </span><span class="kt">any</span><span class="p">,</span><span class="w">         </span><span class="c1">// Arguments passed to the field</span>
+<span class="w">  </span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="kt">Context</span><span class="p">,</span><span class="w">  </span><span class="c1">// Shared per-request context</span>
+<span class="w">  </span><span class="nx">info</span><span class="o">:</span><span class="w"> </span><span class="kt">GraphQLResolveInfo</span><span class="w"> </span><span class="c1">// Query AST and metadata</span>
+<span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">any</span><span class="p">;</span>
+</code></pre></div>
+
+<h3>Default Resolvers</h3>
+<p>Apollo uses default resolvers for scalar fields. If your <code>User</code> type has a <code>name</code> field, and the parent resolver returns <code>{ name: 'Alice' }</code>, Apollo auto-resolves <code>name</code> without an explicit resolver.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// You do NOT need this:</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">resolvers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">User</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">parent</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">parent</span><span class="p">.</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="c1">// Apollo does this automatically</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">};</span>
+
+<span class="c1">// You ONLY need resolvers for:</span>
+<span class="c1">// 1. Computed fields</span>
+<span class="c1">// 2. Relationship fields that require DB queries</span>
+<span class="c1">// 3. Fields that transform the parent&#39;s data</span>
+</code></pre></div>
+
+<h2>Context: Per-Request Shared State</h2>
+<p>Context is created fresh for each request. It is the place for:
+- Authenticated user info
+- Database connections
+- DataLoaders
+- Request-scoped services</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ApolloServer</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@apollo/server&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">expressMiddleware</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@apollo/server/express4&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">jwt</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;jsonwebtoken&#39;</span><span class="p">;</span>
+
+<span class="kd">interface</span><span class="w"> </span><span class="nx">Context</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">userRole</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">prisma</span><span class="o">:</span><span class="w"> </span><span class="kt">PrismaClient</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">loaders</span><span class="o">:</span><span class="w"> </span><span class="kt">ReturnType</span><span class="o">&lt;</span><span class="ow">typeof</span><span class="w"> </span><span class="nx">createLoaders</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">ApolloServer</span><span class="o">&lt;</span><span class="nx">Context</span><span class="o">&gt;</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">typeDefs</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resolvers</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="k">await</span><span class="w"> </span><span class="nx">server</span><span class="p">.</span><span class="nx">start</span><span class="p">();</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span>
+<span class="w">  </span><span class="s1">&#39;/graphql&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">express</span><span class="p">.</span><span class="nx">json</span><span class="p">(),</span>
+<span class="w">  </span><span class="nx">expressMiddleware</span><span class="p">(</span><span class="nx">server</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="kt">async</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="p">})</span><span class="o">:</span><span class="w"> </span><span class="nb">Promise</span><span class="o">&lt;</span><span class="nx">Context</span><span class="o">&gt;</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Extract user from JWT token</span>
+<span class="w">      </span><span class="kd">let</span><span class="w"> </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">      </span><span class="kd">let</span><span class="w"> </span><span class="nx">userRole</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">headers</span><span class="p">.</span><span class="nx">authorization</span><span class="o">?</span><span class="p">.</span><span class="nx">replace</span><span class="p">(</span><span class="s1">&#39;Bearer &#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">token</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="kd">const</span><span class="w"> </span><span class="nx">decoded</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">jwt</span><span class="p">.</span><span class="nx">verify</span><span class="p">(</span><span class="nx">token</span><span class="p">,</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">JWT_SECRET</span><span class="o">!</span><span class="p">)</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="nx">any</span><span class="p">;</span>
+<span class="w">          </span><span class="nx">userId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">decoded</span><span class="p">.</span><span class="nx">sub</span><span class="p">;</span>
+<span class="w">          </span><span class="nx">userRole</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">decoded</span><span class="p">.</span><span class="nx">role</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="c1">// Invalid token - continue as unauthenticated</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">userRole</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">prisma</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">loaders</span><span class="o">:</span><span class="w"> </span><span class="kt">createLoaders</span><span class="p">(</span><span class="nx">prisma</span><span class="p">),</span>
+<span class="w">      </span><span class="p">};</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">})</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h3>Using Context in Resolvers</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">resolvers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">Query</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">me</span><span class="o">:</span><span class="w"> </span><span class="kt">async</span><span class="w"> </span><span class="p">(</span><span class="nx">_parent</span><span class="p">,</span><span class="w"> </span><span class="nx">_args</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="kt">Context</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">context</span><span class="p">.</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="kt">context.userId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">},</span>
+
+<span class="w">    </span><span class="nx">adminDashboard</span><span class="o">:</span><span class="w"> </span><span class="kt">async</span><span class="w"> </span><span class="p">(</span><span class="nx">_parent</span><span class="p">,</span><span class="w"> </span><span class="nx">_args</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="kt">Context</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">context</span><span class="p">.</span><span class="nx">userRole</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;ADMIN&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">GraphQLError</span><span class="p">(</span><span class="s1">&#39;Admin access required&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">extensions</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">code</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;FORBIDDEN&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="c1">// return dashboard data</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">},</span>
+
+<span class="w">  </span><span class="nx">Mutation</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">createPost</span><span class="o">:</span><span class="w"> </span><span class="kt">async</span><span class="w"> </span><span class="p">(</span><span class="nx">_parent</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="kt">Context</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">requireAuth</span><span class="p">(</span><span class="nx">context</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">prisma</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">args</span><span class="p">.</span><span class="nx">input</span><span class="p">,</span><span class="w"> </span><span class="nx">authorId</span><span class="o">:</span><span class="w"> </span><span class="kt">context.userId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">};</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">requireAuth</span><span class="p">(</span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="kt">Context</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="nx">asserts</span><span class="w"> </span><span class="nx">context</span><span class="w"> </span><span class="nx">is</span><span class="w"> </span><span class="nx">Context</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">context</span><span class="p">.</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">GraphQLError</span><span class="p">(</span><span class="s1">&#39;Authentication required&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">extensions</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">code</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;UNAUTHENTICATED&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Custom Directives</h2>
+<p>Directives add reusable behavior to schema fields. They are declared in SDL and implemented in code.</p>
+<h3>@auth Directive</h3>
+<div class="highlight"><pre><span></span><code><span class="c"># Schema</span>
+<span class="k">directive</span><span class="w"> </span><span class="err">@auth(requires:</span><span class="w"> </span><span class="err">Role</span><span class="w"> </span><span class="err">=</span><span class="w"> </span><span class="err">USER)</span><span class="w"> </span><span class="err">on</span><span class="w"> </span><span class="k">FIELD_DEFINITION</span>
+
+<span class="k">enum</span><span class="w"> </span><span class="err">Role</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">USER</span>
+<span class="w">  </span><span class="n">ADMIN</span>
+<span class="w">  </span><span class="n">MODERATOR</span>
+<span class="p">}</span>
+
+<span class="k">type</span><span class="w"> </span><span class="err">Query</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nl">publicPosts</span><span class="p">:</span><span class="w"> </span><span class="err">[</span><span class="n">Post</span><span class="err">!]!</span>
+<span class="w">  </span><span class="nl">me</span><span class="p">:</span><span class="w"> </span><span class="n">User</span><span class="w"> </span><span class="nd">@auth</span>
+<span class="w">  </span><span class="err">adminUsers:</span><span class="w"> </span><span class="err">[User!]!</span><span class="w"> </span><span class="err">@auth</span><span class="p">(</span><span class="n">requires</span><span class="p">:</span><span class="w"> </span><span class="no">ADMIN</span><span class="p">)</span>
+<span class="p">}</span>
+
+<span class="k">type</span><span class="w"> </span><span class="err">Mutation</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">createPost</span><span class="p">(</span><span class="n">input</span><span class="p">:</span><span class="w"> </span><span class="no">CreatePostInput</span><span class="err">!</span><span class="p">)</span><span class="err">:</span><span class="w"> </span><span class="n">Post</span><span class="err">!</span><span class="w"> </span><span class="nd">@auth</span>
+<span class="w">  </span><span class="err">deleteUser</span><span class="p">(</span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="no">ID</span><span class="err">!</span><span class="p">)</span><span class="err">:</span><span class="w"> </span><span class="n">Boolean</span><span class="err">!</span><span class="w"> </span><span class="nd">@auth</span><span class="p">(</span><span class="n">requires</span><span class="p">:</span><span class="w"> </span><span class="no">ADMIN</span><span class="p">)</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Implementation using schema transforms:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">mapSchema</span><span class="p">,</span><span class="w"> </span><span class="nx">getDirective</span><span class="p">,</span><span class="w"> </span><span class="nx">MapperKind</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@graphql-tools/utils&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">defaultFieldResolver</span><span class="p">,</span><span class="w"> </span><span class="nx">GraphQLSchema</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;graphql&#39;</span><span class="p">;</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">authDirectiveTransformer</span><span class="p">(</span><span class="nx">schema</span><span class="o">:</span><span class="w"> </span><span class="kt">GraphQLSchema</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="nx">GraphQLSchema</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">mapSchema</span><span class="p">(</span><span class="nx">schema</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="nx">MapperKind</span><span class="p">.</span><span class="nx">OBJECT_FIELD</span><span class="p">]</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">fieldConfig</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">authDirective</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getDirective</span><span class="p">(</span><span class="nx">schema</span><span class="p">,</span><span class="w"> </span><span class="nx">fieldConfig</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;auth&#39;</span><span class="p">)</span><span class="o">?</span><span class="p">.[</span><span class="mf">0</span><span class="p">];</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">authDirective</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">fieldConfig</span><span class="p">;</span>
+
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">requiredRole</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">authDirective</span><span class="p">.</span><span class="nx">requires</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;USER&#39;</span><span class="p">;</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">originalResolve</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">fieldConfig</span><span class="p">.</span><span class="nx">resolve</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">defaultFieldResolver</span><span class="p">;</span>
+
+<span class="w">      </span><span class="nx">fieldConfig</span><span class="p">.</span><span class="nx">resolve</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">parent</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="p">,</span><span class="w"> </span><span class="nx">info</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">context</span><span class="p">.</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">GraphQLError</span><span class="p">(</span><span class="s1">&#39;Authentication required&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">extensions</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">code</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;UNAUTHENTICATED&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="p">});</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">roleHierarchy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;USER&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;MODERATOR&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;ADMIN&#39;</span><span class="p">];</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">userLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">roleHierarchy</span><span class="p">.</span><span class="nx">indexOf</span><span class="p">(</span><span class="nx">context</span><span class="p">.</span><span class="nx">userRole</span><span class="p">);</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">requiredLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">roleHierarchy</span><span class="p">.</span><span class="nx">indexOf</span><span class="p">(</span><span class="nx">requiredRole</span><span class="p">);</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">userLevel</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">requiredLevel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">GraphQLError</span><span class="p">(</span><span class="sb">`Role &#39;</span><span class="si">${</span><span class="nx">requiredRole</span><span class="si">}</span><span class="sb">&#39; required`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">extensions</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">code</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;FORBIDDEN&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="p">});</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">originalResolve</span><span class="p">(</span><span class="nx">parent</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="p">,</span><span class="w"> </span><span class="nx">info</span><span class="p">);</span>
+<span class="w">      </span><span class="p">};</span>
+
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">fieldConfig</span><span class="p">;</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="c1">// Apply the transformer</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">makeExecutableSchema</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@graphql-tools/schema&#39;</span><span class="p">;</span>
+
+<span class="kd">let</span><span class="w"> </span><span class="nx">schema</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">makeExecutableSchema</span><span class="p">({</span><span class="w"> </span><span class="nx">typeDefs</span><span class="p">,</span><span class="w"> </span><span class="nx">resolvers</span><span class="w"> </span><span class="p">});</span>
+<span class="nx">schema</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">authDirectiveTransformer</span><span class="p">(</span><span class="nx">schema</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">ApolloServer</span><span class="p">({</span><span class="w"> </span><span class="nx">schema</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+
+<h3>@deprecated Directive (Built-in)</h3>
+<div class="highlight"><pre><span></span><code><span class="k">type</span><span class="w"> </span><span class="err">User</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nl">id</span><span class="p">:</span><span class="w"> </span><span class="n">ID</span><span class="err">!</span>
+<span class="w">  </span><span class="nl">name</span><span class="p">:</span><span class="w"> </span><span class="n">String</span><span class="err">!</span><span class="w"> </span><span class="nd">@deprecated</span><span class="p">(</span><span class="n">reason</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Use firstName and lastName instead&quot;</span><span class="p">)</span>
+<span class="w">  </span><span class="nl">firstName</span><span class="p">:</span><span class="w"> </span><span class="n">String</span><span class="err">!</span>
+<span class="w">  </span><span class="nl">lastName</span><span class="p">:</span><span class="w"> </span><span class="n">String</span><span class="err">!</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>@cacheControl Directive</h3>
+<p>Apollo's built-in caching directive:</p>
+<div class="highlight"><pre><span></span><code><span class="k">type</span><span class="w"> </span><span class="err">Post</span><span class="w"> </span><span class="err">@cacheControl(maxAge:</span><span class="w"> </span><span class="err">60)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nl">id</span><span class="p">:</span><span class="w"> </span><span class="n">ID</span><span class="err">!</span>
+<span class="w">  </span><span class="nl">title</span><span class="p">:</span><span class="w"> </span><span class="n">String</span><span class="err">!</span>
+<span class="w">  </span><span class="nl">body</span><span class="p">:</span><span class="w"> </span><span class="n">String</span><span class="err">!</span>
+<span class="w">  </span><span class="nl">viewCount</span><span class="p">:</span><span class="w"> </span><span class="n">Int</span><span class="err">!</span><span class="w"> </span><span class="nd">@cacheControl</span><span class="p">(</span><span class="n">maxAge</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="c"># changes frequently</span>
+<span class="p">}</span>
+
+<span class="k">type</span><span class="w"> </span><span class="err">Query</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nl">publicPosts</span><span class="p">:</span><span class="w"> </span><span class="err">[</span><span class="n">Post</span><span class="err">!]!</span><span class="w"> </span><span class="nd">@cacheControl</span><span class="p">(</span><span class="n">maxAge</span><span class="p">:</span><span class="w"> </span><span class="mi">300</span><span class="p">)</span>
+<span class="w">  </span><span class="nl">me</span><span class="p">:</span><span class="w"> </span><span class="n">User</span><span class="w"> </span><span class="nd">@cacheControl</span><span class="p">(</span><span class="n">maxAge</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">scope</span><span class="p">:</span><span class="w"> </span><span class="no">PRIVATE</span><span class="p">)</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Apollo Server Plugins</h2>
+<p>Plugins hook into the request lifecycle:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">ApolloServerPlugin</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@apollo/server&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">loggingPlugin</span><span class="o">:</span><span class="w"> </span><span class="kt">ApolloServerPlugin</span><span class="o">&lt;</span><span class="nx">Context</span><span class="o">&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">requestDidStart</span><span class="p">(</span><span class="nx">requestContext</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">operationName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">requestContext</span><span class="p">.</span><span class="nx">request</span><span class="p">.</span><span class="nx">operationName</span><span class="p">;</span>
+
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`GraphQL request started: </span><span class="si">${</span><span class="nx">operationName</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">async</span><span class="w"> </span><span class="nx">didResolveOperation</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Operation: </span><span class="si">${</span><span class="nx">ctx</span><span class="p">.</span><span class="nx">operation</span><span class="p">.</span><span class="nx">operation</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">operationName</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">      </span><span class="p">},</span>
+
+<span class="w">      </span><span class="k">async</span><span class="w"> </span><span class="nx">didEncounterErrors</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">errors</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`GraphQL Error: </span><span class="si">${</span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">path</span><span class="o">:</span><span class="w"> </span><span class="kt">err.path</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">code</span><span class="o">:</span><span class="w"> </span><span class="kt">err.extensions?.code</span><span class="p">,</span>
+<span class="w">          </span><span class="p">});</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">},</span>
+
+<span class="w">      </span><span class="k">async</span><span class="w"> </span><span class="nx">willSendResponse</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">duration</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">start</span><span class="p">;</span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`GraphQL response: </span><span class="si">${</span><span class="nx">operationName</span><span class="si">}</span><span class="sb"> (</span><span class="si">${</span><span class="nx">duration</span><span class="si">}</span><span class="sb">ms)`</span><span class="p">);</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">};</span>
+
+<span class="c1">// Query complexity plugin</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">complexityPlugin</span><span class="o">:</span><span class="w"> </span><span class="kt">ApolloServerPlugin</span><span class="o">&lt;</span><span class="nx">Context</span><span class="o">&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">requestDidStart</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">async</span><span class="w"> </span><span class="nx">didResolveOperation</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Calculate complexity based on query depth and fields</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">complexity</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">calculateComplexity</span><span class="p">(</span><span class="nx">ctx</span><span class="p">.</span><span class="nb">document</span><span class="p">,</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">operation</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">complexity</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">1000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">GraphQLError</span><span class="p">(</span>
+<span class="w">            </span><span class="sb">`Query complexity </span><span class="si">${</span><span class="nx">complexity</span><span class="si">}</span><span class="sb"> exceeds maximum of 1000`</span><span class="p">,</span>
+<span class="w">            </span><span class="p">{</span><span class="w"> </span><span class="nx">extensions</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">code</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;QUERY_TOO_COMPLEX&#39;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<span class="w">          </span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">};</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">ApolloServer</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">typeDefs</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resolvers</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">plugins</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">loggingPlugin</span><span class="p">,</span><span class="w"> </span><span class="nx">complexityPlugin</span><span class="p">],</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Query Depth Limiting</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">depthLimit</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;graphql-depth-limit&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">ApolloServer</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">typeDefs</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resolvers</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">validationRules</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="nx">depthLimit</span><span class="p">(</span><span class="mf">5</span><span class="p">)],</span><span class="w"> </span><span class="c1">// Max 5 levels of nesting</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Organizing Resolvers</h2>
+<p>For large schemas, split resolvers by type:</p>
+<div class="highlight"><pre><span></span><code>src/
+  graphql/
+    schema.graphql
+    resolvers/
+      index.ts       # merges all resolvers
+      user.ts
+      post.ts
+      comment.ts
+    directives/
+      auth.ts
+      cache.ts
+    loaders/
+      index.ts
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// resolvers/index.ts</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">merge</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;lodash&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">userResolvers</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./user&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">postResolvers</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./post&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">commentResolvers</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./comment&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">dateTimeResolver</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;./scalars&#39;</span><span class="p">;</span>
+
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">resolvers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">merge</span><span class="p">(</span>
+<span class="w">  </span><span class="nx">userResolvers</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">postResolvers</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">commentResolvers</span><span class="p">,</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">DateTime</span><span class="o">:</span><span class="w"> </span><span class="kt">dateTimeResolver</span><span class="w"> </span><span class="p">}</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Custom Scalars</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">GraphQLScalarType</span><span class="p">,</span><span class="w"> </span><span class="nx">Kind</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;graphql&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">dateTimeResolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">GraphQLScalarType</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;DateTime&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">description</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;ISO 8601 date-time string&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">serialize</span><span class="p">(</span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="kt">Date</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">value</span><span class="p">.</span><span class="nx">toISOString</span><span class="p">();</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">parseValue</span><span class="p">(</span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">date</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">value</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nb">isNaN</span><span class="p">(</span><span class="nx">date</span><span class="p">.</span><span class="nx">getTime</span><span class="p">()))</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Invalid DateTime&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">date</span><span class="p">;</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">parseLiteral</span><span class="p">(</span><span class="nx">ast</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">ast</span><span class="p">.</span><span class="nx">kind</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">Kind</span><span class="p">.</span><span class="nx">STRING</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">date</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">ast</span><span class="p">.</span><span class="nx">value</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nb">isNaN</span><span class="p">(</span><span class="nx">date</span><span class="p">.</span><span class="nx">getTime</span><span class="p">()))</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Invalid DateTime&#39;</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">date</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;DateTime must be a string&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Context with Authentication</div>
+                    <div class="exercise-desc"><p>Set up Apollo Server with Express and implement a context function that extracts a JWT token from the Authorization header, verifies it, and attaches the user ID and role to the context. Create a 'me' query that returns the current user.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use jwt.verify() in the context function. Catch errors silently so unauthenticated requests still work for public queries.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement an @auth Directive</div>
+                    <div class="exercise-desc"><p>Create a custom @auth directive that supports role-based access. Decorate sensitive fields with @auth(requires: ADMIN). Test that unauthenticated users get an error and that regular users cannot access admin-only fields.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use mapSchema from @graphql-tools/utils to transform field resolvers. Wrap the original resolver with an auth check.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Create a Logging Plugin</div>
+                    <div class="exercise-desc"><p>Build an Apollo Server plugin that logs operation name, type (query/mutation), duration, and any errors for every request. Format the output as structured JSON suitable for a log aggregation system.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use requestDidStart to capture the start time and return lifecycle hooks (willSendResponse, didEncounterErrors).</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement a DateTime Custom Scalar</div>
+                    <div class="exercise-desc"><p>Create a DateTime scalar that serializes JS Date objects to ISO strings, parses ISO string inputs back to Date objects, and validates the format. Register it in your resolver map.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Implement serialize, parseValue, and parseLiteral methods on a new GraphQLScalarType instance.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Context is undefined or missing fields in resolvers</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The context function in expressMiddleware is not returning the expected object, or an async operation inside it fails silently.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Add error logging inside the context function. Make sure it always returns an object, even when authentication fails. Check that you are passing the context function to expressMiddleware, not to the ApolloServer constructor.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Directive transformer does not apply to mutations</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The MapperKind used in mapSchema does not cover the MUTATION type.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> MapperKind.OBJECT_FIELD applies to all object types including Query and Mutation. Make sure the directive is declared in SDL with 'on FIELD_DEFINITION' and applied to mutation fields.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Resolver changes do not take effect</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Apollo Server caches the schema at startup. Hot reloading requires special configuration.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Restart the server after resolver changes. For development, use nodemon or tsx --watch to auto-restart on file changes.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://www.apollographql.com/docs/apollo-server/data/resolvers/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Apollo Server - Resolvers</div>
+                    
+                </a>
+                
+                <a href="https://www.apollographql.com/docs/apollo-server/data/context/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Apollo Server - Context</div>
+                    
+                </a>
+                
+                <a href="https://the-guild.dev/graphql/tools/docs/schema-directives" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">GraphQL Tools - Schema Directives</div>
+                    
+                </a>
+                
+                <a href="https://www.apollographql.com/docs/apollo-server/integrations/plugins/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Apollo Server Plugins</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/5.2.1-js.html" class="btn">&larr; GraphQL Fundamentals: Schema, Queries, and Mutations</a>
+            
+            
+            <a href="/backend-learning/lesson/5.2.3-js.html" class="btn">Subscriptions, DataLoaders, and N+1 Prevention &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-5-js.html">&larr; Back to API Design & Architecture</a>
+        </div>
+    </div>
+</body>
+</html>

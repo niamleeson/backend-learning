@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Ride-Sharing Service (Uber) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Social & Real-Time Systems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.5.2</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a Ride-Sharing Service (Uber)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a ride-sharing system like a pizza delivery dispatch center. Customers call in orders (ride requests), the dispatcher (matching service) looks at a map of available drivers (delivery drivers) and picks the closest one. The map is constantly updating as drivers move around. During the Super Bowl (surge), there are way more orders than drivers, so prices go up to attract more drivers to work. The whole system is a two-sided marketplace where you must balance supply and demand in real-time across geography.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Ride-Sharing Service (Uber)</h1>
+<h2>Introduction</h2>
+<p>A ride-sharing service connects riders who need transportation with nearby drivers in real-time. This is one of the most challenging system design problems because it combines real-time location tracking, geospatial matching, dynamic pricing, payments, and ETA computation — all with strict latency requirements. Uber processes over 20 million trips per day across 70+ countries.</p>
+<p>This problem tests your ability to handle geospatial data at scale, design real-time matching algorithms, manage state machines for trip lifecycle, and handle the unique challenges of a two-sided marketplace.</p>
+<h2>Requirements</h2>
+<h3>Functional Requirements</h3>
+<ol>
+<li><strong>Rider requests a ride</strong> — Specify pickup and dropoff locations, see estimated fare and ETA</li>
+<li><strong>Match rider with nearby driver</strong> — Find the optimal available driver based on proximity, rating, and vehicle type</li>
+<li><strong>Real-time tracking</strong> — Both rider and driver see each other's location on a map during the trip</li>
+<li><strong>Trip lifecycle</strong> — Request, match, driver en route, pickup, in progress, dropoff, payment, rating</li>
+<li><strong>Dynamic pricing (surge)</strong> — Adjust prices based on supply/demand in a geographic area</li>
+<li><strong>Payment processing</strong> — Charge rider, pay driver, handle tips</li>
+<li><strong>Driver availability</strong> — Drivers toggle online/offline, system tracks their current status</li>
+<li><strong>ETA calculation</strong> — Estimated time of arrival for driver to pickup and ride to destination</li>
+</ol>
+<h3>Non-Functional Requirements</h3>
+<ol>
+<li><strong>Low latency matching</strong> — Match rider to driver in &lt;5 seconds</li>
+<li><strong>Real-time location updates</strong> — Location updates every 3-5 seconds</li>
+<li><strong>High availability</strong> — 99.99% uptime</li>
+<li><strong>Consistency</strong> — A driver must never be matched to two riders simultaneously (strong consistency for matching)</li>
+<li><strong>Scalability</strong> — Support 1M concurrent active drivers and 5M concurrent riders</li>
+</ol>
+<h2>Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Active drivers at peak:      1,000,000
+Active riders at peak:        5,000,000
+Trips per day:               20,000,000
+Trips per second (avg):      ~230 TPS
+Trips per second (peak):     ~1,000 TPS
+
+Location updates:
+  - Drivers: 1M * 1 update/4s = 250,000 updates/sec
+  - Active rides: 500K * 1 update/4s = 125,000 updates/sec
+  - Total location writes: ~375,000/sec
+
+Storage per location update: lat(8B) + lng(8B) + timestamp(8B) + driver_id(8B) = 32B
+Location data per day:       375K * 32B * 86400 = ~1 TB/day (if stored; typically sampled)
+
+Trip record:                 ~2KB per trip
+Trip storage per day:        20M * 2KB = 40 GB/day
+
+Matching queries:            ~1,000/sec (one per new ride request at peak)
+ETA queries:                 ~5,000/sec (riders checking before requesting)
+</code></pre></div>
+
+<h2>High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌─────────────┐  ┌─────────────┐
+│ Rider App   │  │ Driver App  │
+│ (Mobile)    │  │ (Mobile)    │
+└──────┬──────┘  └──────┬──────┘
+       │                │
+       │   WebSocket    │  WebSocket (location stream)
+       │                │
+┌──────▼────────────────▼──────┐
+│       API Gateway / LB       │
+│   (Nginx / AWS ALB)          │
+└──────────────┬───────────────┘
+               │
+    ┌──────────┼──────────────────────────────┐
+    │          │                              │
+    ▼          ▼                              ▼
+┌────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐
+│ Ride   │ │ Location │ │ Matching │ │   Pricing    │
+│Service │ │ Service  │ │ Service  │ │   Service    │
+│        │ │          │ │          │ │ (Surge)      │
+└───┬────┘ └────┬─────┘ └────┬─────┘ └──────┬───────┘
+    │           │            │               │
+    │    ┌──────▼──────┐ ┌───▼────────┐     │
+    │    │ Redis       │ │ Redis      │     │
+    │    │ (GeoIndex)  │ │ (Driver    │     │
+    │    │ GEOADD/     │ │  State     │     │
+    │    │ GEOSEARCH   │ │  Lock)     │     │
+    │    └─────────────┘ └────────────┘     │
+    │                                       │
+    ▼                                       ▼
+┌─────────────────┐              ┌──────────────────┐
+│   PostgreSQL    │              │   Kafka          │
+│   (Trips,       │              │   (Events,       │
+│    Users,       │              │    Analytics)    │
+│    Payments)    │              │                  │
+└─────────────────┘              └──────────────────┘
+</code></pre></div>
+
+<h2>API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// Request a ride</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/rides&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// POST /api/v1/rides</span>
+<span class="w">  </span><span class="c1">// Body: {</span>
+<span class="w">  </span><span class="c1">//   pickup: { lat, lng, address },</span>
+<span class="w">  </span><span class="c1">//   dropoff: { lat, lng, address },</span>
+<span class="w">  </span><span class="c1">//   vehicle_type: &#39;standard&#39; | &#39;xl&#39; | &#39;premium&#39;</span>
+<span class="w">  </span><span class="c1">// }</span>
+<span class="w">  </span><span class="c1">// Response: { ride_id, estimated_fare, estimated_eta, surge_multiplier, status }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">pickup</span><span class="p">,</span><span class="w"> </span><span class="nx">dropoff</span><span class="p">,</span><span class="w"> </span><span class="nx">vehicle_type</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">surge</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pricingService</span><span class="p">.</span><span class="nx">getSurgeMultiplier</span><span class="p">(</span><span class="nx">pickup</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">fare</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pricingService</span><span class="p">.</span><span class="nx">estimateFare</span><span class="p">(</span><span class="nx">pickup</span><span class="p">,</span><span class="w"> </span><span class="nx">dropoff</span><span class="p">,</span><span class="w"> </span><span class="nx">vehicle_type</span><span class="p">,</span><span class="w"> </span><span class="nx">surge</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">eta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">etaService</span><span class="p">.</span><span class="nx">estimatePickupETA</span><span class="p">(</span><span class="nx">pickup</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">ride</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">rideService</span><span class="p">.</span><span class="nx">createRide</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">rider_id</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">pickup</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">dropoff</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">vehicle_type</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">estimated_fare</span><span class="o">:</span><span class="w"> </span><span class="nx">fare</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">surge_multiplier</span><span class="o">:</span><span class="w"> </span><span class="nx">surge</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Trigger async matching</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">matchingService</span><span class="p">.</span><span class="nx">findDriver</span><span class="p">(</span><span class="nx">ride</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">ride_id</span><span class="o">:</span><span class="w"> </span><span class="nx">ride</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">estimated_fare</span><span class="o">:</span><span class="w"> </span><span class="nx">fare</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">estimated_eta</span><span class="o">:</span><span class="w"> </span><span class="nx">eta</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">surge_multiplier</span><span class="o">:</span><span class="w"> </span><span class="nx">surge</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;matching&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Get ride status</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/rides/:rideId&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Response: { ride_id, status, driver, pickup, dropoff, current_location, eta }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">ride</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">rideService</span><span class="p">.</span><span class="nx">getRideWithDetails</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">rideId</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">ride</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Driver accepts a ride</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/rides/:rideId/accept&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Called by driver</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">matchingService</span><span class="p">.</span><span class="nx">acceptRide</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">rideId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="c1">// driver_id</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Driver updates location</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/drivers/location&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// POST /api/v1/drivers/location</span>
+<span class="w">  </span><span class="c1">// Body: { lat, lng, heading, speed }</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">locationService</span><span class="p">.</span><span class="nx">updateDriverLocation</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">204</span><span class="p">).</span><span class="nx">send</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="c1">// Driver goes online/offline</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">put</span><span class="p">(</span><span class="s1">&#39;/drivers/status&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Body: { status: &#39;online&#39; | &#39;offline&#39; }</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">driverService</span><span class="p">.</span><span class="nx">updateStatus</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">status</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Complete ride and process payment</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/rides/:rideId/complete&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">rideService</span><span class="p">.</span><span class="nx">completeRide</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">rideId</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Rate a ride</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/rides/:rideId/rating&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Body: { rating: 1-5, comment?: string }</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">rideService</span><span class="p">.</span><span class="nx">addRating</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">rideId</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">204</span><span class="p">).</span><span class="nx">send</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="c1">// Fare estimate (before requesting)</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/rides/estimate&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Body: { pickup: { lat, lng }, dropoff: { lat, lng }, vehicle_type }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">pickup</span><span class="p">,</span><span class="w"> </span><span class="nx">dropoff</span><span class="p">,</span><span class="w"> </span><span class="nx">vehicle_type</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">surge</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pricingService</span><span class="p">.</span><span class="nx">getSurgeMultiplier</span><span class="p">(</span><span class="nx">pickup</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">fare</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pricingService</span><span class="p">.</span><span class="nx">estimateFare</span><span class="p">(</span><span class="nx">pickup</span><span class="p">,</span><span class="w"> </span><span class="nx">dropoff</span><span class="p">,</span><span class="w"> </span><span class="nx">vehicle_type</span><span class="p">,</span><span class="w"> </span><span class="nx">surge</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">eta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">etaService</span><span class="p">.</span><span class="nx">estimatePickupETA</span><span class="p">(</span><span class="nx">pickup</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">estimated_fare</span><span class="o">:</span><span class="w"> </span><span class="nx">fare</span><span class="p">,</span><span class="w"> </span><span class="nx">surge_multiplier</span><span class="o">:</span><span class="w"> </span><span class="nx">surge</span><span class="p">,</span><span class="w"> </span><span class="nx">estimated_eta</span><span class="o">:</span><span class="w"> </span><span class="nx">eta</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="k">export</span><span class="w"> </span><span class="k">default</span><span class="w"> </span><span class="nx">router</span><span class="p">;</span>
+</code></pre></div>
+
+<h2>Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Users (riders and drivers)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">phone</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">email</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span>
+<span class="w">  </span><span class="k">role</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w"> </span><span class="c1">-- &#39;rider&#39;, &#39;driver&#39;, &#39;both&#39;</span>
+<span class="w">  </span><span class="n">rating_avg</span><span class="w">      </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">5</span><span class="p">.</span><span class="mi">00</span><span class="p">,</span>
+<span class="w">  </span><span class="n">rating_count</span><span class="w">    </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Driver profiles</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">driver_profiles</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">license_number</span><span class="w">  </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">32</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">vehicle_type</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w"> </span><span class="c1">-- &#39;standard&#39;, &#39;xl&#39;, &#39;premium&#39;</span>
+<span class="w">  </span><span class="n">vehicle_make</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">),</span>
+<span class="w">  </span><span class="n">vehicle_model</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">),</span>
+<span class="w">  </span><span class="n">vehicle_plate</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">vehicle_color</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">32</span><span class="p">),</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;offline&#39;</span><span class="p">,</span><span class="w"> </span><span class="c1">-- &#39;online&#39;, &#39;offline&#39;, &#39;on_trip&#39;</span>
+<span class="w">  </span><span class="n">current_lat</span><span class="w">     </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">7</span><span class="p">),</span>
+<span class="w">  </span><span class="n">current_lng</span><span class="w">     </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">7</span><span class="p">),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_driver_status</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">driver_profiles</span><span class="p">(</span><span class="n">status</span><span class="p">);</span>
+
+<span class="c1">-- Rides</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">rides</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">rider_id</span><span class="w">        </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">driver_id</span><span class="w">       </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">24</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;requested&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">-- requested, matching, driver_assigned, driver_en_route,</span>
+<span class="w">    </span><span class="c1">-- arrived, in_progress, completed, cancelled</span>
+<span class="w">  </span><span class="n">vehicle_type</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">pickup_lat</span><span class="w">      </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">7</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">pickup_lng</span><span class="w">      </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">7</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">pickup_address</span><span class="w">  </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">dropoff_lat</span><span class="w">     </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">7</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">dropoff_lng</span><span class="w">     </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">7</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">dropoff_address</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">estimated_fare</span><span class="w">  </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">),</span>
+<span class="w">  </span><span class="n">actual_fare</span><span class="w">     </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">),</span>
+<span class="w">  </span><span class="n">surge_multi</span><span class="w">     </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">1</span><span class="p">.</span><span class="mi">00</span><span class="p">,</span>
+<span class="w">  </span><span class="n">distance_km</span><span class="w">     </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="mi">2</span><span class="p">),</span>
+<span class="w">  </span><span class="n">duration_min</span><span class="w">    </span><span class="nb">INTEGER</span><span class="p">,</span>
+<span class="w">  </span><span class="n">requested_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">matched_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">pickup_at</span><span class="w">       </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">dropoff_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">cancelled_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_ride_rider</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">rides</span><span class="p">(</span><span class="n">rider_id</span><span class="p">,</span><span class="w"> </span><span class="n">requested_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_ride_driver</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">rides</span><span class="p">(</span><span class="n">driver_id</span><span class="p">,</span><span class="w"> </span><span class="n">requested_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_ride_status</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">rides</span><span class="p">(</span><span class="n">status</span><span class="p">);</span>
+
+<span class="c1">-- Payments</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">payments</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">ride_id</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">rides</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">rider_id</span><span class="w">        </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">driver_id</span><span class="w">       </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">amount</span><span class="w">          </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">platform_fee</span><span class="w">    </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">driver_payout</span><span class="w">   </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">tip</span><span class="w">             </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">.</span><span class="mi">00</span><span class="p">,</span>
+<span class="w">  </span><span class="n">payment_method</span><span class="w">  </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">32</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;pending&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Ratings</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">ratings</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">ride_id</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">rides</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">rater_id</span><span class="w">        </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">ratee_id</span><span class="w">        </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">rating</span><span class="w">          </span><span class="nb">SMALLINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">CHECK</span><span class="w"> </span><span class="p">(</span><span class="n">rating</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="mi">5</span><span class="p">),</span>
+<span class="w">  </span><span class="k">comment</span><span class="w">         </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">(</span><span class="n">ride_id</span><span class="p">,</span><span class="w"> </span><span class="n">rater_id</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- Surge pricing zones (pre-computed geohash cells)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">surge_zones</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">geohash</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">8</span><span class="p">)</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span><span class="w">  </span><span class="c1">-- geohash precision 6</span>
+<span class="w">  </span><span class="n">surge_multi</span><span class="w">     </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">1</span><span class="p">.</span><span class="mi">00</span><span class="p">,</span>
+<span class="w">  </span><span class="n">demand_count</span><span class="w">    </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">supply_count</span><span class="w">    </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Core Implementation: Geospatial Matching</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">({</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-cluster&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">6379</span><span class="w"> </span><span class="p">});</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">LocationService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Update driver location using Redis GEO</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">updateDriverLocation</span><span class="p">(</span><span class="nx">driverId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">lat</span><span class="p">,</span><span class="w"> </span><span class="nx">lng</span><span class="p">,</span><span class="w"> </span><span class="nx">heading</span><span class="p">,</span><span class="w"> </span><span class="nx">speed</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// GEOADD stores location in a sorted set with geohash scoring</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">geoadd</span><span class="p">(</span><span class="s1">&#39;drivers:available&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">lng</span><span class="p">,</span><span class="w"> </span><span class="nx">lat</span><span class="p">,</span><span class="w"> </span><span class="nx">driverId</span><span class="p">.</span><span class="nx">toString</span><span class="p">());</span>
+
+<span class="w">    </span><span class="c1">// Store metadata separately</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">hset</span><span class="p">(</span><span class="sb">`driver:</span><span class="si">${</span><span class="nx">driverId</span><span class="si">}</span><span class="sb">:meta`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">lat</span><span class="o">:</span><span class="w"> </span><span class="nx">lat</span><span class="p">.</span><span class="nx">toString</span><span class="p">(),</span>
+<span class="w">      </span><span class="nx">lng</span><span class="o">:</span><span class="w"> </span><span class="nx">lng</span><span class="p">.</span><span class="nx">toString</span><span class="p">(),</span>
+<span class="w">      </span><span class="nx">heading</span><span class="o">:</span><span class="w"> </span><span class="nx">heading</span><span class="p">.</span><span class="nx">toString</span><span class="p">(),</span>
+<span class="w">      </span><span class="nx">speed</span><span class="o">:</span><span class="w"> </span><span class="nx">speed</span><span class="p">.</span><span class="nx">toString</span><span class="p">(),</span>
+<span class="w">      </span><span class="nx">updated_at</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">().</span><span class="nx">toString</span><span class="p">(),</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Find nearby available drivers</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">findNearbyDrivers</span><span class="p">(</span><span class="nx">lat</span><span class="p">,</span><span class="w"> </span><span class="nx">lng</span><span class="p">,</span><span class="w"> </span><span class="nx">radiusKm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">10</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// GEOSEARCH returns drivers within radius, sorted by distance</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">geosearch</span><span class="p">(</span>
+<span class="w">      </span><span class="s1">&#39;drivers:available&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;FROMLONLAT&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">lng</span><span class="p">,</span><span class="w"> </span><span class="nx">lat</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;BYRADIUS&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">radiusKm</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;km&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;ASC&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;COUNT&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;WITHDIST&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;WITHCOORD&#39;</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">map</span><span class="p">(([</span><span class="nx">driverId</span><span class="p">,</span><span class="w"> </span><span class="nx">distance</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="nx">driverLng</span><span class="p">,</span><span class="w"> </span><span class="nx">driverLat</span><span class="p">]])</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">driver_id</span><span class="o">:</span><span class="w"> </span><span class="nx">driverId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">distance_km</span><span class="o">:</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">distance</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">lat</span><span class="o">:</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">driverLat</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">lng</span><span class="o">:</span><span class="w"> </span><span class="nb">parseFloat</span><span class="p">(</span><span class="nx">driverLng</span><span class="p">),</span>
+<span class="w">    </span><span class="p">}));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Remove driver from available pool</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">removeFromAvailable</span><span class="p">(</span><span class="nx">driverId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">zrem</span><span class="p">(</span><span class="s1">&#39;drivers:available&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">driverId</span><span class="p">.</span><span class="nx">toString</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">MatchingService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">locationService</span><span class="p">,</span><span class="w"> </span><span class="nx">rideService</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">locationService</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">locationService</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">rideService</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">rideService</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">findDriver</span><span class="p">(</span><span class="nx">ride</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">candidates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">locationService</span><span class="p">.</span><span class="nx">findNearbyDrivers</span><span class="p">(</span>
+<span class="w">      </span><span class="nx">ride</span><span class="p">.</span><span class="nx">pickup_lat</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">ride</span><span class="p">.</span><span class="nx">pickup_lng</span><span class="p">,</span>
+<span class="w">      </span><span class="mf">5</span><span class="p">,</span><span class="w"> </span><span class="c1">// 5km radius</span>
+<span class="w">      </span><span class="mf">20</span><span class="w">  </span><span class="c1">// top 20 candidates</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">candidates</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Expand search radius or notify rider</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">rideService</span><span class="p">.</span><span class="nx">updateStatus</span><span class="p">(</span><span class="nx">ride</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;no_drivers&#39;</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Score candidates: lower distance + higher rating = better match</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">scored</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">(</span>
+<span class="w">      </span><span class="nx">candidates</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">c</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">driver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getDriverProfile</span><span class="p">(</span><span class="nx">c</span><span class="p">.</span><span class="nx">driver_id</span><span class="p">);</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="p">...</span><span class="nx">c</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">score</span><span class="o">:</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">distance_km</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">0.7</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="nx">driver</span><span class="p">.</span><span class="nx">rating_avg</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">0.3</span><span class="p">),</span>
+<span class="w">          </span><span class="nx">vehicle_type</span><span class="o">:</span><span class="w"> </span><span class="nx">driver</span><span class="p">.</span><span class="nx">vehicle_type</span><span class="p">,</span>
+<span class="w">        </span><span class="p">};</span>
+<span class="w">      </span><span class="p">})</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Filter by vehicle type and sort by score</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">matched</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">scored</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">s</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">vehicle_type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">ride</span><span class="p">.</span><span class="nx">vehicle_type</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">sort</span><span class="p">((</span><span class="nx">a</span><span class="p">,</span><span class="w"> </span><span class="nx">b</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">score</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">score</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Try to lock the best driver (prevent double-matching)</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">candidate</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">matched</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">locked</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">lockDriver</span><span class="p">(</span><span class="nx">candidate</span><span class="p">.</span><span class="nx">driver_id</span><span class="p">,</span><span class="w"> </span><span class="nx">ride</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">locked</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">rideService</span><span class="p">.</span><span class="nx">assignDriver</span><span class="p">(</span><span class="nx">ride</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">candidate</span><span class="p">.</span><span class="nx">driver_id</span><span class="p">);</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">locationService</span><span class="p">.</span><span class="nx">removeFromAvailable</span><span class="p">(</span><span class="nx">candidate</span><span class="p">.</span><span class="nx">driver_id</span><span class="p">);</span>
+<span class="w">        </span><span class="c1">// Notify driver via WebSocket</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">notifyDriver</span><span class="p">(</span><span class="nx">candidate</span><span class="p">.</span><span class="nx">driver_id</span><span class="p">,</span><span class="w"> </span><span class="nx">ride</span><span class="p">);</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">candidate</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span><span class="w"> </span><span class="c1">// No driver available after locking attempts</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Distributed lock to prevent double-matching</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">lockDriver</span><span class="p">(</span><span class="nx">driverId</span><span class="p">,</span><span class="w"> </span><span class="nx">rideId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// SET with NX (only if not exists) and EX (expire after 30s)</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span>
+<span class="w">      </span><span class="sb">`driver_lock:</span><span class="si">${</span><span class="nx">driverId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">rideId</span><span class="p">.</span><span class="nx">toString</span><span class="p">(),</span>
+<span class="w">      </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">30</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;NX&#39;</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;OK&#39;</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">PricingService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Compute surge multiplier based on supply/demand in area</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getSurgeMultiplier</span><span class="p">(</span><span class="nx">pickup</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">geohash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">computeGeohash</span><span class="p">(</span><span class="nx">pickup</span><span class="p">.</span><span class="nx">lat</span><span class="p">,</span><span class="w"> </span><span class="nx">pickup</span><span class="p">.</span><span class="nx">lng</span><span class="p">,</span><span class="w"> </span><span class="mf">6</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Count riders requesting in this zone (last 5 min)</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">demand</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`demand:</span><span class="si">${</span><span class="nx">geohash</span><span class="si">}</span><span class="sb">`</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// Count available drivers in this zone</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">supply</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">locationService</span><span class="p">.</span><span class="nx">findNearbyDrivers</span><span class="p">(</span>
+<span class="w">      </span><span class="nx">pickup</span><span class="p">.</span><span class="nx">lat</span><span class="p">,</span><span class="w"> </span><span class="nx">pickup</span><span class="p">.</span><span class="nx">lng</span><span class="p">,</span><span class="w"> </span><span class="mf">2</span>
+<span class="w">    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">ratio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">demand</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">max</span><span class="p">(</span><span class="nx">supply</span><span class="p">.</span><span class="nx">length</span><span class="p">,</span><span class="w"> </span><span class="mf">1</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">ratio</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">3</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mf">2.5</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">ratio</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">2</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mf">2.0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">ratio</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">1.5</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mf">1.5</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">ratio</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mf">1.25</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mf">1.0</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">estimateFare</span><span class="p">(</span><span class="nx">pickup</span><span class="p">,</span><span class="w"> </span><span class="nx">dropoff</span><span class="p">,</span><span class="w"> </span><span class="nx">vehicleType</span><span class="p">,</span><span class="w"> </span><span class="nx">surge</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">distance</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">haversineDistance</span><span class="p">(</span><span class="nx">pickup</span><span class="p">,</span><span class="w"> </span><span class="nx">dropoff</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">baseFare</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">standard</span><span class="o">:</span><span class="w"> </span><span class="mf">2.50</span><span class="p">,</span><span class="w"> </span><span class="nx">xl</span><span class="o">:</span><span class="w"> </span><span class="mf">4.00</span><span class="p">,</span><span class="w"> </span><span class="nx">premium</span><span class="o">:</span><span class="w"> </span><span class="mf">6.00</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">perKm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">standard</span><span class="o">:</span><span class="w"> </span><span class="mf">1.20</span><span class="p">,</span><span class="w"> </span><span class="nx">xl</span><span class="o">:</span><span class="w"> </span><span class="mf">1.80</span><span class="p">,</span><span class="w"> </span><span class="nx">premium</span><span class="o">:</span><span class="w"> </span><span class="mf">2.50</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">perMin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">standard</span><span class="o">:</span><span class="w"> </span><span class="mf">0.30</span><span class="p">,</span><span class="w"> </span><span class="nx">xl</span><span class="o">:</span><span class="w"> </span><span class="mf">0.40</span><span class="p">,</span><span class="w"> </span><span class="nx">premium</span><span class="o">:</span><span class="w"> </span><span class="mf">0.60</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">estimatedMinutes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">distance</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">30</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">60</span><span class="p">;</span><span class="w"> </span><span class="c1">// Assume 30 km/h avg</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">fare</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="nx">baseFare</span><span class="p">[</span><span class="nx">vehicleType</span><span class="p">]</span><span class="w"> </span><span class="o">+</span>
+<span class="w">      </span><span class="nx">distance</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">perKm</span><span class="p">[</span><span class="nx">vehicleType</span><span class="p">]</span><span class="w"> </span><span class="o">+</span>
+<span class="w">      </span><span class="nx">estimatedMinutes</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">perMin</span><span class="p">[</span><span class="nx">vehicleType</span><span class="p">];</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">round</span><span class="p">(</span><span class="nx">fare</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">surge</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">100</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">100</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">haversineDistance</span><span class="p">(</span><span class="nx">point1</span><span class="p">,</span><span class="w"> </span><span class="nx">point2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">R</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">6371</span><span class="p">;</span><span class="w"> </span><span class="c1">// Earth radius in km</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">dLat</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">((</span><span class="nx">point2</span><span class="p">.</span><span class="nx">lat</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">point1</span><span class="p">.</span><span class="nx">lat</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">dLng</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">((</span><span class="nx">point2</span><span class="p">.</span><span class="nx">lng</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">point1</span><span class="p">.</span><span class="nx">lng</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">a</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="nb">Math</span><span class="p">.</span><span class="nx">sin</span><span class="p">(</span><span class="nx">dLat</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">2</span><span class="p">)</span><span class="w"> </span><span class="o">**</span><span class="w"> </span><span class="mf">2</span><span class="w"> </span><span class="o">+</span>
+<span class="w">      </span><span class="nb">Math</span><span class="p">.</span><span class="nx">cos</span><span class="p">((</span><span class="nx">point1</span><span class="p">.</span><span class="nx">lat</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">)</span><span class="w"> </span><span class="o">*</span>
+<span class="w">      </span><span class="nb">Math</span><span class="p">.</span><span class="nx">cos</span><span class="p">((</span><span class="nx">point2</span><span class="p">.</span><span class="nx">lat</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">PI</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">180</span><span class="p">)</span><span class="w"> </span><span class="o">*</span>
+<span class="w">      </span><span class="nb">Math</span><span class="p">.</span><span class="nx">sin</span><span class="p">(</span><span class="nx">dLng</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">2</span><span class="p">)</span><span class="w"> </span><span class="o">**</span><span class="w"> </span><span class="mf">2</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">R</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">atan2</span><span class="p">(</span><span class="nb">Math</span><span class="p">.</span><span class="nx">sqrt</span><span class="p">(</span><span class="nx">a</span><span class="p">),</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">sqrt</span><span class="p">(</span><span class="mf">1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">a</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">computeGeohash</span><span class="p">(</span><span class="nx">lat</span><span class="p">,</span><span class="w"> </span><span class="nx">lng</span><span class="p">,</span><span class="w"> </span><span class="nx">precision</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Simplified: in production use ngeohash library</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">lat</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">10</span><span class="p">)</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nx">lng</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">10</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Real-Time Communication with WebSockets</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">WebSocketServer</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ws&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">sub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">pub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">connections</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">wss</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebSocketServer</span><span class="p">({</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">8080</span><span class="w"> </span><span class="p">});</span>
+
+<span class="nx">wss</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;connection&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">ws</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">authenticateWS</span><span class="p">(</span><span class="nx">req</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">connections</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">ws</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">ws</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">connections</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">userId</span><span class="p">));</span>
+<span class="p">});</span>
+
+<span class="c1">// Subscribe to ride updates via Redis Pub/Sub</span>
+<span class="nx">sub</span><span class="p">.</span><span class="nx">psubscribe</span><span class="p">(</span><span class="s1">&#39;ride:*&#39;</span><span class="p">);</span>
+<span class="nx">sub</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;pmessage&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">pattern</span><span class="p">,</span><span class="w"> </span><span class="nx">channel</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">rideId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">&#39;:&#39;</span><span class="p">)[</span><span class="mf">1</span><span class="p">];</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">message</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Forward to connected rider/driver</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">riderWs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">connections</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">rider_id</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">driverWs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">connections</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">driver_id</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">riderWs</span><span class="p">)</span><span class="w"> </span><span class="nx">riderWs</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">data</span><span class="p">));</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">driverWs</span><span class="p">)</span><span class="w"> </span><span class="nx">driverWs</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">data</span><span class="p">));</span>
+<span class="p">});</span>
+
+<span class="c1">// Publish location updates from driver service</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">broadcastDriverLocation</span><span class="p">(</span><span class="nx">rideId</span><span class="p">,</span><span class="w"> </span><span class="nx">driverId</span><span class="p">,</span><span class="w"> </span><span class="nx">location</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">pub</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="sb">`ride:</span><span class="si">${</span><span class="nx">rideId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;driver_location&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">driver_id</span><span class="o">:</span><span class="w"> </span><span class="nx">driverId</span><span class="p">,</span>
+<span class="w">    </span><span class="p">...</span><span class="nx">location</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span>
+<span class="w">  </span><span class="p">}));</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Scaling Strategies</h2>
+<h3>Geospatial Partitioning</h3>
+<div class="highlight"><pre><span></span><code>┌───────────────────────────────────────────────┐
+│  City-Level Partitioning                       │
+│                                                │
+│  Each major city gets its own:                 │
+│    - Redis instance (driver locations)         │
+│    - Matching service (local matching)         │
+│    - Surge calculator                          │
+│                                                │
+│  ┌─────────┐  ┌──────────┐  ┌──────────┐     │
+│  │ NYC     │  │ SF       │  │ London   │     │
+│  │ Cluster │  │ Cluster  │  │ Cluster  │     │
+│  └─────────┘  └──────────┘  └──────────┘     │
+│                                                │
+│  Global services:                              │
+│    - User accounts, payment, trip history      │
+└───────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>Trip State Machine</h3>
+<div class="highlight"><pre><span></span><code> requested ──&gt; matching ──&gt; driver_assigned ──&gt; driver_en_route
+     │                           │                    │
+     ▼                           ▼                    ▼
+  cancelled              cancelled/timeout         arrived
+                                                      │
+                                                      ▼
+                                                  in_progress
+                                                      │
+                                                      ▼
+                                                  completed ──&gt; payment ──&gt; rated
+</code></pre></div>
+
+<h2>Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Location store</strong></td>
+<td>Redis GEO</td>
+<td>PostGIS</td>
+</tr>
+<tr>
+<td></td>
+<td>In-memory, sub-ms, volatile</td>
+<td>Persistent, slower, full SQL</td>
+</tr>
+<tr>
+<td><strong>Matching</strong></td>
+<td>Nearest available</td>
+<td>Batched optimization</td>
+</tr>
+<tr>
+<td></td>
+<td>Instant match, locally optimal</td>
+<td>30s batches, globally optimal</td>
+</tr>
+<tr>
+<td><strong>Real-time updates</strong></td>
+<td>WebSocket</td>
+<td>Server-Sent Events</td>
+</tr>
+<tr>
+<td></td>
+<td>Bidirectional, complex</td>
+<td>Simpler, one-way (rider only)</td>
+</tr>
+<tr>
+<td><strong>Surge pricing</strong></td>
+<td>Real-time (per request)</td>
+<td>Zone-based (pre-computed)</td>
+</tr>
+<tr>
+<td></td>
+<td>Accurate, expensive computation</td>
+<td>Slightly stale, very fast</td>
+</tr>
+<tr>
+<td><strong>Trip storage</strong></td>
+<td>PostgreSQL</td>
+<td>DynamoDB</td>
+</tr>
+<tr>
+<td></td>
+<td>Relational, complex queries</td>
+<td>Key-value, unlimited scale</td>
+</tr>
+</tbody>
+</table>
+<h2>Summary</h2>
+<p>A ride-sharing system requires real-time geospatial indexing (Redis GEO), distributed locking for driver matching, WebSocket connections for live tracking, and a state machine for trip lifecycle management. The system partitions naturally by city/region. Surge pricing uses supply/demand ratios computed from geohash-bucketed zones. The critical path — matching a rider with a driver — must use Redis-based locking to prevent double-assignment. Location data flows through Redis Pub/Sub to deliver real-time updates to both parties.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Geospatial Matching with Redis</div>
+                    <div class="exercise-desc"><p>Build a Node.js service that stores driver locations using Redis GEOADD and finds the 5 nearest drivers to a pickup point using GEOSEARCH. Simulate 1000 drivers in a city grid and benchmark query latency.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use ioredis GEOADD to seed random driver positions within a bounding box. Use GEOSEARCH FROMLONLAT BYRADIUS to find nearby drivers.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Ride State Machine</div>
+                    <div class="exercise-desc"><p>Implement a ride lifecycle state machine in Node.js. Define valid state transitions, reject invalid ones, and emit events (via EventEmitter) on each transition. Persist state to PostgreSQL via Prisma.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Define a transitions map: { requested: ['matching', 'cancelled'], matching: ['driver_assigned', 'cancelled'], ... }. Validate before updating.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Surge Pricing Calculator</div>
+                    <div class="exercise-desc"><p>Build a surge pricing service that divides a city into geohash cells, counts ride requests and available drivers per cell, and computes a surge multiplier. Update every 30 seconds using a BullMQ repeatable job.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the ngeohash npm package. Track demand with Redis INCR on geohash keys with TTL. Count supply with GEOSEARCH per cell.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Two riders get matched with the same driver simultaneously</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Race condition in the matching service — two concurrent ride requests both see the same driver as available and attempt to assign them.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use Redis SET with NX (set-if-not-exists) as a distributed lock on the driver ID. Only the first request that acquires the lock gets the driver. The second request must fall back to the next candidate. This provides atomic check-and-set semantics without database-level locking.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Driver location updates are lagging behind by 10-15 seconds</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> WebSocket connection drops and reconnects, or the location service is overwhelmed by write volume at peak hours.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use a dedicated Redis cluster for location writes, separate from the matching Redis. Buffer location updates client-side and send in batches (every 3-4 seconds). Implement WebSocket heartbeat with automatic reconnection. Accept slightly stale locations for matching (5s staleness is acceptable).
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Surge pricing oscillates rapidly, confusing riders</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Supply/demand ratio is recomputed too frequently and small fluctuations cause large multiplier swings.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Smooth the surge multiplier using a moving average over the last 5 minutes instead of instantaneous values. Apply a dampening factor so the multiplier can only change by +/- 0.25 per computation cycle. Use hysteresis: surge only increases when demand/supply exceeds the threshold for 2 consecutive cycles.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://eng.uber.com/ringpop-open-source-nodejs-library/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Uber Engineering Blog: Ringpop</div>
+                    
+                    <div class="resource-note">Uber's open-source Node.js library for building cooperative distributed systems</div>
+                    
+                </a>
+                
+                <a href="https://eng.uber.com/h3/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">H3: Uber's Hexagonal Hierarchical Geospatial Indexing System</div>
+                    
+                    <div class="resource-note">How Uber indexes the world using hexagonal cells instead of geohashes</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/commands/?group=geo" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis GEO Commands Documentation</div>
+                    
+                    <div class="resource-note">Official reference for GEOADD, GEOSEARCH, GEODIST and other geo commands</div>
+                    
+                </a>
+                
+                <a href="https://www.hellointerview.com/learn/system-design/answer-keys/uber" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Designing a Ride-Hailing System at Scale</div>
+                    
+                    <div class="resource-note">Detailed walkthrough of the Uber system design problem</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.5.1-js.html" class="btn">&larr; Design a Social Graph (Facebook/LinkedIn)</a>
+            
+            
+            <a href="/backend-learning/lesson/9.5.3-js.html" class="btn">Design an Online Code Editor (Replit) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

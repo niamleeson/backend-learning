@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Multi-Tenant SaaS Platform - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Data & Analytics
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.6.6</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a Multi-Tenant SaaS Platform</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a multi-tenant SaaS platform like an apartment building. All tenants share the same building (infrastructure), elevators (API gateway), and utilities (shared services). Each apartment has its own lock (authentication), its own space (data isolation), and different floor plans based on what they pay (plan tiers). The building manager (admin) ensures that a loud party in one apartment (noisy neighbor) does not disturb everyone else through noise limits (rate limiting) and soundproofing (resource isolation).</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Multi-Tenant SaaS Platform</h1>
+<h2>Introduction</h2>
+<p>Multi-tenancy is the foundational architecture for Software-as-a-Service (SaaS) products. A multi-tenant system serves many customers (tenants) from a shared infrastructure while maintaining strict data isolation, per-tenant customization, and fair resource allocation. Think of platforms like Slack, Salesforce, Shopify, or any B2B SaaS product. The design challenge is balancing cost efficiency (shared resources) with isolation (each tenant's data and performance must be independent).</p>
+<h2>Requirements</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li>Support thousands of tenants (organizations) on shared infrastructure</li>
+<li>Each tenant has its own <strong>users</strong>, <strong>data</strong>, <strong>configurations</strong>, and <strong>billing plan</strong></li>
+<li>Strict <strong>data isolation</strong> — Tenant A must never see Tenant B's data</li>
+<li>Per-tenant <strong>customization</strong> — custom branding, feature flags, integrations</li>
+<li><strong>Role-based access control (RBAC)</strong> within each tenant</li>
+<li>Support multiple <strong>billing tiers</strong> (Free, Pro, Enterprise) with different resource limits</li>
+<li><strong>Tenant onboarding</strong> — self-service signup, provisioning, and data import</li>
+<li><strong>Tenant offboarding</strong> — data export and complete deletion (GDPR compliance)</li>
+<li>Admin dashboard for tenant management, usage metrics, and billing</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li>50,000 tenants, ranging from 5 users to 100,000 users</li>
+<li>Total users: 10 million</li>
+<li>Noisy neighbor prevention — one tenant's heavy usage must not degrade others</li>
+<li>Data residency — support storing data in specific regions (EU, US, APAC)</li>
+<li>99.99% availability</li>
+<li>Tenant provisioning time: &lt; 30 seconds</li>
+<li>Zero data leakage between tenants (security critical)</li>
+</ul>
+<h2>Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Tenants:                50,000
+Total users:            10,000,000
+Avg users per tenant:   200 (highly skewed: most have &lt;50, some have 100K+)
+DAU:                    3,000,000 (30%)
+Requests/sec:           3M * 100 requests/day / 86,400 = ~3,500 req/s
+Peak:                   ~10,000 req/s
+
+Storage per tenant:
+  Small (&lt; 50 users):   100 MB avg -&gt; 40,000 * 100 MB = 4 TB
+  Medium (50-1K users):  5 GB avg  -&gt; 8,000 * 5 GB = 40 TB
+  Large (1K+ users):     100 GB avg -&gt; 2,000 * 100 GB = 200 TB
+  Total:                 ~244 TB
+
+Database connections:
+  If using shared DB: pooled connections (100-500 per app server)
+  If using DB-per-tenant: 50,000 databases (impractical for small tenants)
+  Hybrid: shared DB for small, dedicated for enterprise
+</code></pre></div>
+
+<h2>High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────────────┐
+│                        Client Applications                       │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐                 │
+│  │ Tenant A   │  │ Tenant B   │  │ Tenant C   │                 │
+│  │ Web App    │  │ Mobile App │  │ API Client │                 │
+│  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘                 │
+└────────┼───────────────┼───────────────┼────────────────────────┘
+         │               │               │
+         ▼               ▼               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│              DNS + CDN (tenant-a.app.com, tenant-b.app.com)      │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     API Gateway                                  │
+│  ┌────────────────────────────────────────────────────────┐      │
+│  │ 1. Identify tenant (subdomain / header / JWT claim)    │      │
+│  │ 2. Authenticate user                                   │      │
+│  │ 3. Rate limit per tenant tier                          │      │
+│  │ 4. Route to correct region                             │      │
+│  └────────────────────────┬───────────────────────────────┘      │
+└───────────────────────────┼──────────────────────────────────────┘
+                            │
+                            ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                   Application Layer                               │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │          Shared Application Servers (Node.js)             │    │
+│  │                                                          │    │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │    │
+│  │  │ Tenant       │  │ Feature      │  │ Rate         │    │    │
+│  │  │ Context      │  │ Flags        │  │ Limiter      │    │    │
+│  │  │ Middleware   │  │ Service      │  │ (per-tenant) │    │    │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘    │    │
+│  └──────────────────────────────────────────────────────────┘    │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+         ┌─────────────────┼─────────────────┐
+         ▼                 ▼                 ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                      Data Layer                                  │
+│                                                                  │
+│  Strategy 1: Shared Database, Shared Schema (tenant_id column)   │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │  PostgreSQL Cluster                                       │    │
+│  │  ┌─────────────────────────────────────────────────────┐  │    │
+│  │  │ users: id | tenant_id | email | name | role         │  │    │
+│  │  │ projects: id | tenant_id | name | created_at        │  │    │
+│  │  │ tasks: id | tenant_id | project_id | title | status │  │    │
+│  │  └─────────────────────────────────────────────────────┘  │    │
+│  └──────────────────────────────────────────────────────────┘    │
+│                                                                  │
+│  Strategy 2: Shared Database, Separate Schemas                   │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │  PostgreSQL                                               │    │
+│  │  ├── tenant_abc.users                                     │    │
+│  │  ├── tenant_abc.projects                                  │    │
+│  │  ├── tenant_xyz.users                                     │    │
+│  │  └── tenant_xyz.projects                                  │    │
+│  └──────────────────────────────────────────────────────────┘    │
+│                                                                  │
+│  Strategy 3: Separate Database per Tenant (Enterprise)           │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                       │
+│  │ DB:      │  │ DB:      │  │ DB:      │                       │
+│  │ tenant_a │  │ tenant_b │  │ tenant_c │                       │
+│  └──────────┘  └──────────┘  └──────────┘                       │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│                   Supporting Services                             │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
+│  │ Billing  │  │ Tenant   │  │ Usage    │  │ Notification     │ │
+│  │ Service  │  │ Config   │  │ Metering │  │ Service          │ │
+│  │(Stripe)  │  │ Store    │  │          │  │                  │ │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>API Design</h2>
+<h3>Tenant Context Middleware</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="c1">// Tenant identification middleware — runs on every request</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">tenantContext</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Strategy 1: Subdomain-based</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">subdomain</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">hostname</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">&#39;.&#39;</span><span class="p">)[</span><span class="mf">0</span><span class="p">];</span>
+<span class="w">  </span><span class="c1">// Strategy 2: Header-based</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">headerTenant</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">headers</span><span class="p">[</span><span class="s1">&#39;x-tenant-id&#39;</span><span class="p">];</span>
+<span class="w">  </span><span class="c1">// Strategy 3: JWT claim</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">jwtTenant</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="o">?</span><span class="p">.</span><span class="nx">tenantId</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">tenantSlug</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">subdomain</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">headerTenant</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">jwtTenant</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">tenantSlug</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Tenant identification required&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Look up tenant configuration (cached in Redis)</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">tenant</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tenantCache</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">tenantSlug</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">tenant</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Tenant not found&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">tenant</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;active&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="sb">`Tenant is </span><span class="si">${</span><span class="nx">tenant</span><span class="p">.</span><span class="nx">status</span><span class="si">}</span><span class="sb">`</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Attach tenant context to request</span>
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">tenant</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">slug</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">slug</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">plan</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">plan</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">dbSchema</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">dbSchema</span><span class="p">,</span><span class="w">       </span><span class="c1">// for schema-per-tenant</span>
+<span class="w">    </span><span class="nx">dbConnectionString</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">dbUrl</span><span class="p">,</span><span class="w"> </span><span class="c1">// for db-per-tenant</span>
+<span class="w">    </span><span class="nx">features</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">features</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">limits</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">limits</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">region</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">region</span><span class="p">,</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="nx">next</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">tenantContext</span><span class="p">);</span>
+</code></pre></div>
+
+<h3>Tenant-Scoped Data Access</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@prisma/client&#39;</span><span class="p">;</span>
+
+<span class="c1">// Shared database approach with tenant_id column</span>
+<span class="c1">// CRITICAL: Every query MUST include tenant_id filter</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">TenantScopedRepository</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">prisma</span><span class="p">,</span><span class="w"> </span><span class="nx">tenantId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">prisma</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">tenantId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tenantId</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">findProjects</span><span class="p">(</span><span class="nx">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">prisma</span><span class="p">.</span><span class="nx">project</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">tenantId</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">tenantId</span><span class="p">,</span><span class="w"> </span><span class="c1">// ALWAYS scope by tenant</span>
+<span class="w">        </span><span class="p">...</span><span class="nx">options</span><span class="p">.</span><span class="nx">where</span><span class="p">,</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">orderBy</span><span class="o">:</span><span class="w"> </span><span class="nx">options</span><span class="p">.</span><span class="nx">orderBy</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">createdAt</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;desc&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">take</span><span class="o">:</span><span class="w"> </span><span class="nx">options</span><span class="p">.</span><span class="nx">limit</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">50</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">skip</span><span class="o">:</span><span class="w"> </span><span class="nx">options</span><span class="p">.</span><span class="nx">offset</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">createProject</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">prisma</span><span class="p">.</span><span class="nx">project</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="p">...</span><span class="nx">data</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">tenantId</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">tenantId</span><span class="p">,</span><span class="w"> </span><span class="c1">// ALWAYS set tenant</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">findProjectById</span><span class="p">(</span><span class="nx">id</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">project</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">prisma</span><span class="p">.</span><span class="nx">project</span><span class="p">.</span><span class="nx">findFirst</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">id</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">tenantId</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">tenantId</span><span class="p">,</span><span class="w"> </span><span class="c1">// Prevent cross-tenant access</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">project</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage in route handler</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/projects&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">repo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">TenantScopedRepository</span><span class="p">(</span><span class="nx">prisma</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">tenant</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">projects</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">repo</span><span class="p">.</span><span class="nx">findProjects</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">50</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">offset</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">offset</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">projects</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Row-Level Security with PostgreSQL</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// Using PostgreSQL Row-Level Security (RLS) as a safety net</span>
+<span class="c1">// Even if application code has a bug, the DB enforces isolation</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">setupRLS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">prisma</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$executeRaw</span><span class="sb">`</span>
+<span class="sb">    -- Enable RLS on the projects table</span>
+<span class="sb">    ALTER TABLE projects ENABLE ROW LEVEL SECURITY;</span>
+
+<span class="sb">    -- Policy: users can only see their tenant&#39;s projects</span>
+<span class="sb">    CREATE POLICY tenant_isolation_policy ON projects</span>
+<span class="sb">      USING (tenant_id = current_setting(&#39;app.current_tenant_id&#39;)::uuid);</span>
+
+<span class="sb">    -- Policy: inserts must match current tenant</span>
+<span class="sb">    CREATE POLICY tenant_insert_policy ON projects</span>
+<span class="sb">      FOR INSERT</span>
+<span class="sb">      WITH CHECK (tenant_id = current_setting(&#39;app.current_tenant_id&#39;)::uuid);</span>
+<span class="sb">  `</span><span class="p">;</span>
+<span class="p">};</span>
+
+<span class="c1">// Middleware to set tenant context at the database level</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">setDbTenantContext</span><span class="p">(</span><span class="nx">prisma</span><span class="p">,</span><span class="w"> </span><span class="nx">tenantId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$executeRaw</span><span class="sb">`</span>
+<span class="sb">    SET LOCAL app.current_tenant_id = </span><span class="si">${</span><span class="nx">tenantId</span><span class="si">}</span><span class="sb">;</span>
+<span class="sb">  `</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage in transaction</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/projects&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">projects</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$transaction</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">tx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">$executeRaw</span><span class="sb">`</span>
+<span class="sb">      SET LOCAL app.current_tenant_id = </span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">tenant</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">;</span>
+<span class="sb">    `</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// RLS automatically filters — no tenant_id in WHERE needed</span>
+<span class="w">    </span><span class="c1">// (but you should still include it for defense in depth)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">project</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">tenantId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">tenant</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">take</span><span class="o">:</span><span class="w"> </span><span class="mf">50</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">projects</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Tenant Management API</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/v1/admin/tenants</span>
+<span class="c1">// Create a new tenant (admin or self-service signup)</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/admin/tenants&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">slug</span><span class="p">,</span><span class="w"> </span><span class="nx">plan</span><span class="p">,</span><span class="w"> </span><span class="nx">adminEmail</span><span class="p">,</span><span class="w"> </span><span class="nx">region</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Validate slug uniqueness</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tenantService</span><span class="p">.</span><span class="nx">findBySlug</span><span class="p">(</span><span class="nx">slug</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">409</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Slug already taken&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Create tenant with all associated resources</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">tenant</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$transaction</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">tx</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 1. Create tenant record</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">t</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">tenant</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">name</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">slug</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">plan</span><span class="o">:</span><span class="w"> </span><span class="nx">plan</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;free&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">region</span><span class="o">:</span><span class="w"> </span><span class="nx">region</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;us-east-1&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;provisioning&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">limits</span><span class="o">:</span><span class="w"> </span><span class="nx">getPlanLimits</span><span class="p">(</span><span class="nx">plan</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;free&#39;</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">features</span><span class="o">:</span><span class="w"> </span><span class="nx">getPlanFeatures</span><span class="p">(</span><span class="nx">plan</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;free&#39;</span><span class="p">),</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// 2. Create admin user</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">tenantId</span><span class="o">:</span><span class="w"> </span><span class="nx">t</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="nx">adminEmail</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">role</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;admin&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// 3. Create default resources (workspace, project, etc.)</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">tx</span><span class="p">.</span><span class="nx">workspace</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">tenantId</span><span class="o">:</span><span class="w"> </span><span class="nx">t</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Default Workspace&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">isDefault</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">t</span><span class="p">;</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Async provisioning (DNS, SSL cert, etc.)</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">provisioningQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;provision-tenant&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">tenantId</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">slug</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">slug</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">region</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">region</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">slug</span><span class="o">:</span><span class="w"> </span><span class="nx">tenant</span><span class="p">.</span><span class="nx">slug</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;provisioning&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">adminEmail</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">dashboardUrl</span><span class="o">:</span><span class="w"> </span><span class="sb">`https://</span><span class="si">${</span><span class="nx">slug</span><span class="si">}</span><span class="sb">.app.example.com`</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// PUT /api/v1/admin/tenants/:tenantId/plan</span>
+<span class="c1">// Upgrade/downgrade tenant plan</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">put</span><span class="p">(</span><span class="s1">&#39;/api/v1/admin/tenants/:tenantId/plan&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">tenantId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">plan</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">tenant</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tenantService</span><span class="p">.</span><span class="nx">findById</span><span class="p">(</span><span class="nx">tenantId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">tenant</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Tenant not found&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Check if downgrade is possible (within new limits)</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">isPlanDowngrade</span><span class="p">(</span><span class="nx">tenant</span><span class="p">.</span><span class="nx">plan</span><span class="p">,</span><span class="w"> </span><span class="nx">plan</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">usage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">usageMeter</span><span class="p">.</span><span class="nx">getTenantUsage</span><span class="p">(</span><span class="nx">tenantId</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">newLimits</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getPlanLimits</span><span class="p">(</span><span class="nx">plan</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">violations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">checkLimitViolations</span><span class="p">(</span><span class="nx">usage</span><span class="p">,</span><span class="w"> </span><span class="nx">newLimits</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">violations</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">422</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Cannot downgrade — current usage exceeds new plan limits&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">violations</span><span class="p">,</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">updated</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tenantService</span><span class="p">.</span><span class="nx">updatePlan</span><span class="p">(</span><span class="nx">tenantId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">plan</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">limits</span><span class="o">:</span><span class="w"> </span><span class="nx">getPlanLimits</span><span class="p">(</span><span class="nx">plan</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">features</span><span class="o">:</span><span class="w"> </span><span class="nx">getPlanFeatures</span><span class="p">(</span><span class="nx">plan</span><span class="p">),</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Update billing subscription</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">billingService</span><span class="p">.</span><span class="nx">updateSubscription</span><span class="p">(</span><span class="nx">tenant</span><span class="p">.</span><span class="nx">stripeCustomerId</span><span class="p">,</span><span class="w"> </span><span class="nx">plan</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Invalidate tenant cache</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">tenantCache</span><span class="p">.</span><span class="nx">invalidate</span><span class="p">(</span><span class="nx">tenant</span><span class="p">.</span><span class="nx">slug</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">updated</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Rate Limiting per Tenant</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">PLAN_RATE_LIMITS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">free</span><span class="o">:</span><span class="w">       </span><span class="p">{</span><span class="w"> </span><span class="nx">requests</span><span class="o">:</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span><span class="w">   </span><span class="nb">window</span><span class="o">:</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="p">},</span><span class="w">   </span><span class="c1">// 100 req/min</span>
+<span class="w">  </span><span class="nx">pro</span><span class="o">:</span><span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nx">requests</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span><span class="p">,</span><span class="w">  </span><span class="nb">window</span><span class="o">:</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="p">},</span><span class="w">   </span><span class="c1">// 1000 req/min</span>
+<span class="w">  </span><span class="nx">enterprise</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">requests</span><span class="o">:</span><span class="w"> </span><span class="mf">10000</span><span class="p">,</span><span class="w"> </span><span class="nb">window</span><span class="o">:</span><span class="w"> </span><span class="mf">60</span><span class="w"> </span><span class="p">},</span><span class="w">   </span><span class="c1">// 10000 req/min</span>
+<span class="p">};</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">tenantRateLimiter</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">tenantId</span><span class="p">,</span><span class="w"> </span><span class="nx">plan</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">tenant</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">limits</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">PLAN_RATE_LIMITS</span><span class="p">[</span><span class="nx">plan</span><span class="p">];</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`ratelimit:</span><span class="si">${</span><span class="nx">tenantId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1000</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">limits</span><span class="p">.</span><span class="nb">window</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">current</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">incr</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">current</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">expire</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">limits</span><span class="p">.</span><span class="nb">window</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">setHeader</span><span class="p">(</span><span class="s1">&#39;X-RateLimit-Limit&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">limits</span><span class="p">.</span><span class="nx">requests</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">setHeader</span><span class="p">(</span><span class="s1">&#39;X-RateLimit-Remaining&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">max</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">limits</span><span class="p">.</span><span class="nx">requests</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">current</span><span class="p">));</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">setHeader</span><span class="p">(</span><span class="s1">&#39;X-RateLimit-Reset&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">ceil</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1000</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nx">limits</span><span class="p">.</span><span class="nb">window</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">limits</span><span class="p">.</span><span class="nb">window</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">current</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">limits</span><span class="p">.</span><span class="nx">requests</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">429</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Rate limit exceeded&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">retryAfter</span><span class="o">:</span><span class="w"> </span><span class="nx">limits</span><span class="p">.</span><span class="nb">window</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">next</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">tenantRateLimiter</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Tenants</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">tenants</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">slug</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">plan</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;free&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;active&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">region</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;us-east-1&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">limits</span><span class="w">          </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">features</span><span class="w">        </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">custom_domain</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span>
+<span class="w">  </span><span class="n">branding</span><span class="w">        </span><span class="n">JSONB</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span><span class="w">   </span><span class="c1">-- logo, colors, etc.</span>
+<span class="w">  </span><span class="n">stripe_customer_id</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span>
+<span class="w">  </span><span class="n">data_retention_days</span><span class="w"> </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">365</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Users (multi-tenant)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">tenant_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">tenants</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">email</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">display_name</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span>
+<span class="w">  </span><span class="n">password_hash</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="k">role</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;member&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_active</span><span class="w">       </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">TRUE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">last_login_at</span><span class="w">   </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">(</span><span class="n">tenant_id</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_users_tenant</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">tenant_id</span><span class="p">);</span>
+
+<span class="c1">-- Projects (example domain entity)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">projects</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">tenant_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">tenants</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">description</span><span class="w">     </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;active&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_by</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_projects_tenant</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">projects</span><span class="p">(</span><span class="n">tenant_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+
+<span class="c1">-- Enable Row-Level Security</span>
+<span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="n">ENABLE</span><span class="w"> </span><span class="k">ROW</span><span class="w"> </span><span class="k">LEVEL</span><span class="w"> </span><span class="k">SECURITY</span><span class="p">;</span>
+<span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">projects</span><span class="w"> </span><span class="n">ENABLE</span><span class="w"> </span><span class="k">ROW</span><span class="w"> </span><span class="k">LEVEL</span><span class="w"> </span><span class="k">SECURITY</span><span class="p">;</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="n">POLICY</span><span class="w"> </span><span class="n">tenant_users_policy</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">users</span>
+<span class="w">  </span><span class="k">USING</span><span class="w"> </span><span class="p">(</span><span class="n">tenant_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">current_setting</span><span class="p">(</span><span class="s1">&#39;app.current_tenant_id&#39;</span><span class="p">)::</span><span class="n">uuid</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="n">POLICY</span><span class="w"> </span><span class="n">tenant_projects_policy</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">projects</span>
+<span class="w">  </span><span class="k">USING</span><span class="w"> </span><span class="p">(</span><span class="n">tenant_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">current_setting</span><span class="p">(</span><span class="s1">&#39;app.current_tenant_id&#39;</span><span class="p">)::</span><span class="n">uuid</span><span class="p">);</span>
+
+<span class="c1">-- Usage metering</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">usage_records</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">tenant_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">tenants</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">metric</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w"> </span><span class="c1">-- &#39;api_requests&#39;, &#39;storage_bytes&#39;, &#39;users&#39;</span>
+<span class="w">  </span><span class="n">value</span><span class="w">           </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">recorded_at</span><span class="w">     </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_usage_tenant_metric</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">usage_records</span><span class="p">(</span><span class="n">tenant_id</span><span class="p">,</span><span class="w"> </span><span class="n">metric</span><span class="p">,</span><span class="w"> </span><span class="n">recorded_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+
+<span class="c1">-- Tenant invitations</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">invitations</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">tenant_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">tenants</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">email</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="k">role</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;member&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">token</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;pending&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">invited_by</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">expires_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Audit log (per-tenant)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">audit_logs</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">tenant_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">tenants</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">         </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">action</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">resource_type</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">resource_id</span><span class="w">     </span><span class="n">UUID</span><span class="p">,</span>
+<span class="w">  </span><span class="n">changes</span><span class="w">         </span><span class="n">JSONB</span><span class="p">,</span>
+<span class="w">  </span><span class="n">ip_address</span><span class="w">      </span><span class="n">INET</span><span class="p">,</span>
+<span class="w">  </span><span class="n">user_agent</span><span class="w">      </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_audit_tenant</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">audit_logs</span><span class="p">(</span><span class="n">tenant_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Deep Dive: Tenant Isolation Strategies</h2>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────────────────────┐
+│                   Isolation Spectrum                              │
+│                                                                 │
+│  Shared Everything ◄──────────────────────► Dedicated Everything │
+│                                                                 │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐  │
+│  │ Shared   │    │ Shared   │    │ Shared   │    │ Dedicated│  │
+│  │ DB +     │    │ DB,      │    │ Infra,   │    │ DB +     │  │
+│  │ Shared   │    │ Separate │    │ Separate │    │ Dedicated│  │
+│  │ Schema   │    │ Schema   │    │ DB       │    │ Infra    │  │
+│  │          │    │          │    │          │    │          │  │
+│  │ Cheapest │    │ Moderate │    │ Expensive│    │ Most $   │  │
+│  │ Least    │    │ Medium   │    │ Good     │    │ Best     │  │
+│  │ isolated │    │ isolated │    │ isolated │    │ isolated │  │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘  │
+│                                                                 │
+│  Free / Starter      Pro           Business       Enterprise   │
+└─────────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>Scaling Strategies</h2>
+<ul>
+<li><strong>Tenant-aware routing</strong>: Route large tenants to dedicated application server pools to prevent noisy-neighbor issues.</li>
+<li><strong>Database sharding by tenant</strong>: Group tenants onto database shards. Move high-traffic tenants to dedicated shards.</li>
+<li><strong>Connection pooling</strong>: Use PgBouncer or similar to pool connections across tenants. Avoid per-tenant connection pools for small tenants.</li>
+<li><strong>Caching with tenant namespacing</strong>: All Redis keys prefixed with <code>tenant:{id}:</code> to prevent key collisions.</li>
+<li><strong>CDN with tenant-specific cache keys</strong>: Cache static assets per tenant domain.</li>
+<li><strong>Regional deployment</strong>: Deploy full stack copies in EU, US, APAC. Route tenants to their designated region.</li>
+</ul>
+<h2>Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Pros</th>
+<th>Cons</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Shared schema (tenant_id)</td>
+<td>Simple, cheap, easy migrations</td>
+<td>Must never forget WHERE tenant_id =, noisy neighbor risk</td>
+</tr>
+<tr>
+<td>Schema-per-tenant</td>
+<td>Good isolation, easy per-tenant backup</td>
+<td>Schema migrations across thousands of schemas</td>
+</tr>
+<tr>
+<td>DB-per-tenant</td>
+<td>Best isolation, independent scaling</td>
+<td>Connection overhead, migration coordination</td>
+</tr>
+<tr>
+<td>PostgreSQL RLS</td>
+<td>Database-enforced isolation safety net</td>
+<td>Slight performance overhead, complexity</td>
+</tr>
+<tr>
+<td>Subdomain routing</td>
+<td>Clean URLs, easy tenant identification</td>
+<td>SSL wildcard cert needed, DNS management</td>
+</tr>
+<tr>
+<td>Tiered isolation (hybrid)</td>
+<td>Right-sized for each tenant's needs</td>
+<td>Complex codebase, multiple code paths</td>
+</tr>
+</tbody>
+</table>
+<h2>Noisy Neighbor Prevention</h2>
+<div class="highlight"><pre><span></span><code>Strategies:
+
+1. Per-tenant rate limiting (API layer)
+   - Free: 100 req/min
+   - Pro: 1,000 req/min
+   - Enterprise: 10,000 req/min
+
+2. Per-tenant connection limits (DB layer)
+   - Free: 5 connections
+   - Pro: 20 connections
+   - Enterprise: 100 connections
+
+3. Per-tenant query timeout
+   - Free: 5 second max query time
+   - Pro: 30 second max
+   - Enterprise: 120 second max
+
+4. Background job queues per priority
+   - Free: low-priority shared queue
+   - Pro: medium-priority queue
+   - Enterprise: dedicated queue with reserved workers
+
+5. Storage quotas
+   - Free: 1 GB
+   - Pro: 100 GB
+   - Enterprise: Unlimited (metered)
+</code></pre></div>
+
+<h2>Summary</h2>
+<p>Designing a multi-tenant SaaS platform requires careful decisions across every layer: tenant identification (subdomain, header, JWT), data isolation (shared schema with tenant_id, separate schemas, separate databases), resource management (rate limiting, connection pooling, quotas), and customization (feature flags, branding, plan-based limits). The key insight is that one size does not fit all — use a tiered isolation model where small tenants share everything (cheap) and enterprise tenants get dedicated resources (isolated). Row-Level Security in PostgreSQL provides a critical safety net against data leakage bugs. Every query, every cache key, and every background job must be tenant-scoped.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Implement Tenant-Scoped Middleware</div>
+                    <div class="exercise-desc"><p>Build an Express middleware that identifies tenants from the subdomain, looks up tenant configuration from a Redis cache (falling back to PostgreSQL), and attaches tenant context to every request. Include plan-based rate limiting using Redis.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Parse the subdomain from req.hostname. Use Redis GET with a fallback to a database query. Cache the tenant config for 5 minutes. Use Redis INCR with EXPIRE for rate limiting with a sliding window keyed by tenant ID.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build a Tenant-Scoped Data Access Layer</div>
+                    <div class="exercise-desc"><p>Create a repository class that automatically scopes all queries to the current tenant. Every findMany, findOne, create, update, and delete method must include the tenant_id filter. Write tests that verify Tenant A cannot access Tenant B's data.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Create a base class that accepts tenantId in the constructor. Override Prisma methods to inject the tenant filter. In tests, create data for two tenants and verify cross-tenant queries return empty results.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Tenant Onboarding Pipeline</div>
+                    <div class="exercise-desc"><p>Build a tenant provisioning system that: creates the tenant record, creates the admin user, sends a welcome email (simulate), sets up default data (workspace, sample project), and updates the tenant status to 'active'. Use BullMQ for the async pipeline.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Create a BullMQ flow with dependent jobs: create-tenant -&gt; [create-admin, create-defaults] -&gt; send-welcome -&gt; activate-tenant. Use flow producer for job dependencies.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Noisy Neighbor Detection</div>
+                    <div class="exercise-desc"><p>Build a monitoring system that tracks per-tenant request rates, response times, and error rates. Alert when a tenant's usage exceeds 3x the average for their plan tier. Implement automatic throttling that reduces the noisy tenant's rate limit by 50% for 10 minutes.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Redis sorted sets to track per-tenant request counts per minute. Calculate the running average across all tenants in the same plan tier. When a tenant exceeds the threshold, update their rate limit in Redis with a TTL.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">A developer forgot to include tenant_id in a database query, exposing Tenant B's data to Tenant A</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Users report seeing data that does not belong to their organization. Security audit reveals queries without tenant_id filter.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> In a shared-schema model, every query must include a tenant_id filter. Without it, the query returns data across all tenants. This is the most critical bug in multi-tenant systems.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement defense in depth: (1) Use PostgreSQL Row-Level Security as a database-level safety net, (2) Create a tenant-scoped repository layer that automatically injects tenant_id into every query, (3) Add integration tests that verify cross-tenant isolation for every endpoint, (4) Use Prisma middleware to log warnings when queries lack tenant_id.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">One enterprise tenant's heavy batch import is degrading performance for all other tenants</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> All tenants experience elevated API response times. Database connection pool at 100% utilization. Monitoring shows one tenant generating 80% of all queries.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The large tenant's import generates thousands of concurrent database queries that consume all available connections and CPU, causing connection pool exhaustion and slow queries for everyone else.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement per-tenant connection limits at the PgBouncer level. Route the enterprise tenant's batch operations through a dedicated database replica or shard. Use separate job queues for batch operations with concurrency limits per tenant. Implement query timeouts that vary by plan tier.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Schema migrations take hours because they must be applied across 50,000 tenant schemas</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> In a schema-per-tenant architecture, each ALTER TABLE must be executed against every tenant schema sequentially. A single migration multiplied by 50,000 schemas takes unreasonably long.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Migrate to a shared-schema model for small tenants (tenant_id column with RLS). For schema-per-tenant, use parallel migration execution with configurable concurrency. Implement online schema migrations (pt-online-schema-change or pg_repack) that do not lock tables. Batch migrations during low-traffic windows. Consider using zero-downtime migration patterns (expand-contract).
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://docs.aws.amazon.com/wellarchitected/latest/saas-lens/saas-lens.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Multi-tenant SaaS Patterns (AWS Well-Architected)</div>
+                    
+                    <div class="resource-note">AWS reference architecture for building multi-tenant SaaS applications</div>
+                    
+                </a>
+                
+                <a href="https://www.postgresql.org/docs/current/ddl-rowsecurity.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">PostgreSQL Row-Level Security</div>
+                    
+                    <div class="resource-note">Official PostgreSQL documentation on RLS, the key technology for tenant data isolation</div>
+                    
+                </a>
+                
+                <a href="https://www.prisma.io/docs/guides/other/multi-tenancy" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Building Multi-Tenant Applications with Prisma</div>
+                    
+                    <div class="resource-note">Prisma ORM guide covering shared-database and schema-per-tenant strategies</div>
+                    
+                </a>
+                
+                <a href="https://www.youtube.com/watch?v=joz0DoSQDNw" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag video">video</div>
+                    <div class="resource-title">Designing SaaS Applications on AWS (re:Invent)</div>
+                    
+                    <div class="resource-note">AWS re:Invent talk on SaaS architecture patterns including tenant isolation and noisy neighbor mitigation</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.6.5-js.html" class="btn">&larr; Design a CI/CD Pipeline (GitHub Actions)</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

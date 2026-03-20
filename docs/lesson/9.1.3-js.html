@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Notification Service - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Core System Design Problems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.1.3</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design a Notification Service</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>A notification service works like a post office. Letters (notifications) arrive, get sorted by destination type (email, SMS, push -- like domestic, international, express), placed into separate processing lines, and handed off to delivery trucks (providers like SendGrid, Twilio). If one truck breaks down, the other routes keep flowing. And just like real mail, you can track whether it was delivered, opened, or returned to sender.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Notification Service</h1>
+<h2>Introduction</h2>
+<p>A notification service delivers messages to users across multiple channels: push notifications, email, SMS, and in-app notifications. Companies like Uber, Slack, and Amazon send billions of notifications daily. This system must handle multiple delivery channels, user preferences, templating, scheduling, and reliable delivery at scale -- making it an excellent system design interview question that tests your understanding of async processing, message queues, and system integration.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ol>
+<li>Send notifications through multiple channels: push (iOS/Android), email, SMS, in-app</li>
+<li>Support user notification preferences (which channels, quiet hours, frequency caps)</li>
+<li>Template system for notification content with variable substitution</li>
+<li>Priority levels: critical (immediate), high, normal, low (can be batched)</li>
+<li>Scheduling: send notifications at a specific time or after a delay</li>
+<li>Delivery tracking: sent, delivered, read, failed, bounced</li>
+<li>Rate limiting per user to prevent notification fatigue</li>
+</ol>
+<h3>Non-Functional Requirements</h3>
+<ol>
+<li>High throughput: handle 10M+ notifications per day</li>
+<li>Reliable delivery: at-least-once delivery guarantee</li>
+<li>Low latency for critical notifications (&lt;1 second end-to-end)</li>
+<li>Pluggable providers: switch email/SMS providers without code changes</li>
+<li>Horizontally scalable to handle traffic spikes (e.g., flash sales)</li>
+</ol>
+<h2>Step 2: Capacity Estimation</h2>
+<h3>Traffic Estimates</h3>
+<ul>
+<li>Daily notifications: 10M (across all channels)</li>
+<li>Peak: 500 notifications/second (normal), 5,000/second during spikes</li>
+<li>Channel breakdown: 40% push, 30% email, 10% SMS, 20% in-app</li>
+<li>Average notification payload: 1 KB</li>
+</ul>
+<h3>Storage Estimates</h3>
+<ul>
+<li>Notification records: 10M/day x 1 KB = 10 GB/day</li>
+<li>1 year retention: 10 GB x 365 = 3.6 TB</li>
+<li>User preferences: 50M users x 500 bytes = 25 GB</li>
+<li>Templates: negligible (~1000 templates x 5 KB = 5 MB)</li>
+</ul>
+<h3>Queue Throughput</h3>
+<ul>
+<li>Average: ~120 messages/second into the queue</li>
+<li>Peak burst: 5,000 messages/second</li>
+<li>Worker processing time per notification: ~200ms (including external API call)</li>
+<li>Workers needed at peak: 5,000 x 0.2 = 1,000 concurrent workers</li>
+</ul>
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>                        +------------------+
+                        | Trigger Sources  |
+                        | (API, Events,    |
+                        |  Scheduled Jobs) |
+                        +--------+---------+
+                                 |
+                                 v
+                    +------------+------------+
+                    |   Notification Service  |
+                    |   (Validation, Prefs,   |
+                    |    Templating, Routing) |
+                    +------------+------------+
+                                 |
+                    +------------+------------+
+                    |    Priority Router      |
+                    +--+-----+-----+-----+---+
+                       |     |     |     |
+                       v     v     v     v
+                   +----+ +----+ +----+ +--------+
+                   |Push| |Email| |SMS| |In-App  |
+                   |Queue| |Queue| |Queue| |Queue |
+                   +--+-+ +--+-+ +--+-+ +---+----+
+                      |      |      |        |
+                      v      v      v        v
+                   +----+ +----+ +----+ +--------+
+                   |Push| |Email| |SMS| |In-App  |
+                   |Workers| |Workers| |Workers| |Workers|
+                   +--+-+ +--+-+ +--+-+ +---+----+
+                      |      |      |        |
+                      v      v      v        v
+                   +----+ +------+ +-----+ +--------+
+                   |APNs| |SendGrid| |Twilio| |WebSocket|
+                   |FCM | |SES    | |Vonage| |SSE     |
+                   +----+ +------+ +-----+ +--------+
+                                 |
+                                 v
+                    +------------+------------+
+                    |   Delivery Tracking     |
+                    |   (Status Updates,      |
+                    |    Webhooks, Retries)   |
+                    +-------------------------+
+</code></pre></div>
+
+<h3>Component Responsibilities</h3>
+<ul>
+<li><strong>Notification Service</strong>: The orchestration layer. Validates input, resolves user preferences, renders templates, deduplicates, and routes to the correct channel queue.</li>
+<li><strong>Priority Router</strong>: Sends critical notifications to high-priority queues with more workers; batches low-priority notifications.</li>
+<li><strong>Channel Queues</strong>: Separate BullMQ queues per channel for independent scaling and failure isolation.</li>
+<li><strong>Channel Workers</strong>: Process queued notifications by calling external providers (SendGrid, Twilio, APNs, FCM).</li>
+<li><strong>Delivery Tracking</strong>: Records delivery status and processes webhooks from providers (bounce, delivered, opened).</li>
+</ul>
+<h2>Step 4: API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/v1/notifications - Send a notification</span>
+<span class="c1">// Request:</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="s2">&quot;user_id&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;user_12345&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;template_id&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;order_shipped&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;channels&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;push&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;email&quot;</span><span class="p">],</span><span class="w">      </span><span class="c1">// optional, uses preferences if omitted</span>
+<span class="w">  </span><span class="s2">&quot;priority&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;high&quot;</span><span class="p">,</span><span class="w">                  </span><span class="c1">// critical | high | normal | low</span>
+<span class="w">  </span><span class="s2">&quot;data&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w">                            </span><span class="c1">// template variables</span>
+<span class="w">    </span><span class="s2">&quot;order_id&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;ORD-98765&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s2">&quot;tracking_url&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;https://track.example.com/98765&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s2">&quot;estimated_delivery&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;March 20, 2026&quot;</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="s2">&quot;schedule_at&quot;</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w">                 </span><span class="c1">// null = send immediately</span>
+<span class="w">  </span><span class="s2">&quot;idempotency_key&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;order_shipped_98765&quot;</span>
+<span class="p">}</span>
+<span class="c1">// Response (202 Accepted):</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="s2">&quot;notification_id&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;notif_abc123&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;status&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;queued&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;channels&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;push&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;email&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="s2">&quot;scheduled_at&quot;</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="p">}</span>
+
+<span class="c1">// GET /api/v1/notifications/:id - Get notification status</span>
+<span class="c1">// Response:</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="s2">&quot;notification_id&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;notif_abc123&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;user_id&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;user_12345&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;template_id&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;order_shipped&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;channels&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="s2">&quot;push&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;status&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;delivered&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;delivered_at&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;2026-03-18T10:01:00Z&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="s2">&quot;email&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;status&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;sent&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;sent_at&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;2026-03-18T10:00:30Z&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// PUT /api/v1/users/:userId/notification-preferences</span>
+<span class="c1">// Request:</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="s2">&quot;channels&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="s2">&quot;push&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;enabled&quot;</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="s2">&quot;email&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;enabled&quot;</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;frequency&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;daily_digest&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="s2">&quot;sms&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;enabled&quot;</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="s2">&quot;quiet_hours&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;start&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;22:00&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;end&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;08:00&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;timezone&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;America/New_York&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="s2">&quot;categories&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="s2">&quot;marketing&quot;</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">    </span><span class="s2">&quot;transactional&quot;</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="s2">&quot;social&quot;</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Express Route Implementation</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Queue</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bullmq&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">notificationQueue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;notifications&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="nx">redisConnection</span><span class="w"> </span><span class="p">});</span>
+
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/notifications&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">user_id</span><span class="p">,</span><span class="w"> </span><span class="nx">template_id</span><span class="p">,</span><span class="w"> </span><span class="nx">channels</span><span class="p">,</span><span class="w"> </span><span class="nx">priority</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">,</span><span class="w"> </span><span class="nx">schedule_at</span><span class="p">,</span><span class="w"> </span><span class="nx">idempotency_key</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Idempotency check</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">idempotency_key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">existing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`idempotency:</span><span class="si">${</span><span class="nx">idempotency_key</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existing</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">200</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">existing</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Validate template exists</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">template</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">notificationTemplate</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">template_id</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">template</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid template_id&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Resolve user preferences</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">preferences</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">notificationPreference</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">user_id</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Determine target channels</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">targetChannels</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">resolveChannels</span><span class="p">(</span><span class="nx">channels</span><span class="p">,</span><span class="w"> </span><span class="nx">preferences</span><span class="p">,</span><span class="w"> </span><span class="nx">template</span><span class="p">.</span><span class="nx">category</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Create notification record</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">notification</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">notification</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">user_id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">templateId</span><span class="o">:</span><span class="w"> </span><span class="nx">template_id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">priority</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">channels</span><span class="o">:</span><span class="w"> </span><span class="nx">targetChannels</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">data</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;queued&#39;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Enqueue for processing</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">jobOptions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">priority</span><span class="o">:</span><span class="w"> </span><span class="nx">priorityToNumber</span><span class="p">(</span><span class="nx">priority</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="nx">schedule_at</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">schedule_at</span><span class="p">).</span><span class="nx">getTime</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">attempts</span><span class="o">:</span><span class="w"> </span><span class="mf">3</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">backoff</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;exponential&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="mf">5000</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">notificationQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;send&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">notificationId</span><span class="o">:</span><span class="w"> </span><span class="nx">notification</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">user_id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">templateId</span><span class="o">:</span><span class="w"> </span><span class="nx">template_id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">channels</span><span class="o">:</span><span class="w"> </span><span class="nx">targetChannels</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">data</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">priority</span>
+<span class="w">  </span><span class="p">},</span><span class="w"> </span><span class="nx">jobOptions</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">notification_id</span><span class="o">:</span><span class="w"> </span><span class="nx">notification</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;queued&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">channels</span><span class="o">:</span><span class="w"> </span><span class="nx">targetChannels</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="c1">// Store idempotency key</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">idempotency_key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">setex</span><span class="p">(</span><span class="sb">`idempotency:</span><span class="si">${</span><span class="nx">idempotency_key</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="mf">86400</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">response</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">202</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">response</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 5: Template System</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// Templates stored in the database with Handlebars-style placeholders</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">renderTemplate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">template</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">rendered</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">template</span><span class="p">;</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nb">Object</span><span class="p">.</span><span class="nx">entries</span><span class="p">(</span><span class="nx">data</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">rendered</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">rendered</span><span class="p">.</span><span class="nx">replaceAll</span><span class="p">(</span><span class="sb">`{{</span><span class="si">${</span><span class="nx">key</span><span class="si">}</span><span class="sb">}}`</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">rendered</span><span class="p">;</span>
+<span class="p">};</span>
+
+<span class="c1">// Example templates table:</span>
+<span class="c1">// | id              | channel | subject                    | body                                          |</span>
+<span class="c1">// |-----------------|---------|----------------------------|-----------------------------------------------|</span>
+<span class="c1">// | order_shipped   | email   | Your order {{order_id}}... | Hi {{name}}, your order has shipped. Track...  |</span>
+<span class="c1">// | order_shipped   | push    | null                       | Order {{order_id}} shipped! Arrives {{date}}   |</span>
+<span class="c1">// | order_shipped   | sms     | null                       | Your order {{order_id}} has shipped...          |</span>
+</code></pre></div>
+
+<h2>Step 6: Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Notification records</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">notifications</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">template_id</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">priority</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;normal&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="k">data</span><span class="w">            </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;queued&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">scheduled_at</span><span class="w">    </span><span class="k">TIMESTAMP</span><span class="p">,</span>
+<span class="w">  </span><span class="n">processed_at</span><span class="w">    </span><span class="k">TIMESTAMP</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_notifications_user</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">notifications</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_notifications_status</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">notifications</span><span class="p">(</span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="k">IN</span><span class="w"> </span><span class="p">(</span><span class="s1">&#39;queued&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;processing&#39;</span><span class="p">);</span>
+
+<span class="c1">-- Per-channel delivery status</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">notification_deliveries</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">notification_id</span><span class="w"> </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">notifications</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">channel</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">   </span><span class="c1">-- push, email, sms, in_app</span>
+<span class="w">  </span><span class="n">provider</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">),</span><span class="w">            </span><span class="c1">-- sendgrid, twilio, fcm</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;pending&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">provider_msg_id</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">200</span><span class="p">),</span><span class="w">           </span><span class="c1">-- external message ID for tracking</span>
+<span class="w">  </span><span class="n">sent_at</span><span class="w">         </span><span class="k">TIMESTAMP</span><span class="p">,</span>
+<span class="w">  </span><span class="n">delivered_at</span><span class="w">    </span><span class="k">TIMESTAMP</span><span class="p">,</span>
+<span class="w">  </span><span class="n">read_at</span><span class="w">         </span><span class="k">TIMESTAMP</span><span class="p">,</span>
+<span class="w">  </span><span class="n">failed_at</span><span class="w">       </span><span class="k">TIMESTAMP</span><span class="p">,</span>
+<span class="w">  </span><span class="n">error_message</span><span class="w">   </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">retry_count</span><span class="w">     </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_deliveries_notification</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">notification_deliveries</span><span class="p">(</span><span class="n">notification_id</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_deliveries_status</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">notification_deliveries</span><span class="p">(</span><span class="n">status</span><span class="p">)</span>
+<span class="w">  </span><span class="k">WHERE</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="k">IN</span><span class="w"> </span><span class="p">(</span><span class="s1">&#39;pending&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;sent&#39;</span><span class="p">);</span>
+
+<span class="c1">-- Notification templates</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">notification_templates</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">channel</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">category</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">   </span><span class="c1">-- transactional, marketing, social</span>
+<span class="w">  </span><span class="n">subject</span><span class="w">         </span><span class="nb">TEXT</span><span class="p">,</span><span class="w">                   </span><span class="c1">-- for email</span>
+<span class="w">  </span><span class="n">body</span><span class="w">            </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">metadata</span><span class="w">        </span><span class="n">JSONB</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">channel</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- User notification preferences</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">notification_preferences</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">push_enabled</span><span class="w">    </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">true</span><span class="p">,</span>
+<span class="w">  </span><span class="n">email_enabled</span><span class="w">   </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">true</span><span class="p">,</span>
+<span class="w">  </span><span class="n">sms_enabled</span><span class="w">     </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">false</span><span class="p">,</span>
+<span class="w">  </span><span class="n">email_frequency</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;immediate&#39;</span><span class="p">,</span><span class="w">  </span><span class="c1">-- immediate, daily_digest</span>
+<span class="w">  </span><span class="n">quiet_start</span><span class="w">     </span><span class="k">TIME</span><span class="p">,</span>
+<span class="w">  </span><span class="n">quiet_end</span><span class="w">       </span><span class="k">TIME</span><span class="p">,</span>
+<span class="w">  </span><span class="n">timezone</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;UTC&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">categories</span><span class="w">      </span><span class="n">JSONB</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="w">      </span><span class="c1">-- per-category opt-in/out</span>
+<span class="p">);</span>
+
+<span class="c1">-- Device tokens for push notifications</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">device_tokens</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="nb">SERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">platform</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">   </span><span class="c1">-- ios, android, web</span>
+<span class="w">  </span><span class="n">token</span><span class="w">           </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_active</span><span class="w">       </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">true</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">last_used_at</span><span class="w">    </span><span class="k">TIMESTAMP</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_device_tokens_user</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">device_tokens</span><span class="p">(</span><span class="n">user_id</span><span class="p">)</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">is_active</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">true</span><span class="p">;</span>
+</code></pre></div>
+
+<h2>Step 7: Worker Implementation</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Worker</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bullmq&#39;</span><span class="p">;</span>
+
+<span class="c1">// Channel-specific provider abstraction</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">providers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">push</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PushProvider</span><span class="p">(),</span><span class="w">    </span><span class="c1">// wraps FCM + APNs</span>
+<span class="w">  </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">EmailProvider</span><span class="p">(),</span><span class="w">  </span><span class="c1">// wraps SendGrid / SES</span>
+<span class="w">  </span><span class="nx">sms</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">SmsProvider</span><span class="p">(),</span><span class="w">      </span><span class="c1">// wraps Twilio</span>
+<span class="w">  </span><span class="nx">in_app</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">InAppProvider</span><span class="p">()</span><span class="w">  </span><span class="c1">// writes to DB + WebSocket</span>
+<span class="p">};</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">worker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;notifications&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">notificationId</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">templateId</span><span class="p">,</span><span class="w"> </span><span class="nx">channels</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">,</span><span class="w"> </span><span class="nx">priority</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Check quiet hours</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">prefs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getPreferences</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">isQuietHours</span><span class="p">(</span><span class="nx">prefs</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">priority</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;critical&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Re-queue for after quiet hours</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">resumeAt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getQuietHoursEnd</span><span class="p">(</span><span class="nx">prefs</span><span class="p">);</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">notificationQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;send&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">delay</span><span class="o">:</span><span class="w"> </span><span class="nx">resumeAt</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Send to each channel in parallel</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">allSettled</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">channels</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">channel</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">template</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getTemplate</span><span class="p">(</span><span class="nx">templateId</span><span class="p">,</span><span class="w"> </span><span class="nx">channel</span><span class="p">);</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">rendered</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">renderTemplate</span><span class="p">(</span><span class="nx">template</span><span class="p">.</span><span class="nx">body</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">);</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">subject</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">template</span><span class="p">.</span><span class="nx">subject</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">renderTemplate</span><span class="p">(</span><span class="nx">template</span><span class="p">.</span><span class="nx">subject</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">delivery</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">notificationDelivery</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">notificationId</span><span class="p">,</span><span class="w"> </span><span class="nx">channel</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sending&#39;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">      </span><span class="p">});</span>
+
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">providers</span><span class="p">[</span><span class="nx">channel</span><span class="p">].</span><span class="nx">send</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">subject</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nx">rendered</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">data</span>
+<span class="w">        </span><span class="p">});</span>
+
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">notificationDelivery</span><span class="p">.</span><span class="nx">update</span><span class="p">({</span>
+<span class="w">          </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">delivery</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sent&#39;</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">sentAt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(),</span>
+<span class="w">            </span><span class="nx">providerMsgId</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">messageId</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">notificationDelivery</span><span class="p">.</span><span class="nx">update</span><span class="p">({</span>
+<span class="w">          </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">delivery</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;failed&#39;</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">failedAt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(),</span>
+<span class="w">            </span><span class="nx">errorMessage</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">        </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span><span class="w"> </span><span class="c1">// triggers BullMQ retry</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">})</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Update overall notification status</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">allSucceeded</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">every</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;fulfilled&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">notification</span><span class="p">.</span><span class="nx">update</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">notificationId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="nx">allSucceeded</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;sent&#39;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;partial_failure&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">processedAt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">()</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="nx">redisConnection</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">concurrency</span><span class="o">:</span><span class="w"> </span><span class="mf">50</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 8: Scaling Strategies</h2>
+<h3>Separate Queues per Channel</h3>
+<p>Isolate channels so a Twilio outage does not block push notifications:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">queues</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">push</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;notifications:push&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="nx">redisConnection</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">  </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;notifications:email&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="nx">redisConnection</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">  </span><span class="nx">sms</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;notifications:sms&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="nx">redisConnection</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">  </span><span class="nx">in_app</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;notifications:in_app&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="nx">redisConnection</span><span class="w"> </span><span class="p">})</span>
+<span class="p">};</span>
+</code></pre></div>
+
+<h3>Notification Deduplication</h3>
+<p>Prevent duplicate sends using idempotency keys:</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">isDuplicate</span><span class="p">(</span><span class="nx">idempotencyKey</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`dedup:</span><span class="si">${</span><span class="nx">idempotencyKey</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">    </span><span class="s1">&#39;1&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">86400</span><span class="p">,</span>
+<span class="w">    </span><span class="s1">&#39;NX&#39;</span><span class="w">  </span><span class="c1">// Only set if not exists</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span><span class="w"> </span><span class="c1">// null means key already existed</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Batching for Low-Priority Notifications</h3>
+<p>Digest emails and batch low-priority notifications:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Collect low-priority notifications and send as a batch</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">digestWorker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;notifications:digest&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pending</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">notification</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">priority</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;low&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;queued&#39;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">pending</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">providers</span><span class="p">.</span><span class="nx">email</span><span class="p">.</span><span class="nx">sendDigest</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">pending</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="c1">// Schedule digest processing every hour</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">digestScheduler</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;notifications:digest&#39;</span><span class="p">);</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">digestScheduler</span><span class="p">.</span><span class="nx">upsertJobScheduler</span><span class="p">(</span><span class="s1">&#39;digest-all&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">every</span><span class="o">:</span><span class="w"> </span><span class="mf">3600000</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 9: Trade-Offs and Discussion Points</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Queue per channel</td>
+<td>Separate queues</td>
+<td>Single queue</td>
+<td>Separate (failure isolation)</td>
+</tr>
+<tr>
+<td>Delivery guarantee</td>
+<td>At-most-once</td>
+<td>At-least-once</td>
+<td>At-least-once with dedup</td>
+</tr>
+<tr>
+<td>Template storage</td>
+<td>Database</td>
+<td>File system</td>
+<td>Database (dynamic updates)</td>
+</tr>
+<tr>
+<td>Provider failover</td>
+<td>Manual</td>
+<td>Automatic fallback</td>
+<td>Automatic with circuit breaker</td>
+</tr>
+<tr>
+<td>In-app delivery</td>
+<td>Poll</td>
+<td>WebSocket/SSE</td>
+<td>WebSocket for real-time</td>
+</tr>
+</tbody>
+</table>
+<h3>Provider Failover</h3>
+<p>Implement automatic failover when a provider goes down:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">EmailProvider</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">providers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="ow">new</span><span class="w"> </span><span class="nx">SendGridProvider</span><span class="p">(),</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">SESProvider</span><span class="p">()];</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">currentIndex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">send</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">content</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">providers</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">currentIndex</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">i</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">providers</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span>
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">providers</span><span class="p">[</span><span class="nx">index</span><span class="p">].</span><span class="nx">send</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">content</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">i</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">providers</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="nx">err</span><span class="p">;</span>
+<span class="w">        </span><span class="c1">// Try next provider</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Summary</h2>
+<p>A notification service is fundamentally an async message processing pipeline. The key architectural decisions are: separating queues per channel for failure isolation, implementing at-least-once delivery with idempotency for correctness, using a template system for content management, respecting user preferences and quiet hours, and building provider abstraction layers that support automatic failover. The system must handle both real-time critical alerts and batched low-priority digests, requiring a priority-aware routing layer.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Multi-Channel Notification Worker</div>
+                    <div class="exercise-desc"><p>Implement a BullMQ worker that processes notification jobs. Each job specifies a user_id, template_id, and channels array. The worker should render the template, send to each channel using mock provider functions, record delivery status in the database, and handle partial failures (some channels succeed, others fail). Use Prisma for database operations.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Promise.allSettled() to send to all channels in parallel without short-circuiting on failure. Check each result's status to determine if it was 'fulfilled' or 'rejected' and update delivery records accordingly.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement User Preference Resolution</div>
+                    <div class="exercise-desc"><p>Write a resolveChannels() function that takes requested channels, user preferences, and notification category as input and returns the final list of channels to send on. It must filter out disabled channels, respect category opt-outs, check quiet hours (skip non-critical during quiet hours), and handle the 'daily_digest' email frequency preference.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Parse quiet hours using the user's timezone (use luxon or date-fns-tz). For daily_digest, queue the email notification instead of sending immediately. Return an object with { immediate: ['push'], deferred: ['email'] }.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Notification Deduplication System</div>
+                    <div class="exercise-desc"><p>Build an idempotency layer that prevents duplicate notifications. Use Redis SET with NX (set-if-not-exists) to track idempotency keys. Write tests that verify: (1) the first request succeeds, (2) a retry with the same key returns the cached response, (3) keys expire after 24 hours.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use redis.set(key, value, 'EX', 86400, 'NX') which atomically sets the key only if it does not exist. If the return value is null, the key already existed (duplicate). Store the original response JSON as the value.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Provider Circuit Breaker</div>
+                    <div class="exercise-desc"><p>Implement a circuit breaker pattern for notification providers. When a provider (e.g., SendGrid) fails 5 times in 60 seconds, the circuit opens and automatically routes to a fallback provider (e.g., SES). After 30 seconds, the circuit enters half-open state and lets one test request through. Track circuit state in Redis for distributed correctness.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Store failure counts and circuit state in Redis with TTLs. Use three states: CLOSED (normal), OPEN (all requests go to fallback), HALF_OPEN (one test request allowed). Use redis.incr() with pexpire for failure counting.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Users receive duplicate notifications for the same event</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Retries from the message queue (due to transient failures or worker crashes) cause the same notification to be processed multiple times, and there is no deduplication check.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement idempotency using a unique key per notification event (e.g., 'order_shipped:order_12345'). Before processing, check if the key exists in Redis. Use SET NX to atomically claim the key. Also check the notification_deliveries table for existing records.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">SMS provider outage causes push notifications to back up</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> All notification channels share a single queue. When SMS workers slow down or fail, the queue grows and all channels are affected.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use separate queues per channel (notifications:push, notifications:email, notifications:sms, notifications:in_app). This provides failure isolation -- an SMS outage has zero impact on push notification delivery.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Users complain about receiving notifications at 3 AM</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The notification service does not account for user timezones when evaluating quiet hours. Quiet hours of 22:00-08:00 are evaluated in UTC instead of the user's local time.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Store the user's timezone in preferences. When checking quiet hours, convert the current UTC time to the user's local time before comparison. Use a library like luxon: DateTime.now().setZone(userTimezone).hour to get the local hour.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://bytebytego.com/courses/system-design-interview/design-a-notification-system" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Designing a Notification System - ByteByteGo</div>
+                    
+                    <div class="resource-note">Comprehensive breakdown of notification system architecture from Alex Xu</div>
+                    
+                </a>
+                
+                <a href="https://docs.bullmq.io/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">BullMQ Documentation</div>
+                    
+                    <div class="resource-note">The Node.js queue library used in this design -- covers jobs, workers, scheduling, and retries</div>
+                    
+                </a>
+                
+                <a href="https://firebase.google.com/docs/cloud-messaging/server" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Firebase Cloud Messaging (FCM) for Node.js</div>
+                    
+                    <div class="resource-note">Official guide for sending push notifications to iOS and Android from a Node.js backend</div>
+                    
+                </a>
+                
+                <a href="https://martinfowler.com/bliki/CircuitBreaker.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Circuit Breaker Pattern - Martin Fowler</div>
+                    
+                    <div class="resource-note">The original article on the circuit breaker pattern, essential for provider failover</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.1.2-js.html" class="btn">&larr; Design a Rate Limiter</a>
+            
+            
+            <a href="/backend-learning/lesson/9.1.4-js.html" class="btn">Design a Chat System (WhatsApp) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

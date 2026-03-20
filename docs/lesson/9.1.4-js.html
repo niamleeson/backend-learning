@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Chat System (WhatsApp) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Core System Design Problems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.1.4</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a Chat System (WhatsApp)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>A chat system is like a mail room in a massive apartment building. Each resident (user) has a mailbox (WebSocket connection) on a specific floor (server). When someone sends a letter, the mail room (message router) looks up which floor the recipient lives on and delivers it to the right mailbox. If the resident is not home (offline), the letter is held in a safe (pending queue) until they return, and a text message (push notification) is sent to let them know mail is waiting.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Chat System (WhatsApp)</h1>
+<h2>Introduction</h2>
+<p>A real-time chat system like WhatsApp, Slack, or Telegram must deliver messages between users with minimal latency, support group conversations, handle millions of concurrent connections, and provide reliable message delivery even when users are offline. This is one of the most comprehensive system design questions because it requires reasoning about real-time communication, persistent connections, message ordering, offline delivery, read receipts, and media sharing.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ol>
+<li>One-on-one messaging between users</li>
+<li>Group chat (up to 500 members)</li>
+<li>Message types: text, image, video, file</li>
+<li>Delivery status: sent, delivered, read</li>
+<li>Online/offline presence indicators</li>
+<li>Push notifications for offline users</li>
+<li>Message history and search</li>
+<li>End-to-end encryption (conceptual)</li>
+</ol>
+<h3>Non-Functional Requirements</h3>
+<ol>
+<li>Real-time delivery: messages appear within 100ms for online users</li>
+<li>Reliable: no message loss, even during server failures</li>
+<li>Ordered: messages in a conversation appear in the correct order</li>
+<li>Scalable: support 50M+ concurrent connections</li>
+<li>Available: 99.99% uptime</li>
+</ol>
+<h2>Step 2: Capacity Estimation</h2>
+<h3>Traffic Estimates</h3>
+<ul>
+<li>Daily Active Users (DAU): 500M</li>
+<li>Average messages per user per day: 40</li>
+<li>Total messages per day: 20B</li>
+<li>Messages per second: ~230,000</li>
+<li>Peak: ~500,000 messages/second</li>
+<li>Concurrent WebSocket connections: 50M+</li>
+</ul>
+<h3>Storage Estimates</h3>
+<ul>
+<li>Average text message size: 200 bytes</li>
+<li>Text messages per day: 20B x 200 bytes = 4 TB/day</li>
+<li>Media messages (20% of total): 4B messages x 100 KB average = 400 TB/day</li>
+<li>5-year text retention: 4 TB x 365 x 5 = 7.3 PB</li>
+<li>Media stored in object storage (S3) separately</li>
+</ul>
+<h3>Bandwidth</h3>
+<ul>
+<li>Incoming text: 4 TB/day = ~370 MB/s</li>
+<li>Incoming media: 400 TB/day = ~37 GB/s (media upload bandwidth)</li>
+<li>Outgoing: similar to incoming (messages are delivered to recipients)</li>
+</ul>
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>     +----------+           +----------+
+     | Client A |           | Client B |
+     +----+-----+           +-----+----+
+          |  WebSocket            | WebSocket
+          v                       v
+     +----+----+            +-----+----+
+     | WS      |            | WS       |
+     | Server 1|            | Server 2 |
+     +----+----+            +-----+----+
+          |                       |
+          +----------+------------+
+                     |
+              +------v------+
+              | Message     |
+              | Router      |
+              | Service     |
+              +------+------+
+                     |
+         +-----------+-----------+
+         |           |           |
+    +----v----+ +----v----+ +----v----+
+    | Message | | Presence| | Group   |
+    | Store   | | Service | | Service |
+    |(Cassandra)| (Redis) | |(Postgres)|
+    +---------+ +---------+ +---------+
+         |           |           |
+    +----v-----------v-----------v----+
+    |        Kafka / Message Bus      |
+    +--+----------+-----------+-------+
+       |          |           |
+  +----v----+ +---v----+ +---v-------+
+  |  Push   | | Media  | | Analytics |
+  | Service | | Service| | Service   |
+  +---------+ +--------+ +-----------+
+</code></pre></div>
+
+<h3>Key Design Decision: WebSocket Connection Management</h3>
+<p>Each client maintains a persistent WebSocket connection to a WebSocket server. The critical question is: when Client A sends a message to Client B, how does Server 1 know which server Client B is connected to?</p>
+<div class="highlight"><pre><span></span><code>Connection Registry (Redis):
+  user:clientB -&gt; ws-server-2:port
+  user:clientA -&gt; ws-server-1:port
+  user:clientC -&gt; ws-server-3:port
+
+Message Flow:
+  1. Client A sends message to WS Server 1
+  2. WS Server 1 looks up Client B&#39;s server in Redis
+  3. WS Server 1 publishes message to Kafka topic
+  4. WS Server 2 (subscribed to Kafka) receives message
+  5. WS Server 2 delivers message to Client B via WebSocket
+</code></pre></div>
+
+<h2>Step 4: API Design</h2>
+<h3>WebSocket Events</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// Client -&gt; Server Events</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;send_message&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">conversation_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;conv_123&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">recipient_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user_456&#39;</span><span class="p">,</span><span class="w">       </span><span class="c1">// for 1:1</span>
+<span class="w">    </span><span class="nx">content</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Hello!&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">content_type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;text&#39;</span><span class="p">,</span><span class="w">           </span><span class="c1">// text | image | video | file</span>
+<span class="w">    </span><span class="nx">client_msg_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;client_uuid_1&#39;</span><span class="w">  </span><span class="c1">// client-generated for dedup</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="p">{</span>
+<span class="w">  </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;typing&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">conversation_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;conv_123&#39;</span><span class="w"> </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="p">{</span>
+<span class="w">  </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;read_receipt&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">conversation_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;conv_123&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">last_read_msg_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;msg_789&#39;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Server -&gt; Client Events</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;new_message&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">message_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;msg_790&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">conversation_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;conv_123&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">sender_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user_123&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">content</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Hello!&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">content_type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;text&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;2026-03-18T10:00:00Z&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;delivered&#39;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="p">{</span>
+<span class="w">  </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;message_status&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">message_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;msg_789&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;read&#39;</span><span class="p">,</span><span class="w">               </span><span class="c1">// sent | delivered | read</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;2026-03-18T10:00:05Z&#39;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="p">{</span>
+<span class="w">  </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;presence&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">user_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;user_456&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;online&#39;</span><span class="p">,</span><span class="w">             </span><span class="c1">// online | offline | away</span>
+<span class="w">    </span><span class="nx">last_seen</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;2026-03-18T10:00:00Z&#39;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>REST API for Non-Real-Time Operations</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// GET /api/v1/conversations - List conversations</span>
+<span class="c1">// GET /api/v1/conversations/:id/messages?before=msg_id&amp;limit=50</span>
+<span class="c1">// POST /api/v1/conversations - Create group conversation</span>
+<span class="c1">// POST /api/v1/media/upload - Upload media, returns media URL</span>
+</code></pre></div>
+
+<h3>WebSocket Server Implementation</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">WebSocketServer</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ws&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Kafka</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;kafkajs&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">wss</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebSocketServer</span><span class="p">({</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">8080</span><span class="w"> </span><span class="p">});</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">pub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span><span class="w">  </span><span class="c1">// separate connection for pub/sub</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">sub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">connections</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span><span class="w">  </span><span class="c1">// userId -&gt; WebSocket</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">kafka</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Kafka</span><span class="p">({</span><span class="w"> </span><span class="nx">brokers</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;kafka-1:9092&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;kafka-2:9092&#39;</span><span class="p">]</span><span class="w"> </span><span class="p">});</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">producer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">kafka</span><span class="p">.</span><span class="nx">producer</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">consumer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">kafka</span><span class="p">.</span><span class="nx">consumer</span><span class="p">({</span><span class="w"> </span><span class="nx">groupId</span><span class="o">:</span><span class="w"> </span><span class="sb">`ws-server-</span><span class="si">${</span><span class="nx">SERVER_ID</span><span class="si">}</span><span class="sb">`</span><span class="w"> </span><span class="p">});</span>
+
+<span class="nx">wss</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;connection&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">ws</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">authenticateWebSocket</span><span class="p">(</span><span class="nx">req</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">connections</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">ws</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Register this user&#39;s WebSocket server in Redis</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="sb">`ws:user:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">SERVER_ID</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">300</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Update presence</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">hset</span><span class="p">(</span><span class="sb">`presence:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;status&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;online&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;last_seen&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">());</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">pub</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="s1">&#39;presence&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;online&#39;</span><span class="w"> </span><span class="p">}));</span>
+
+<span class="w">  </span><span class="nx">ws</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;message&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">raw</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">event</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">raw</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">event</span><span class="p">.</span><span class="nx">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;send_message&#39;</span><span class="o">:</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">handleSendMessage</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;typing&#39;</span><span class="o">:</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">handleTyping</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;read_receipt&#39;</span><span class="o">:</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">handleReadReceipt</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">ws</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">connections</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">del</span><span class="p">(</span><span class="sb">`ws:user:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">hset</span><span class="p">(</span><span class="sb">`presence:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;status&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;offline&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;last_seen&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">());</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">pub</span><span class="p">.</span><span class="nx">publish</span><span class="p">(</span><span class="s1">&#39;presence&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;offline&#39;</span><span class="w"> </span><span class="p">}));</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">handleSendMessage</span><span class="p">(</span><span class="nx">senderId</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">conversation_id</span><span class="p">,</span><span class="w"> </span><span class="nx">content</span><span class="p">,</span><span class="w"> </span><span class="nx">content_type</span><span class="p">,</span><span class="w"> </span><span class="nx">client_msg_id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">data</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Deduplication check</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">isDup</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="sb">`dedup:</span><span class="si">${</span><span class="nx">client_msg_id</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;1&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;EX&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">3600</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;NX&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">isDup</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Generate server-side message ID and timestamp</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">message</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">generateMessageId</span><span class="p">(),</span>
+<span class="w">    </span><span class="nx">conversationId</span><span class="o">:</span><span class="w"> </span><span class="nx">conversation_id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">senderId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">content</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">contentType</span><span class="o">:</span><span class="w"> </span><span class="nx">content_type</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">(),</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sent&#39;</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="c1">// Persist message</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">messageStore</span><span class="p">.</span><span class="nx">save</span><span class="p">(</span><span class="nx">message</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Get conversation participants</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">participants</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getConversationParticipants</span><span class="p">(</span><span class="nx">conversation_id</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Produce to Kafka for fan-out to recipients</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">producer</span><span class="p">.</span><span class="nx">send</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;chat-messages&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">messages</span><span class="o">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">      </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">conversation_id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">message</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">recipients</span><span class="o">:</span><span class="w"> </span><span class="nx">participants</span><span class="p">.</span><span class="nx">filter</span><span class="p">(</span><span class="nx">id</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">id</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">senderId</span><span class="p">)</span>
+<span class="w">      </span><span class="p">})</span>
+<span class="w">    </span><span class="p">}]</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Ack back to sender</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">senderWs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">connections</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">senderId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">senderWs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">senderWs</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;message_ack&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">client_msg_id</span><span class="p">,</span><span class="w"> </span><span class="nx">message_id</span><span class="o">:</span><span class="w"> </span><span class="nx">message</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nx">message</span><span class="p">.</span><span class="nx">timestamp</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 5: Message Delivery Flow</h2>
+<div class="highlight"><pre><span></span><code>Sender (Client A)                   Server                   Recipient (Client B)
+     |                                |                              |
+     |-- send_message ---------------&gt;|                              |
+     |                                |-- save to DB                 |
+     |&lt;-- message_ack (sent) ---------|                              |
+     |                                |-- lookup B&#39;s WS server       |
+     |                                |-- route via Kafka            |
+     |                                |---------------new_message --&gt;|
+     |                                |                              |
+     |                                |&lt;--- delivery_ack ----------- |
+     |&lt;-- message_status (delivered) -|                              |
+     |                                |                              |
+     |                                |  (B opens conversation)      |
+     |                                |&lt;--- read_receipt ----------- |
+     |&lt;-- message_status (read) ------|                              |
+</code></pre></div>
+
+<h3>Offline Message Delivery</h3>
+<p>When a user is offline, messages must be stored and delivered when they reconnect:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// In the Kafka consumer (handles message delivery)</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">consumer</span><span class="p">.</span><span class="nx">run</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">eachMessage</span><span class="o">:</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">message</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="nx">chatMsg</span><span class="p">,</span><span class="w"> </span><span class="nx">recipients</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">message</span><span class="p">.</span><span class="nx">value</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">recipientId</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">recipients</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">ws</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">connections</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">recipientId</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">ws</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">ws</span><span class="p">.</span><span class="nx">readyState</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">WebSocket</span><span class="p">.</span><span class="nx">OPEN</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Online: deliver immediately via WebSocket</span>
+<span class="w">        </span><span class="nx">ws</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;new_message&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">chatMsg</span><span class="w"> </span><span class="p">}));</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Offline: store in pending messages</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">lpush</span><span class="p">(</span><span class="sb">`pending:</span><span class="si">${</span><span class="nx">recipientId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">chatMsg</span><span class="p">));</span>
+<span class="w">        </span><span class="c1">// Trigger push notification</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">pushNotificationQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;send&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">recipientId</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">title</span><span class="o">:</span><span class="w"> </span><span class="sb">`New message from </span><span class="si">${</span><span class="nx">chatMsg</span><span class="p">.</span><span class="nx">senderName</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nx">chatMsg</span><span class="p">.</span><span class="nx">content</span><span class="p">.</span><span class="nx">substring</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="mf">100</span><span class="p">)</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="c1">// When user reconnects, deliver pending messages</span>
+<span class="nx">wss</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;connection&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">ws</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">authenticateWebSocket</span><span class="p">(</span><span class="nx">req</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// ... setup ...</span>
+
+<span class="w">  </span><span class="c1">// Deliver pending messages</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pending</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">lrange</span><span class="p">(</span><span class="sb">`pending:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="o">-</span><span class="mf">1</span><span class="p">);</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">msg</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">pending</span><span class="p">.</span><span class="nx">reverse</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">ws</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;new_message&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">msg</span><span class="p">)</span><span class="w"> </span><span class="p">}));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">del</span><span class="p">(</span><span class="sb">`pending:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 6: Database Schema</h2>
+<p>For a chat system at WhatsApp scale, we use different databases for different data:</p>
+<h3>Message Store (Cassandra -- optimized for write-heavy, time-series data)</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Cassandra table: partition by conversation, cluster by timestamp</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">messages</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">conversation_id</span><span class="w">  </span><span class="n">UUID</span><span class="p">,</span>
+<span class="w">  </span><span class="n">message_id</span><span class="w">       </span><span class="n">TIMEUUID</span><span class="p">,</span>
+<span class="w">  </span><span class="n">sender_id</span><span class="w">        </span><span class="nb">BIGINT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">content</span><span class="w">          </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">content_type</span><span class="w">     </span><span class="nb">TEXT</span><span class="p">,</span><span class="w">        </span><span class="c1">-- text, image, video, file</span>
+<span class="w">  </span><span class="n">media_url</span><span class="w">        </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">status</span><span class="w">           </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">       </span><span class="k">TIMESTAMP</span><span class="p">,</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">conversation_id</span><span class="p">,</span><span class="w"> </span><span class="n">message_id</span><span class="p">)</span>
+<span class="p">)</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="n">CLUSTERING</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="p">(</span><span class="n">message_id</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+</code></pre></div>
+
+<h3>Conversation Metadata (PostgreSQL)</h3>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">conversations</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">type</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- direct, group</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">200</span><span class="p">),</span><span class="w">          </span><span class="c1">-- for group chats</span>
+<span class="w">  </span><span class="n">avatar_url</span><span class="w">      </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_by</span><span class="w">      </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">conversation_members</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">conversation_id</span><span class="w"> </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">conversations</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="k">role</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;member&#39;</span><span class="p">,</span><span class="w">  </span><span class="c1">-- admin, member</span>
+<span class="w">  </span><span class="n">joined_at</span><span class="w">       </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">last_read_msg</span><span class="w">   </span><span class="n">UUID</span><span class="p">,</span>
+<span class="w">  </span><span class="n">muted_until</span><span class="w">     </span><span class="k">TIMESTAMP</span><span class="p">,</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">conversation_id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_conv_members_user</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">conversation_members</span><span class="p">(</span><span class="n">user_id</span><span class="p">);</span>
+
+<span class="c1">-- For direct messages, find existing conversation between two users</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">direct_conversations</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">user_id_1</span><span class="w">       </span><span class="nb">BIGINT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">user_id_2</span><span class="w">       </span><span class="nb">BIGINT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">conversation_id</span><span class="w"> </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">conversations</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">user_id_1</span><span class="p">,</span><span class="w"> </span><span class="n">user_id_2</span><span class="p">)</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Step 7: Presence System</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// Presence is tracked in Redis with TTL-based heartbeats</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">PRESENCE_TTL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">60</span><span class="p">;</span><span class="w"> </span><span class="c1">// seconds</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">PresenceService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">redis</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">setOnline</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">setex</span><span class="p">(</span><span class="sb">`presence:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">PRESENCE_TTL</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;online&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">heartbeat</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Client sends heartbeat every 30 seconds</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">expire</span><span class="p">(</span><span class="sb">`presence:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">PRESENCE_TTL</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">isOnline</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">exists</span><span class="p">(</span><span class="sb">`presence:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Get presence for multiple users (conversation member list)</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getBulkPresence</span><span class="p">(</span><span class="nx">userIds</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="w">    </span><span class="nx">userIds</span><span class="p">.</span><span class="nx">forEach</span><span class="p">(</span><span class="nx">id</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`presence:</span><span class="si">${</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">));</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">userIds</span><span class="p">.</span><span class="nx">map</span><span class="p">((</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">online</span><span class="o">:</span><span class="w"> </span><span class="nx">results</span><span class="p">[</span><span class="nx">i</span><span class="p">][</span><span class="mf">1</span><span class="p">]</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span>
+<span class="w">    </span><span class="p">}));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">setOffline</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">del</span><span class="p">(</span><span class="sb">`presence:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// Store last_seen timestamp</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="sb">`last_seen:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 8: Scaling Strategies</h2>
+<h3>WebSocket Server Scaling</h3>
+<p>A single Node.js server can handle ~50K-100K concurrent WebSocket connections. For 50M connections:</p>
+<div class="highlight"><pre><span></span><code>50M connections / 50K per server = 1,000 WebSocket servers
+</code></pre></div>
+
+<p>Use a load balancer with sticky sessions (based on user ID hash) so reconnections hit the same server when possible.</p>
+<h3>Message Ordering</h3>
+<p>Kafka guarantees ordering within a partition. By using conversation_id as the partition key, all messages in a conversation go to the same partition, ensuring order:</p>
+<div class="highlight"><pre><span></span><code><span class="k">await</span><span class="w"> </span><span class="nx">producer</span><span class="p">.</span><span class="nx">send</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;chat-messages&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">messages</span><span class="o">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">    </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">conversation_id</span><span class="p">,</span><span class="w">  </span><span class="c1">// partition key = conversation</span>
+<span class="w">    </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">message</span><span class="p">)</span>
+<span class="w">  </span><span class="p">}]</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Group Message Fan-Out</h3>
+<p>For a group of 500 members, a single message must be delivered to 499 recipients. Two approaches:</p>
+<ol>
+<li><strong>Fan-out on write</strong>: When a message is sent, create 499 delivery records and route to each user's server. Pro: fast reads. Con: high write amplification.</li>
+<li><strong>Fan-out on read</strong>: Store one copy of the message. When each member opens the chat, they pull new messages. Pro: efficient writes. Con: slower reads.</li>
+</ol>
+<p>Hybrid approach: fan-out on write for small groups (&lt;100 members), fan-out on read for large groups.</p>
+<h3>Media Handling</h3>
+<p>Media files should never flow through the chat servers:</p>
+<div class="highlight"><pre><span></span><code>1. Client requests upload URL -&gt; API returns presigned S3 URL
+2. Client uploads media directly to S3
+3. Client sends message with media_url reference
+4. Recipient downloads media directly from S3/CDN
+</code></pre></div>
+
+<h2>Step 9: Trade-Offs and Discussion Points</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Transport</td>
+<td>WebSocket</td>
+<td>Long polling</td>
+<td>WebSocket (bidirectional, lower overhead)</td>
+</tr>
+<tr>
+<td>Message store</td>
+<td>Cassandra</td>
+<td>MongoDB</td>
+<td>Cassandra (better write throughput, time-series)</td>
+</tr>
+<tr>
+<td>Message bus</td>
+<td>Kafka</td>
+<td>Redis Pub/Sub</td>
+<td>Kafka (durable, ordered, replayable)</td>
+</tr>
+<tr>
+<td>Group delivery</td>
+<td>Fan-out on write</td>
+<td>Fan-out on read</td>
+<td>Hybrid based on group size</td>
+</tr>
+<tr>
+<td>Presence</td>
+<td>Heartbeat + TTL</td>
+<td>Connection tracking</td>
+<td>Heartbeat + TTL (simpler, handles crashes)</td>
+</tr>
+<tr>
+<td>Encryption</td>
+<td>Server-side</td>
+<td>End-to-end</td>
+<td>E2E for privacy (server cannot read messages)</td>
+</tr>
+</tbody>
+</table>
+<h3>End-to-End Encryption (Conceptual)</h3>
+<p>In E2E encryption, the server cannot read message content:</p>
+<div class="highlight"><pre><span></span><code>1. Each user has a public/private key pair
+2. Sender encrypts message with recipient&#39;s public key
+3. Server stores encrypted blob -- cannot decrypt it
+4. Recipient decrypts with their private key
+
+Challenge: Group chats require the Signal Protocol&#39;s
+&quot;sender keys&quot; scheme for efficient group encryption.
+</code></pre></div>
+
+<h2>Summary</h2>
+<p>A chat system is a real-time, write-heavy, connection-heavy application. The architecture centers on WebSocket servers for persistent connections, Kafka for reliable message routing between servers, Cassandra for high-throughput message storage, and Redis for presence and connection registry. Key design decisions include using conversation_id as the Kafka partition key for message ordering, implementing a heartbeat-based presence system, handling offline delivery with pending message queues and push notifications, and choosing between fan-out strategies for group chats based on group size.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a WebSocket Chat Server</div>
+                    <div class="exercise-desc"><p>Implement a basic chat server using the ws library in Node.js. Support user authentication on connection (via query parameter token), maintain an in-memory connection map (userId -&gt; WebSocket), and implement send_message that looks up the recipient's WebSocket and delivers the message. Handle connection cleanup on disconnect. Test with two browser tabs.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use wss.on('connection', (ws, req) =&gt; { ... }) to handle new connections. Parse the user token from req.url. Store connections in a Map. On message, JSON.parse the payload and look up the recipient in the Map.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Add Offline Message Queue</div>
+                    <div class="exercise-desc"><p>Extend your chat server to handle offline users. When a message is sent to a user who is not connected, store it in a Redis list. When that user reconnects, deliver all pending messages in order and clear the list. Write a test that sends messages while a user is disconnected, reconnects them, and verifies all messages are delivered in order.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use redis.lpush('pending:userId', message) for offline storage and redis.lrange + redis.del on reconnection. Reverse the list since lpush adds to the head.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Read Receipts and Delivery Status</div>
+                    <div class="exercise-desc"><p>Add three-stage message status tracking: sent (server received), delivered (recipient's device received), read (recipient opened conversation). When a status update occurs, notify the original sender via WebSocket. Store the latest status in the database. Handle the case where the sender is offline when the status update arrives.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Send 'message_ack' to sender when message is saved (sent). Send 'message_status: delivered' when recipient's WebSocket receives it. Send 'message_status: read' when recipient sends a read_receipt event. Track status changes in a delivery_status column.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Messages arrive out of order in group chats</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Messages from different senders are processed by different WebSocket servers and Kafka consumers, leading to non-deterministic delivery order.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use conversation_id as the Kafka partition key so all messages in a conversation go to the same partition, which guarantees ordering. On the client, sort messages by server-assigned timestamps. Use TIMEUUID or Snowflake IDs that embed timestamps for natural ordering.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">WebSocket server runs out of memory with too many connections</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Each WebSocket connection consumes memory for the socket buffer and associated state. A single Node.js process trying to handle 200K+ connections exhausts available RAM.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Limit connections per server to 50K-100K. Scale horizontally with more WebSocket server instances behind a load balancer. Use sticky sessions so a user's reconnection attempts go to the same server. Monitor memory per connection and tune buffer sizes.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Presence status shows users as online when they have actually crashed</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> If a client crashes without cleanly closing the WebSocket, the server may not immediately detect the disconnect. TCP keep-alive timeouts can be minutes long.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement application-level heartbeats (ping/pong every 30 seconds). Use Redis key expiry (TTL of 60 seconds) for presence. If a heartbeat is missed, the key expires and the user appears offline. Also configure WebSocket ping intervals on the server side.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://bytebytego.com/courses/system-design-interview/design-a-chat-system" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">The Architecture of WhatsApp</div>
+                    
+                    <div class="resource-note">Detailed walkthrough of chat system design from System Design Interview Volume 1</div>
+                    
+                </a>
+                
+                <a href="https://github.com/websockets/ws" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">ws - Node.js WebSocket Library</div>
+                    
+                    <div class="resource-note">The most popular WebSocket library for Node.js, used in production by major companies</div>
+                    
+                </a>
+                
+                <a href="https://discord.com/blog/how-discord-stores-billions-of-messages" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">How Discord Stores Billions of Messages</div>
+                    
+                    <div class="resource-note">Discord's migration from MongoDB to Cassandra for message storage at scale</div>
+                    
+                </a>
+                
+                <a href="https://signal.org/docs/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Signal Protocol Technical Documentation</div>
+                    
+                    <div class="resource-note">The end-to-end encryption protocol used by WhatsApp, Signal, and others</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.1.3-js.html" class="btn">&larr; Design a Notification Service</a>
+            
+            
+            <a href="/backend-learning/lesson/9.1.5-js.html" class="btn">Design a News Feed (Twitter/Instagram) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

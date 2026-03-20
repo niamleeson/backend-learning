@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hashing: bcrypt, argon2, and Password Storage - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-7-js.html">Security & Reliability</a> &rsaquo;
+            Cryptography Basics
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">7.3.1</span>
+                <span>~2h</span>
+            </div>
+            <h1>Hashing: bcrypt, argon2, and Password Storage</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Password hashing is like a meat grinder: you can put a steak in and get ground meat out, but you cannot reassemble the steak from the ground meat. bcrypt and argon2 are intentionally slow grinders -- they take hundreds of milliseconds on purpose -- so that an attacker who steals your ground meat cannot try billions of steaks per second to find a match.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Hashing: bcrypt, argon2, and Password Storage</h1>
+<h2>Introduction</h2>
+<p>Storing passwords is one of the most security-critical tasks in backend development, and it is astonishingly easy to get wrong. If your database is compromised and you stored passwords in plaintext, every single user account is immediately exposed. Even basic encryption is insufficient because encryption is reversible — anyone with the key can recover every password. Hashing is the correct approach: a one-way mathematical function that converts a password into a fixed-length string from which the original password cannot be recovered.</p>
+<p>In this lesson, you will learn how password hashing works, why general-purpose hash functions like SHA-256 are unsuitable for passwords, and how to use purpose-built algorithms like bcrypt and argon2 in Node.js to store passwords securely.</p>
+<h2>Why Not Store Passwords Directly?</h2>
+<p>Let us examine the progression of password storage approaches and why each inadequate method fails.</p>
+<h3>Level 0: Plaintext</h3>
+<div class="highlight"><pre><span></span><code>Database:
++--------+-----------+
+| user   | password  |
++--------+-----------+
+| alice  | hunter2   |
+| bob    | p@ssw0rd  |
++--------+-----------+
+
+Attacker steals DB -&gt; every password is immediately visible.
+</code></pre></div>
+
+<h3>Level 1: Encrypted Passwords</h3>
+<div class="highlight"><pre><span></span><code>Database:
++--------+---------------------------+
+| user   | encrypted_password        |
++--------+---------------------------+
+| alice  | aGVsbG8gd29ybGQ=          |
+| bob    | c2VjcmV0MTIz              |
++--------+---------------------------+
+
+Attacker steals DB + encryption key -&gt; every password is recoverable.
+</code></pre></div>
+
+<p>Encryption is a two-way function. If the attacker obtains the key (which is often stored on the same server or in environment variables), all passwords are compromised.</p>
+<h3>Level 2: Simple Hash (SHA-256)</h3>
+<div class="highlight"><pre><span></span><code>Database:
++--------+------------------------------------------------------------------+
+| user   | hashed_password                                                  |
++--------+------------------------------------------------------------------+
+| alice  | b8e9... (SHA-256 of &quot;hunter2&quot;)                                   |
+| bob    | 5e88... (SHA-256 of &quot;p@ssw0rd&quot;)                                  |
++--------+------------------------------------------------------------------+
+
+Problem: identical passwords produce identical hashes.
+Attacker precomputes hashes for millions of common passwords (rainbow table).
+</code></pre></div>
+
+<h3>Level 3: Hash + Salt (Still Not Enough with SHA)</h3>
+<div class="highlight"><pre><span></span><code>Database:
++--------+--------+----------------------------------------------+
+| user   | salt   | hashed_password                              |
++--------+--------+----------------------------------------------+
+| alice  | x9f2.. | SHA-256(&quot;x9f2..&quot; + &quot;hunter2&quot;) = a3c1...      |
+| bob    | k7m4.. | SHA-256(&quot;k7m4..&quot; + &quot;p@ssw0rd&quot;) = f8d2...     |
++--------+--------+----------------------------------------------+
+
+Rainbow tables defeated, but SHA-256 is too fast.
+Modern GPUs compute billions of SHA-256 hashes per second.
+</code></pre></div>
+
+<h3>Level 4: Purpose-Built Password Hashing (bcrypt / argon2)</h3>
+<div class="highlight"><pre><span></span><code>Database:
++--------+--------------------------------------------------------------+
+| user   | hashed_password                                              |
++--------+--------------------------------------------------------------+
+| alice  | $2b$12$LJ3m4... (bcrypt with salt embedded, cost=12)         |
+| bob    | $2b$12$Kx9p7... (bcrypt with salt embedded, cost=12)         |
++--------+--------------------------------------------------------------+
+
+Salt is embedded in the hash.
+Deliberately slow: ~250ms per hash at cost=12.
+GPU-resistant (bcrypt) or memory-hard (argon2).
+</code></pre></div>
+
+<h2>How Password Hashing Works</h2>
+<p>The general flow for registration and login looks like this:</p>
+<div class="highlight"><pre><span></span><code>REGISTRATION:
+
+  User enters password
+        |
+        v
+  Generate random salt
+        |
+        v
+  hash(password + salt) --&gt; hashed_password
+        |
+        v
+  Store hashed_password in DB (salt is embedded)
+
+
+LOGIN:
+
+  User enters password
+        |
+        v
+  Retrieve hashed_password from DB
+        |
+        v
+  Extract salt from stored hash
+        |
+        v
+  hash(entered_password + extracted_salt)
+        |
+        v
+  Compare new hash with stored hash
+        |
+        v
+  Match? --&gt; Login success
+  No match? --&gt; Login failure
+</code></pre></div>
+
+<h2>bcrypt: The Industry Workhorse</h2>
+<p>bcrypt has been the standard password hashing algorithm since 1999. It is based on the Blowfish cipher and has three key properties:</p>
+<ol>
+<li><strong>Built-in salt</strong> -- the salt is generated automatically and embedded in the output</li>
+<li><strong>Configurable cost factor</strong> -- the <code>saltRounds</code> (or cost) parameter controls how many iterations are performed, making it deliberately slow</li>
+<li><strong>GPU resistance</strong> -- bcrypt requires frequent memory accesses that make it harder to parallelize on GPUs compared to SHA</li>
+</ol>
+<h3>Installing bcrypt</h3>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>install<span class="w"> </span>bcrypt
+npm<span class="w"> </span>install<span class="w"> </span>-D<span class="w"> </span>@types/bcrypt
+</code></pre></div>
+
+<p>There are two bcrypt packages commonly used in Node.js:
+- <strong><code>bcrypt</code></strong> -- native C++ addon, faster, requires build tools (node-gyp)
+- <strong><code>bcryptjs</code></strong> -- pure JavaScript implementation, no native dependencies, slightly slower</p>
+<p>For production, prefer <code>bcrypt</code>. For environments where native compilation is problematic (like some CI pipelines), use <code>bcryptjs</code>.</p>
+<h3>Hashing a Password</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">bcrypt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;bcrypt&#39;</span><span class="p">);</span>
+
+<span class="c1">// The cost factor (saltRounds) determines computational expense</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">SALT_ROUNDS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">12</span><span class="p">;</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">hashPassword</span><span class="p">(</span><span class="nx">plainPassword</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// bcrypt.hash generates a random salt and hashes in one step</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">hashedPassword</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">hash</span><span class="p">(</span><span class="nx">plainPassword</span><span class="p">,</span><span class="w"> </span><span class="nx">SALT_ROUNDS</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">hashedPassword</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Example usage</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">demo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">hashPassword</span><span class="p">(</span><span class="s1">&#39;mySecretPassword&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">hash</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Output: $2b$12$LJ3m4x5p9qRtY1W2Z3v4a.7X8K9L0M1N2O3P4Q5R6S7T8U9V0W1X2</span>
+<span class="p">}</span>
+<span class="nx">demo</span><span class="p">();</span>
+</code></pre></div>
+
+<h3>Anatomy of a bcrypt Hash</h3>
+<div class="highlight"><pre><span></span><code>$2b$12$LJ3m4x5p9qRtY1W2Z3v4a.7X8K9L0M1N2O3P4Q5R6S7T8U9V0W1X2
+ ^^  ^^  ^^^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ |   |   |                      |
+ |   |   22-char salt           31-char hash
+ |   |
+ |   cost factor (2^12 = 4096 iterations)
+ |
+ algorithm version (2b = current)
+</code></pre></div>
+
+<p>The salt and hash are combined into a single string. You never need to store the salt separately.</p>
+<h3>Verifying a Password</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">bcrypt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;bcrypt&#39;</span><span class="p">);</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">verifyPassword</span><span class="p">(</span><span class="nx">plainPassword</span><span class="p">,</span><span class="w"> </span><span class="nx">storedHash</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// bcrypt.compare extracts the salt from storedHash,</span>
+<span class="w">  </span><span class="c1">// hashes plainPassword with that salt,</span>
+<span class="w">  </span><span class="c1">// and compares the result</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">isMatch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">compare</span><span class="p">(</span><span class="nx">plainPassword</span><span class="p">,</span><span class="w"> </span><span class="nx">storedHash</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">isMatch</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">demo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">hash</span><span class="p">(</span><span class="s1">&#39;mySecretPassword&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">12</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">verifyPassword</span><span class="p">(</span><span class="s1">&#39;mySecretPassword&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">hash</span><span class="p">));</span><span class="w"> </span><span class="c1">// true</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">verifyPassword</span><span class="p">(</span><span class="s1">&#39;wrongPassword&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">hash</span><span class="p">));</span><span class="w">    </span><span class="c1">// false</span>
+<span class="p">}</span>
+<span class="nx">demo</span><span class="p">();</span>
+</code></pre></div>
+
+<h3>Choosing the Right Cost Factor</h3>
+<p>The cost factor should make hashing take roughly 250ms on your production hardware. Here is how to benchmark it:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">bcrypt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;bcrypt&#39;</span><span class="p">);</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">benchmarkBcrypt</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">password</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;testPassword123&#39;</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">rounds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">8</span><span class="p">;</span><span class="w"> </span><span class="nx">rounds</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mf">16</span><span class="p">;</span><span class="w"> </span><span class="nx">rounds</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">hash</span><span class="p">(</span><span class="nx">password</span><span class="p">,</span><span class="w"> </span><span class="nx">rounds</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">elapsed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">start</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Cost </span><span class="si">${</span><span class="nx">rounds</span><span class="si">}</span><span class="sb">: </span><span class="si">${</span><span class="nx">elapsed</span><span class="si">}</span><span class="sb">ms`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+<span class="nx">benchmarkBcrypt</span><span class="p">();</span>
+
+<span class="c1">// Typical output on a modern server:</span>
+<span class="c1">// Cost 8:   ~15ms</span>
+<span class="c1">// Cost 10:  ~60ms</span>
+<span class="c1">// Cost 12:  ~250ms   &lt;-- good starting point</span>
+<span class="c1">// Cost 14:  ~1000ms</span>
+<span class="c1">// Cost 16:  ~4000ms</span>
+</code></pre></div>
+
+<p>Start with cost 12 and increase it as hardware improves. You can rehash passwords at login when you increase the cost factor.</p>
+<h3>Rehashing on Cost Upgrade</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">bcrypt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;bcrypt&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">CURRENT_COST</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">14</span><span class="p">;</span><span class="w"> </span><span class="c1">// upgraded from 12</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">loginAndUpgradeHash</span><span class="p">(</span><span class="nx">plainPassword</span><span class="p">,</span><span class="w"> </span><span class="nx">storedHash</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">isValid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">compare</span><span class="p">(</span><span class="nx">plainPassword</span><span class="p">,</span><span class="w"> </span><span class="nx">storedHash</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">isValid</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">success</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">  </span><span class="c1">// Check if the stored hash uses an outdated cost factor</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">storedRounds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">getRounds</span><span class="p">(</span><span class="nx">storedHash</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">newHash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">storedRounds</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">CURRENT_COST</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Rehash with the new cost factor</span>
+<span class="w">    </span><span class="nx">newHash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">hash</span><span class="p">(</span><span class="nx">plainPassword</span><span class="p">,</span><span class="w"> </span><span class="nx">CURRENT_COST</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// Update the hash in the database</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">success</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">newHash</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>argon2: The Modern Alternative</h2>
+<p>Argon2 won the Password Hashing Competition in 2015. It has a key advantage over bcrypt: it is <strong>memory-hard</strong>, meaning it requires a configurable amount of RAM in addition to CPU time. This makes it even more resistant to GPU and ASIC attacks.</p>
+<p>Argon2 comes in three variants:
+- <strong>argon2d</strong> -- data-dependent memory access, faster but vulnerable to side-channel attacks
+- <strong>argon2i</strong> -- data-independent memory access, safer against side-channel attacks
+- <strong>argon2id</strong> -- hybrid (recommended), uses argon2i for the first pass and argon2d for subsequent passes</p>
+<h3>Installing argon2</h3>
+<div class="highlight"><pre><span></span><code>npm<span class="w"> </span>install<span class="w"> </span>argon2
+</code></pre></div>
+
+<h3>Hashing with argon2</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">argon2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;argon2&#39;</span><span class="p">);</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">hashWithArgon2</span><span class="p">(</span><span class="nx">password</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">argon2</span><span class="p">.</span><span class="nx">hash</span><span class="p">(</span><span class="nx">password</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="nx">argon2</span><span class="p">.</span><span class="nx">argon2id</span><span class="p">,</span><span class="w">  </span><span class="c1">// recommended variant</span>
+<span class="w">    </span><span class="nx">memoryCost</span><span class="o">:</span><span class="w"> </span><span class="mf">65536</span><span class="p">,</span><span class="w">      </span><span class="c1">// 64 MB of RAM</span>
+<span class="w">    </span><span class="nx">timeCost</span><span class="o">:</span><span class="w"> </span><span class="mf">3</span><span class="p">,</span><span class="w">            </span><span class="c1">// 3 iterations</span>
+<span class="w">    </span><span class="nx">parallelism</span><span class="o">:</span><span class="w"> </span><span class="mf">4</span><span class="w">          </span><span class="c1">// 4 threads</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">hash</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">verifyWithArgon2</span><span class="p">(</span><span class="nx">password</span><span class="p">,</span><span class="w"> </span><span class="nx">storedHash</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">argon2</span><span class="p">.</span><span class="nx">verify</span><span class="p">(</span><span class="nx">storedHash</span><span class="p">,</span><span class="w"> </span><span class="nx">password</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">demo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">hashWithArgon2</span><span class="p">(</span><span class="s1">&#39;mySecretPassword&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">hash</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// $argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHQ$...</span>
+
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">verifyWithArgon2</span><span class="p">(</span><span class="s1">&#39;mySecretPassword&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">hash</span><span class="p">));</span><span class="w"> </span><span class="c1">// true</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">verifyWithArgon2</span><span class="p">(</span><span class="s1">&#39;wrongPassword&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">hash</span><span class="p">));</span><span class="w">    </span><span class="c1">// false</span>
+<span class="p">}</span>
+<span class="nx">demo</span><span class="p">();</span>
+</code></pre></div>
+
+<h3>Anatomy of an argon2 Hash</h3>
+<div class="highlight"><pre><span></span><code>$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHQ$hashvalue
+ ^^^^^^^^ ^^^^ ^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^ ^^^^^^^^^
+ |        |    |                |             |
+ |        |    |                salt (base64) hash (base64)
+ |        |    |
+ |        |    m=memory, t=iterations, p=parallelism
+ |        |
+ |        version
+ |
+ algorithm variant
+</code></pre></div>
+
+<h2>bcrypt vs argon2: When to Use Which</h2>
+<div class="highlight"><pre><span></span><code>+------------------+---------------------------+---------------------------+
+| Feature          | bcrypt                    | argon2id                  |
++------------------+---------------------------+---------------------------+
+| Age              | 1999 (battle-tested)      | 2015 (modern)             |
+| Memory-hard      | No                        | Yes (configurable)        |
+| GPU resistance   | Moderate                  | Strong                    |
+| ASIC resistance  | Low                       | High                      |
+| Max password len | 72 bytes                  | No practical limit        |
+| Configuration    | Single cost factor        | Memory, time, parallelism |
+| Ecosystem        | Universal support         | Growing support           |
+| OWASP rec.       | Acceptable                | Preferred                 |
++------------------+---------------------------+---------------------------+
+</code></pre></div>
+
+<p><strong>Use argon2id</strong> for new projects. It is the OWASP-recommended algorithm.
+<strong>Use bcrypt</strong> when argon2 is not available or for compatibility with existing systems.</p>
+<h2>Building a Complete User Authentication Module</h2>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">bcrypt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;bcrypt&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">randomBytes</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:crypto&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">SALT_ROUNDS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">12</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">MIN_PASSWORD_LENGTH</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">8</span><span class="p">;</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">PasswordService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="cm">/**</span>
+<span class="cm">   * Validate password strength before hashing.</span>
+<span class="cm">   * Returns an array of error messages (empty if valid).</span>
+<span class="cm">   */</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="nx">validateStrength</span><span class="p">(</span><span class="nx">password</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">errors</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">password</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">MIN_PASSWORD_LENGTH</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">errors</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="sb">`Password must be at least </span><span class="si">${</span><span class="nx">MIN_PASSWORD_LENGTH</span><span class="si">}</span><span class="sb"> characters`</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="sr">/[A-Z]/</span><span class="p">.</span><span class="nx">test</span><span class="p">(</span><span class="nx">password</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">errors</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="s1">&#39;Password must contain at least one uppercase letter&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="sr">/[a-z]/</span><span class="p">.</span><span class="nx">test</span><span class="p">(</span><span class="nx">password</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">errors</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="s1">&#39;Password must contain at least one lowercase letter&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="sr">/[0-9]/</span><span class="p">.</span><span class="nx">test</span><span class="p">(</span><span class="nx">password</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">errors</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="s1">&#39;Password must contain at least one digit&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">errors</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="cm">/**</span>
+<span class="cm">   * Hash a password using bcrypt.</span>
+<span class="cm">   */</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="nx">hash</span><span class="p">(</span><span class="nx">password</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">hash</span><span class="p">(</span><span class="nx">password</span><span class="p">,</span><span class="w"> </span><span class="nx">SALT_ROUNDS</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="cm">/**</span>
+<span class="cm">   * Verify a password against a stored hash.</span>
+<span class="cm">   */</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="nx">verify</span><span class="p">(</span><span class="nx">password</span><span class="p">,</span><span class="w"> </span><span class="nx">storedHash</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">compare</span><span class="p">(</span><span class="nx">password</span><span class="p">,</span><span class="w"> </span><span class="nx">storedHash</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="cm">/**</span>
+<span class="cm">   * Check if a stored hash needs to be upgraded.</span>
+<span class="cm">   */</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="nx">needsRehash</span><span class="p">(</span><span class="nx">storedHash</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">rounds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">getRounds</span><span class="p">(</span><span class="nx">storedHash</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">rounds</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">SALT_ROUNDS</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="cm">/**</span>
+<span class="cm">   * Generate a secure random password reset token.</span>
+<span class="cm">   */</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="nx">generateResetToken</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">randomBytes</span><span class="p">(</span><span class="mf">32</span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PasswordService</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+
+<h3>Express Registration Route</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PasswordService</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;./password-service&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/register&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">email</span><span class="p">,</span><span class="w"> </span><span class="nx">password</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// 1. Validate input</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">email</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="nx">password</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Email and password are required&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 2. Check password strength</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">strengthErrors</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">PasswordService</span><span class="p">.</span><span class="nx">validateStrength</span><span class="p">(</span><span class="nx">password</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">strengthErrors</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">errors</span><span class="o">:</span><span class="w"> </span><span class="nx">strengthErrors</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 3. Check if user already exists (pseudo-code)</span>
+<span class="w">    </span><span class="c1">// const existingUser = await db.users.findByEmail(email);</span>
+<span class="w">    </span><span class="c1">// if (existingUser) return res.status(409).json({ error: &#39;Email taken&#39; });</span>
+
+<span class="w">    </span><span class="c1">// 4. Hash the password</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">hashedPassword</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">PasswordService</span><span class="p">.</span><span class="nx">hash</span><span class="p">(</span><span class="nx">password</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 5. Store user (pseudo-code)</span>
+<span class="w">    </span><span class="c1">// const user = await db.users.create({ email, password: hashedPassword });</span>
+
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;User registered successfully&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Registration error:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Internal server error&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/login&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">email</span><span class="p">,</span><span class="w"> </span><span class="nx">password</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// 1. Find user (pseudo-code)</span>
+<span class="w">    </span><span class="c1">// const user = await db.users.findByEmail(email);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">email</span><span class="p">,</span><span class="w"> </span><span class="nx">password</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;$2b$12$...&#39;</span><span class="w"> </span><span class="p">};</span><span class="w"> </span><span class="c1">// mock</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Use the same message for &quot;user not found&quot; and &quot;wrong password&quot;</span>
+<span class="w">      </span><span class="c1">// to prevent user enumeration attacks</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">401</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid credentials&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 2. Verify password</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">isValid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">PasswordService</span><span class="p">.</span><span class="nx">verify</span><span class="p">(</span><span class="nx">password</span><span class="p">,</span><span class="w"> </span><span class="nx">user</span><span class="p">.</span><span class="nx">password</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">isValid</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">401</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid credentials&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 3. Rehash if needed</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">PasswordService</span><span class="p">.</span><span class="nx">needsRehash</span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">password</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">newHash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">PasswordService</span><span class="p">.</span><span class="nx">hash</span><span class="p">(</span><span class="nx">password</span><span class="p">);</span>
+<span class="w">      </span><span class="c1">// await db.users.updatePassword(user.id, newHash);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 4. Create session or JWT</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Login successful&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Login error:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Internal server error&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">router</span><span class="p">;</span>
+</code></pre></div>
+
+<h2>Timing Attacks and Constant-Time Comparison</h2>
+<p>When comparing hashes manually, you must use constant-time comparison to prevent timing attacks. Both <code>bcrypt.compare</code> and <code>argon2.verify</code> already do this internally, but if you ever need to compare tokens or hashes yourself:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">timingSafeEqual</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:crypto&#39;</span><span class="p">);</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">safeCompare</span><span class="p">(</span><span class="nx">a</span><span class="p">,</span><span class="w"> </span><span class="nx">b</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">a</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">length</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">bufA</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">a</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">bufB</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">b</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">timingSafeEqual</span><span class="p">(</span><span class="nx">bufA</span><span class="p">,</span><span class="w"> </span><span class="nx">bufB</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>A naive <code>===</code> comparison returns early on the first mismatched character, which leaks information about how many characters matched. <code>timingSafeEqual</code> always takes the same amount of time regardless of where the difference occurs.</p>
+<div class="highlight"><pre><span></span><code>TIMING ATTACK:
+
+Naive comparison: &quot;abc&quot; === &quot;axyz&quot;
+  Compare &#39;a&#39; == &#39;a&#39; -&gt; match, continue   (~1 unit of time)
+  Compare &#39;b&#39; == &#39;x&#39; -&gt; mismatch, RETURN  (~2 units of time)
+
+Naive comparison: &quot;abc&quot; === &quot;abd&quot;
+  Compare &#39;a&#39; == &#39;a&#39; -&gt; match, continue   (~1 unit)
+  Compare &#39;b&#39; == &#39;b&#39; -&gt; match, continue   (~2 units)
+  Compare &#39;c&#39; == &#39;d&#39; -&gt; mismatch, RETURN  (~3 units)
+
+Attacker can deduce correct characters by measuring response time!
+
+Constant-time comparison: always checks ALL characters.
+  Takes the same time regardless of where differences are.
+</code></pre></div>
+
+<h2>Common Password Storage Mistakes</h2>
+<h3>1. Using MD5 or SHA for Passwords</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// NEVER DO THIS</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:crypto&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">createHash</span><span class="p">(</span><span class="s1">&#39;sha256&#39;</span><span class="p">).</span><span class="nx">update</span><span class="p">(</span><span class="nx">password</span><span class="p">).</span><span class="nx">digest</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+<span class="c1">// SHA-256 can compute billions of hashes per second on a GPU</span>
+</code></pre></div>
+
+<h3>2. Truncating Passwords Before Hashing</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// WRONG: silently truncates long passwords</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">truncated</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">password</span><span class="p">.</span><span class="nx">substring</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="mf">20</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">hash</span><span class="p">(</span><span class="nx">truncated</span><span class="p">,</span><span class="w"> </span><span class="mf">12</span><span class="p">);</span>
+
+<span class="c1">// Note: bcrypt itself truncates at 72 bytes.</span>
+<span class="c1">// If this is a concern, use argon2 or pre-hash with SHA-256:</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">preHash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">createHash</span><span class="p">(</span><span class="s1">&#39;sha256&#39;</span><span class="p">).</span><span class="nx">update</span><span class="p">(</span><span class="nx">password</span><span class="p">).</span><span class="nx">digest</span><span class="p">(</span><span class="s1">&#39;base64&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">hash2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">hash</span><span class="p">(</span><span class="nx">preHash</span><span class="p">,</span><span class="w"> </span><span class="mf">12</span><span class="p">);</span>
+</code></pre></div>
+
+<h3>3. Logging Passwords</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// NEVER log passwords, even in development</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`User login: </span><span class="si">${</span><span class="nx">email</span><span class="si">}</span><span class="sb">, password: </span><span class="si">${</span><span class="nx">password</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span><span class="w"> </span><span class="c1">// TERRIBLE</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`User login: </span><span class="si">${</span><span class="nx">email</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span><span class="w"> </span><span class="c1">// Correct</span>
+</code></pre></div>
+
+<h3>4. Not Using Constant Error Messages</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// WRONG: reveals whether email exists</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;User not found&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">match</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">401</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Wrong password&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="c1">// CORRECT: same message for both cases</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">user</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="nx">match</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">401</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid credentials&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Pepper: An Additional Layer</h2>
+<p>A pepper is a secret value stored outside the database (typically in environment variables) that is combined with the password before hashing:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">PEPPER</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">PASSWORD_PEPPER</span><span class="p">;</span><span class="w"> </span><span class="c1">// e.g., a 32-char random string</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">hashWithPepper</span><span class="p">(</span><span class="nx">password</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pepperedPassword</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">password</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">PEPPER</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">hash</span><span class="p">(</span><span class="nx">pepperedPassword</span><span class="p">,</span><span class="w"> </span><span class="mf">12</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">verifyWithPepper</span><span class="p">(</span><span class="nx">password</span><span class="p">,</span><span class="w"> </span><span class="nx">storedHash</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pepperedPassword</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">password</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">PEPPER</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">bcrypt</span><span class="p">.</span><span class="nx">compare</span><span class="p">(</span><span class="nx">pepperedPassword</span><span class="p">,</span><span class="w"> </span><span class="nx">storedHash</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>If the database is compromised but the application server (where the pepper lives) is not, the attacker cannot crack the passwords even with unlimited computing power.</p>
+<h2>Summary</h2>
+<p>Never store passwords in plaintext or use general-purpose hash functions. Use bcrypt (cost 12+) or argon2id with appropriate memory and time parameters. Always use the library's built-in comparison functions for timing-safe verification. Return identical error messages for "user not found" and "wrong password" to prevent user enumeration. Consider adding a pepper for defense in depth. Periodically increase cost factors and rehash passwords at login time.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Password Hashing Benchmark</div>
+                    <div class="exercise-desc"><p>Write a script that benchmarks bcrypt hashing at cost factors 8 through 16. For each cost, hash the string 'benchmark-test' and record the elapsed time in milliseconds. Print a table showing cost factor vs. time. Determine which cost factor results in approximately 250ms on your machine.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Date.now() before and after each bcrypt.hash() call. Run each cost factor three times and average the results for more accurate measurements.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">User Registration and Login Service</div>
+                    <div class="exercise-desc"><p>Build a complete PasswordService class with hash(), verify(), validateStrength(), needsRehash(), and generateResetToken() methods. Write unit tests using Jest that verify: (1) the same password produces different hashes each time, (2) verify returns true for correct passwords and false for incorrect ones, (3) validateStrength rejects weak passwords.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use bcrypt.getRounds() to check the cost factor of an existing hash. For generateResetToken, use crypto.randomBytes(32).toString('hex').</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Migrate from SHA-256 to bcrypt</div>
+                    <div class="exercise-desc"><p>Simulate a legacy system migration. Start with an array of users whose passwords are stored as SHA-256 hashes. Write a login function that: (1) checks if the stored hash is SHA-256 (64 hex characters) or bcrypt (starts with $2b$), (2) verifies accordingly, (3) if SHA-256, rehashes with bcrypt and updates the stored hash. Write tests to confirm the migration works transparently.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>SHA-256 hashes are 64 hex characters. bcrypt hashes start with '$2b$'. After successful login with a SHA-256 hash, hash the plaintext password with bcrypt and update the user record.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Timing Attack Demonstration</div>
+                    <div class="exercise-desc"><p>Write two comparison functions: one using naive string comparison (===) and one using crypto.timingSafeEqual(). Create a test that compares strings with varying amounts of matching prefix characters. Measure and log the time for each comparison to observe whether the naive approach leaks timing information.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use process.hrtime.bigint() for nanosecond-precision timing. Compare strings like 'aaaaaaaaax' vs 'aaaaaaaaab' (9 matching chars) and 'axaaaaaaaa' vs 'abaaaaaaaa' (1 matching char). You may need to run thousands of iterations to see a measurable difference.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">bcrypt.hash throws 'Error: data and salt arguments required' even though a password is provided</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The password variable is undefined or null, often because req.body was not parsed (missing express.json() middleware) or the field name in the request does not match the destructured variable name.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Ensure app.use(express.json()) is registered before the route. Add a check: if (!password) return res.status(400)... before calling bcrypt.hash(). Log typeof password to debug.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">bcrypt.compare always returns false even with the correct password</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The stored hash was truncated when saved to the database. bcrypt hashes are 60 characters long, but the database column may be defined as VARCHAR(50) or similar, silently truncating the hash.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Ensure the password column in your database is at least VARCHAR(60) for bcrypt or VARCHAR(128) for argon2. Check the stored hash length: if it is less than 60 characters, the column is too short.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Installing the bcrypt package fails with node-gyp errors on macOS or Windows</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The native bcrypt package requires C++ compilation tools (node-gyp, Python, make). These are not always installed on developer machines or CI environments.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Install build tools: on macOS run 'xcode-select --install', on Windows install windows-build-tools. Alternatively, switch to bcryptjs which is a pure JavaScript implementation: npm install bcryptjs. The API is identical.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">OWASP Password Storage Cheat Sheet</div>
+                    
+                    <div class="resource-note">The definitive guide to password storage best practices, updated regularly by security experts</div>
+                    
+                </a>
+                
+                <a href="https://codahale.com/how-to-safely-store-a-password/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">How To Safely Store A Password (Coda Hale)</div>
+                    
+                    <div class="resource-note">The classic article that popularized bcrypt for web developers</div>
+                    
+                </a>
+                
+                <a href="https://www.npmjs.com/package/bcrypt" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">bcrypt npm package documentation</div>
+                    
+                    <div class="resource-note">Official API reference for the Node.js bcrypt package</div>
+                    
+                </a>
+                
+                <a href="https://www.rfc-editor.org/rfc/rfc9106" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag specification">specification</div>
+                    <div class="resource-title">Argon2 RFC (RFC 9106)</div>
+                    
+                    <div class="resource-note">The formal specification of the argon2 algorithm and its recommended parameters</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/7.3.2-js.html" class="btn">node:crypto: Encryption, HMAC, and Random Values &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-7-js.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

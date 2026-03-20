@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenID Connect and Identity Providers - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-7-js.html">Security & Reliability</a> &rsaquo;
+            Authentication & Authorization
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">7.2.2</span>
+                <span>~2h</span>
+            </div>
+            <h1>OpenID Connect and Identity Providers</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>If OAuth2 is a valet parking ticket that says what the valet can do with your car, then OpenID Connect is a driver's license taped to that ticket. The driver's license (ID token) tells you exactly who the person is, and because it is cryptographically signed by a trusted authority (the identity provider), you can verify it is genuine without calling the DMV every time.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>OpenID Connect and Identity Providers</h1>
+<h2>From Authorization to Authentication</h2>
+<p>OAuth2 was designed for <strong>authorization</strong> (granting access to resources), not <strong>authentication</strong> (verifying who a user is). This distinction matters enormously. OAuth2 alone tells your application "this token has permission to access these resources" but does NOT tell you "the person holding this token is Alice from Engineering."</p>
+<p>OpenID Connect (OIDC) is a thin identity layer built on top of OAuth2 that adds authentication. When someone says "Login with Google" or "Sign in with Microsoft," they are using OpenID Connect.</p>
+<h2>OAuth2 vs OpenID Connect</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────┐
+│                OpenID Connect                 │
+│  ┌────────────────────────────────────────┐  │
+│  │              OAuth 2.0                 │  │
+│  │                                        │  │
+│  │   Authorization:                       │  │
+│  │   &quot;Can this app access my photos?&quot;     │  │
+│  │                                        │  │
+│  └────────────────────────────────────────┘  │
+│                                              │
+│  Authentication (added by OIDC):             │
+│  &quot;Who is this user?&quot;                         │
+│  &quot;What is their email?&quot;                      │
+│  &quot;When did they last log in?&quot;                │
+│                                              │
+│  New concepts:                               │
+│  - ID Token (JWT)                            │
+│  - UserInfo Endpoint                         │
+│  - Standard Scopes (openid, profile, email)  │
+│  - Discovery Document                        │
+└──────────────────────────────────────────────┘
+</code></pre></div>
+
+<p>OAuth2 gives you an <strong>access token</strong> (opaque, for API calls). OIDC adds an <strong>ID token</strong> (a JWT containing user identity claims).</p>
+<h2>The ID Token</h2>
+<p>The ID Token is the core addition of OIDC. It is a JSON Web Token (JWT) that contains claims about the authenticated user.</p>
+<div class="highlight"><pre><span></span><code>ID Token (JWT):
+┌─────────────────────────────────────────────┐
+│ Header (algorithm, type)                     │
+├─────────────────────────────────────────────┤
+│ Payload (claims):                            │
+│   iss: &quot;https://accounts.google.com&quot;         │
+│   sub: &quot;110169484474386276334&quot;               │
+│   aud: &quot;your-client-id.apps.googleusercontent│
+│   exp: 1714500000                            │
+│   iat: 1714496400                            │
+│   nonce: &quot;abc123&quot;                            │
+│   email: &quot;alice@example.com&quot;                 │
+│   email_verified: true                       │
+│   name: &quot;Alice Smith&quot;                        │
+│   picture: &quot;https://...photo.jpg&quot;            │
+├─────────────────────────────────────────────┤
+│ Signature (verifiable by provider&#39;s keys)    │
+└─────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>Standard Claims</h3>
+<table>
+<thead>
+<tr>
+<th>Claim</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iss</code></td>
+<td>Issuer - who issued this token (e.g., Google, Auth0)</td>
+</tr>
+<tr>
+<td><code>sub</code></td>
+<td>Subject - unique identifier for the user at this provider</td>
+</tr>
+<tr>
+<td><code>aud</code></td>
+<td>Audience - your application's client_id</td>
+</tr>
+<tr>
+<td><code>exp</code></td>
+<td>Expiration time (Unix timestamp)</td>
+</tr>
+<tr>
+<td><code>iat</code></td>
+<td>Issued at time</td>
+</tr>
+<tr>
+<td><code>nonce</code></td>
+<td>Replay attack prevention (you set this)</td>
+</tr>
+<tr>
+<td><code>email</code></td>
+<td>User's email address</td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>User's display name</td>
+</tr>
+<tr>
+<td><code>picture</code></td>
+<td>URL to user's profile picture</td>
+</tr>
+</tbody>
+</table>
+<h3>Validating the ID Token</h3>
+<p>You MUST validate the ID token before trusting it. Never blindly decode and use the claims.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// id-token-validator.js</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">jwt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;jsonwebtoken&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">jwksClient</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;jwks-rsa&#39;</span><span class="p">);</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">IdTokenValidator</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">({</span><span class="w"> </span><span class="nx">issuer</span><span class="p">,</span><span class="w"> </span><span class="nx">audience</span><span class="p">,</span><span class="w"> </span><span class="nx">jwksUri</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">issuer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">issuer</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">audience</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">audience</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">jwksClient</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">jwksUri</span><span class="o">:</span><span class="w"> </span><span class="nx">jwksUri</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">cache</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">cacheMaxAge</span><span class="o">:</span><span class="w"> </span><span class="mf">600000</span><span class="w"> </span><span class="c1">// Cache keys for 10 minutes</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Retrieve the signing key from the JWKS endpoint</span>
+<span class="w">  </span><span class="nx">getSigningKey</span><span class="p">(</span><span class="nx">kid</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">resolve</span><span class="p">,</span><span class="w"> </span><span class="nx">reject</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">client</span><span class="p">.</span><span class="nx">getSigningKey</span><span class="p">(</span><span class="nx">kid</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">,</span><span class="w"> </span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">reject</span><span class="p">(</span><span class="nx">err</span><span class="p">);</span>
+<span class="w">        </span><span class="nx">resolve</span><span class="p">(</span><span class="nx">key</span><span class="p">.</span><span class="nx">getPublicKey</span><span class="p">());</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">validate</span><span class="p">(</span><span class="nx">idToken</span><span class="p">,</span><span class="w"> </span><span class="nx">expectedNonce</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Step 1: Decode header to get the key ID (kid)</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">decoded</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">jwt</span><span class="p">.</span><span class="nx">decode</span><span class="p">(</span><span class="nx">idToken</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">complete</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">decoded</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Invalid token: cannot decode&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Step 2: Get the public key for this kid</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">publicKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">getSigningKey</span><span class="p">(</span><span class="nx">decoded</span><span class="p">.</span><span class="nx">header</span><span class="p">.</span><span class="nx">kid</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Step 3: Verify signature, expiration, issuer, and audience</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">payload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">jwt</span><span class="p">.</span><span class="nx">verify</span><span class="p">(</span><span class="nx">idToken</span><span class="p">,</span><span class="w"> </span><span class="nx">publicKey</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">algorithms</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;RS256&#39;</span><span class="p">],</span>
+<span class="w">      </span><span class="nx">issuer</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">issuer</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">audience</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">audience</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">clockTolerance</span><span class="o">:</span><span class="w"> </span><span class="mf">30</span><span class="w"> </span><span class="c1">// 30 seconds tolerance for clock skew</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// Step 4: Verify nonce (prevents replay attacks)</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">expectedNonce</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">payload</span><span class="p">.</span><span class="nx">nonce</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">expectedNonce</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Invalid nonce: possible replay attack&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">payload</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage with Google</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">googleValidator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">IdTokenValidator</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">issuer</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://accounts.google.com&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">audience</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">GOOGLE_CLIENT_ID</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">jwksUri</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://www.googleapis.com/oauth2/v3/certs&#39;</span>
+<span class="p">});</span>
+
+<span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">IdTokenValidator</span><span class="p">,</span><span class="w"> </span><span class="nx">googleValidator</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+
+<h2>OIDC Scopes</h2>
+<p>OIDC defines standard scopes that determine what claims appear in the ID token and UserInfo response.</p>
+<div class="highlight"><pre><span></span><code>┌─────────────┬─────────────────────────────────────┐
+│  Scope       │  Claims Returned                     │
+├─────────────┼─────────────────────────────────────┤
+│  openid      │  sub (required for OIDC)             │
+├─────────────┼─────────────────────────────────────┤
+│  profile     │  name, family_name, given_name,      │
+│              │  nickname, picture, updated_at        │
+├─────────────┼─────────────────────────────────────┤
+│  email       │  email, email_verified                │
+├─────────────┼─────────────────────────────────────┤
+│  address     │  address (structured object)          │
+├─────────────┼─────────────────────────────────────┤
+│  phone       │  phone_number, phone_number_verified  │
+└─────────────┴─────────────────────────────────────┘
+</code></pre></div>
+
+<p>The <code>openid</code> scope is required. Without it, the provider will not return an ID token and you are doing plain OAuth2.</p>
+<h2>OIDC Discovery</h2>
+<p>Every OIDC provider publishes a discovery document at a well-known URL. This tells your application everything it needs to know to integrate.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// oidc-discovery.js</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">discoverOIDCProvider</span><span class="p">(</span><span class="nx">issuerUrl</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">discoveryUrl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">issuerUrl</span><span class="si">}</span><span class="sb">/.well-known/openid-configuration`</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">discoveryUrl</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">config</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// The discovery document contains:</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">config</span><span class="p">.</span><span class="nx">authorization_endpoint</span><span class="p">);</span><span class="w"> </span><span class="c1">// Where to send users to log in</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">config</span><span class="p">.</span><span class="nx">token_endpoint</span><span class="p">);</span><span class="w">         </span><span class="c1">// Where to exchange codes for tokens</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">config</span><span class="p">.</span><span class="nx">userinfo_endpoint</span><span class="p">);</span><span class="w">      </span><span class="c1">// Where to get user profile</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">config</span><span class="p">.</span><span class="nx">jwks_uri</span><span class="p">);</span><span class="w">               </span><span class="c1">// Where to get signing keys</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">config</span><span class="p">.</span><span class="nx">scopes_supported</span><span class="p">);</span><span class="w">       </span><span class="c1">// What scopes are available</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">config</span><span class="p">.</span><span class="nx">response_types_supported</span><span class="p">);</span><span class="w"> </span><span class="c1">// code, id_token, etc.</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">config</span><span class="p">.</span><span class="nx">id_token_signing_alg_values_supported</span><span class="p">);</span><span class="w"> </span><span class="c1">// RS256, etc.</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">config</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Try it:</span>
+<span class="c1">// Google:  discoverOIDCProvider(&#39;https://accounts.google.com&#39;)</span>
+<span class="c1">// Auth0:   discoverOIDCProvider(&#39;https://your-tenant.auth0.com&#39;)</span>
+<span class="c1">// Keycloak: discoverOIDCProvider(&#39;https://keycloak.example.com/realms/myrealm&#39;)</span>
+</code></pre></div>
+
+<p>This is enormously useful. Instead of hardcoding endpoint URLs, you can dynamically configure your application from the discovery document.</p>
+<h2>Complete OIDC Integration with Express</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// oidc-auth.js</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">crypto</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;node:crypto&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">session</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express-session&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">jwt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;jsonwebtoken&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">jwksClient</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;jwks-rsa&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">session</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">secret</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">SESSION_SECRET</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resave</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">saveUninitialized</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">cookie</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">httpOnly</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">secure</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">NODE_ENV</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;production&#39;</span><span class="w"> </span><span class="p">}</span>
+<span class="p">}));</span>
+
+<span class="c1">// Configuration (could be loaded from discovery document)</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">OIDC_CONFIG</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">clientId</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">OIDC_CLIENT_ID</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">clientSecret</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">OIDC_CLIENT_SECRET</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">issuer</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://accounts.google.com&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">authorizationEndpoint</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://accounts.google.com/o/oauth2/v2/auth&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">tokenEndpoint</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://oauth2.googleapis.com/token&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">userInfoEndpoint</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://openidconnect.googleapis.com/v1/userinfo&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">jwksUri</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://www.googleapis.com/oauth2/v3/certs&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">redirectUri</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;http://localhost:3000/auth/callback&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">scopes</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;openid&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;profile&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;email&#39;</span><span class="p">]</span>
+<span class="p">};</span>
+
+<span class="c1">// JWKS client for verifying ID tokens</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">jwks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">jwksClient</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">jwksUri</span><span class="o">:</span><span class="w"> </span><span class="nx">OIDC_CONFIG</span><span class="p">.</span><span class="nx">jwksUri</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">cache</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="p">});</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">getSigningKey</span><span class="p">(</span><span class="nx">kid</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">resolve</span><span class="p">,</span><span class="w"> </span><span class="nx">reject</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">jwks</span><span class="p">.</span><span class="nx">getSigningKey</span><span class="p">(</span><span class="nx">kid</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">,</span><span class="w"> </span><span class="nx">key</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">reject</span><span class="p">(</span><span class="nx">err</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">resolve</span><span class="p">(</span><span class="nx">key</span><span class="p">.</span><span class="nx">getPublicKey</span><span class="p">());</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="c1">// Step 1: Initiate login</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/auth/login&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mf">16</span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">nonce</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">crypto</span><span class="p">.</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mf">16</span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;hex&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthState</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">state</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthNonce</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">nonce</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URLSearchParams</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">response_type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;code&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">client_id</span><span class="o">:</span><span class="w"> </span><span class="nx">OIDC_CONFIG</span><span class="p">.</span><span class="nx">clientId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">redirect_uri</span><span class="o">:</span><span class="w"> </span><span class="nx">OIDC_CONFIG</span><span class="p">.</span><span class="nx">redirectUri</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">scope</span><span class="o">:</span><span class="w"> </span><span class="nx">OIDC_CONFIG</span><span class="p">.</span><span class="nx">scopes</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="s1">&#39; &#39;</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">state</span><span class="o">:</span><span class="w"> </span><span class="nx">state</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">nonce</span><span class="o">:</span><span class="w"> </span><span class="nx">nonce</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">prompt</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;consent&#39;</span><span class="w">  </span><span class="c1">// Always show consent screen</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">OIDC_CONFIG</span><span class="p">.</span><span class="nx">authorizationEndpoint</span><span class="si">}</span><span class="sb">?</span><span class="si">${</span><span class="nx">params</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Step 2: Handle callback</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/auth/callback&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">code</span><span class="p">,</span><span class="w"> </span><span class="nx">state</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">error_description</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Validate state</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">state</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthState</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;State mismatch&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">expectedNonce</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthNonce</span><span class="p">;</span>
+<span class="w">  </span><span class="ow">delete</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthState</span><span class="p">;</span>
+<span class="w">  </span><span class="ow">delete</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oauthNonce</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Exchange code for tokens</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">tokenResponse</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">OIDC_CONFIG</span><span class="p">.</span><span class="nx">tokenEndpoint</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/x-www-form-urlencoded&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URLSearchParams</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">grant_type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;authorization_code&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">code</span><span class="o">:</span><span class="w"> </span><span class="nx">code</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">redirect_uri</span><span class="o">:</span><span class="w"> </span><span class="nx">OIDC_CONFIG</span><span class="p">.</span><span class="nx">redirectUri</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">client_id</span><span class="o">:</span><span class="w"> </span><span class="nx">OIDC_CONFIG</span><span class="p">.</span><span class="nx">clientId</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">client_secret</span><span class="o">:</span><span class="w"> </span><span class="nx">OIDC_CONFIG</span><span class="p">.</span><span class="nx">clientSecret</span>
+<span class="w">      </span><span class="p">})</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">tokens</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">tokenResponse</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// Validate the ID token</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">decoded</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">jwt</span><span class="p">.</span><span class="nx">decode</span><span class="p">(</span><span class="nx">tokens</span><span class="p">.</span><span class="nx">id_token</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">complete</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">publicKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getSigningKey</span><span class="p">(</span><span class="nx">decoded</span><span class="p">.</span><span class="nx">header</span><span class="p">.</span><span class="nx">kid</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">idTokenPayload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">jwt</span><span class="p">.</span><span class="nx">verify</span><span class="p">(</span><span class="nx">tokens</span><span class="p">.</span><span class="nx">id_token</span><span class="p">,</span><span class="w"> </span><span class="nx">publicKey</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">algorithms</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;RS256&#39;</span><span class="p">],</span>
+<span class="w">      </span><span class="nx">issuer</span><span class="o">:</span><span class="w"> </span><span class="nx">OIDC_CONFIG</span><span class="p">.</span><span class="nx">issuer</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">audience</span><span class="o">:</span><span class="w"> </span><span class="nx">OIDC_CONFIG</span><span class="p">.</span><span class="nx">clientId</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// Verify nonce</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">idTokenPayload</span><span class="p">.</span><span class="nx">nonce</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">expectedNonce</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid nonce&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// The ID token contains the user&#39;s identity</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">providerId</span><span class="o">:</span><span class="w"> </span><span class="nx">idTokenPayload</span><span class="p">.</span><span class="nx">sub</span><span class="p">,</span><span class="w">    </span><span class="c1">// Unique ID at this provider</span>
+<span class="w">      </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="nx">idTokenPayload</span><span class="p">.</span><span class="nx">email</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">emailVerified</span><span class="o">:</span><span class="w"> </span><span class="nx">idTokenPayload</span><span class="p">.</span><span class="nx">email_verified</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="nx">idTokenPayload</span><span class="p">.</span><span class="nx">name</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">picture</span><span class="o">:</span><span class="w"> </span><span class="nx">idTokenPayload</span><span class="p">.</span><span class="nx">picture</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="c1">// In production: find-or-create user in your database</span>
+<span class="w">    </span><span class="c1">// const dbUser = await findOrCreateUser(user);</span>
+
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">user</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">accessToken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tokens</span><span class="p">.</span><span class="nx">access_token</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">refreshToken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tokens</span><span class="p">.</span><span class="nx">refresh_token</span><span class="p">;</span>
+
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="s1">&#39;/profile&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;OIDC authentication failed:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Authentication failed&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+
+<span class="c1">// Fetch additional user info from the UserInfo endpoint</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/profile&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="s1">&#39;/auth/login&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// The ID token has basic info, but UserInfo may have more</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">userInfoResponse</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">OIDC_CONFIG</span><span class="p">.</span><span class="nx">userInfoEndpoint</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;Authorization&#39;</span><span class="o">:</span><span class="w"> </span><span class="sb">`Bearer </span><span class="si">${</span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">accessToken</span><span class="si">}</span><span class="sb">`</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">fullProfile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">userInfoResponse</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">idTokenUser</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">user</span><span class="p">,</span><span class="w"> </span><span class="nx">userInfoProfile</span><span class="o">:</span><span class="w"> </span><span class="nx">fullProfile</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="mf">3000</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Identity Providers (IdPs)</h2>
+<p>An Identity Provider is a service that manages user identities and provides OIDC/OAuth2 authentication.</p>
+<h3>Popular Identity Providers</h3>
+<div class="highlight"><pre><span></span><code>┌───────────────────────────────────────────────────────────┐
+│  Provider        │  Type            │  Best For           │
+├───────────────────────────────────────────────────────────┤
+│  Auth0           │  Cloud (IDaaS)   │  Startups, fast     │
+│                  │                  │  integration        │
+├──────────────────┼──────────────────┼─────────────────────┤
+│  Keycloak        │  Self-hosted     │  Full control,      │
+│                  │  (open source)   │  enterprise         │
+├──────────────────┼──────────────────┼─────────────────────┤
+│  AWS Cognito     │  Cloud (AWS)     │  AWS-heavy stacks   │
+├──────────────────┼──────────────────┼─────────────────────┤
+│  Google Identity │  Social login    │  Consumer apps      │
+├──────────────────┼──────────────────┼─────────────────────┤
+│  Azure AD / Entra│  Cloud (Azure)   │  Enterprise / M365  │
+├──────────────────┼──────────────────┼─────────────────────┤
+│  Okta            │  Cloud (IDaaS)   │  Enterprise SSO     │
+└──────────────────┴──────────────────┴─────────────────────┘
+</code></pre></div>
+
+<h3>Using the <code>openid-client</code> Library</h3>
+<p>Instead of manually building HTTP requests, use the <code>openid-client</code> library which handles discovery, token management, and validation.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// oidc-with-library.js</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Issuer</span><span class="p">,</span><span class="w"> </span><span class="nx">generators</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;openid-client&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">session</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;express-session&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">session</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">secret</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">SESSION_SECRET</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">resave</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">saveUninitialized</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="p">}));</span>
+
+<span class="kd">let</span><span class="w"> </span><span class="nx">oidcClient</span><span class="p">;</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">initializeOIDC</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Auto-discover all endpoints from the provider</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">issuer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">Issuer</span><span class="p">.</span><span class="nx">discover</span><span class="p">(</span><span class="s1">&#39;https://accounts.google.com&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Discovered issuer:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">issuer</span><span class="p">.</span><span class="nx">metadata</span><span class="p">.</span><span class="nx">issuer</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">oidcClient</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">issuer</span><span class="p">.</span><span class="nx">Client</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">client_id</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">OIDC_CLIENT_ID</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">client_secret</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">OIDC_CLIENT_SECRET</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">redirect_uris</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;http://localhost:3000/auth/callback&#39;</span><span class="p">],</span>
+<span class="w">    </span><span class="nx">response_types</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;code&#39;</span><span class="p">]</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/auth/login&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">nonce</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">generators</span><span class="p">.</span><span class="nx">nonce</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">generators</span><span class="p">.</span><span class="nx">state</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">codeVerifier</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">generators</span><span class="p">.</span><span class="nx">codeVerifier</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">codeChallenge</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">generators</span><span class="p">.</span><span class="nx">codeChallenge</span><span class="p">(</span><span class="nx">codeVerifier</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oidc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">nonce</span><span class="p">,</span><span class="w"> </span><span class="nx">state</span><span class="p">,</span><span class="w"> </span><span class="nx">codeVerifier</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">authUrl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">oidcClient</span><span class="p">.</span><span class="nx">authorizationUrl</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">scope</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;openid profile email&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">state</span><span class="o">:</span><span class="w"> </span><span class="nx">state</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">nonce</span><span class="o">:</span><span class="w"> </span><span class="nx">nonce</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">code_challenge</span><span class="o">:</span><span class="w"> </span><span class="nx">codeChallenge</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">code_challenge_method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;S256&#39;</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="nx">authUrl</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/auth/callback&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">nonce</span><span class="p">,</span><span class="w"> </span><span class="nx">state</span><span class="p">,</span><span class="w"> </span><span class="nx">codeVerifier</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oidc</span><span class="p">;</span>
+<span class="w">  </span><span class="ow">delete</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">oidc</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">oidcClient</span><span class="p">.</span><span class="nx">callbackParams</span><span class="p">(</span><span class="nx">req</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// This handles code exchange, token validation, and nonce checking</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">tokenSet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">oidcClient</span><span class="p">.</span><span class="nx">callback</span><span class="p">(</span>
+<span class="w">    </span><span class="s1">&#39;http://localhost:3000/auth/callback&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">params</span><span class="p">,</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">nonce</span><span class="p">,</span><span class="w"> </span><span class="nx">state</span><span class="p">,</span><span class="w"> </span><span class="nx">code_verifier</span><span class="o">:</span><span class="w"> </span><span class="nx">codeVerifier</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// tokenSet.id_token - the raw JWT</span>
+<span class="w">  </span><span class="c1">// tokenSet.claims() - decoded and validated claims</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">claims</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tokenSet</span><span class="p">.</span><span class="nx">claims</span><span class="p">();</span>
+
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">sub</span><span class="o">:</span><span class="w"> </span><span class="nx">claims</span><span class="p">.</span><span class="nx">sub</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="nx">claims</span><span class="p">.</span><span class="nx">email</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="nx">claims</span><span class="p">.</span><span class="nx">name</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="c1">// Fetch additional user info</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">userInfo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">oidcClient</span><span class="p">.</span><span class="nx">userinfo</span><span class="p">(</span><span class="nx">tokenSet</span><span class="p">.</span><span class="nx">access_token</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Full user info:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">userInfo</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="s1">&#39;/dashboard&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">initializeOIDC</span><span class="p">().</span><span class="nx">then</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="mf">3000</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Server running on port 3000&#39;</span><span class="p">));</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Multi-Provider Authentication</h2>
+<p>Real applications often support multiple login providers. Here is a pattern for handling that.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// multi-provider-auth.js</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">OIDCProviderRegistry</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">providers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">register</span><span class="p">(</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">config</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">providers</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">config</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">get</span><span class="p">(</span><span class="nx">name</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">provider</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">providers</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">name</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">provider</span><span class="p">)</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="sb">`Unknown provider: </span><span class="si">${</span><span class="nx">name</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">provider</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">listProviders</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">Array</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">providers</span><span class="p">.</span><span class="nx">keys</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">registry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">OIDCProviderRegistry</span><span class="p">();</span>
+
+<span class="nx">registry</span><span class="p">.</span><span class="nx">register</span><span class="p">(</span><span class="s1">&#39;google&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">issuer</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://accounts.google.com&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">clientId</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">GOOGLE_CLIENT_ID</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">clientSecret</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">GOOGLE_CLIENT_SECRET</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">scopes</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;openid&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;profile&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;email&#39;</span><span class="p">]</span>
+<span class="p">});</span>
+
+<span class="nx">registry</span><span class="p">.</span><span class="nx">register</span><span class="p">(</span><span class="s1">&#39;github&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// GitHub supports OAuth2 but not full OIDC</span>
+<span class="w">  </span><span class="nx">authorizationUrl</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://github.com/login/oauth/authorize&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">tokenUrl</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://github.com/login/oauth/access_token&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">userInfoUrl</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;https://api.github.com/user&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">clientId</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">GITHUB_CLIENT_ID</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">clientSecret</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">GITHUB_CLIENT_SECRET</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">scopes</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;read:user&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;user:email&#39;</span><span class="p">]</span>
+<span class="p">});</span>
+
+<span class="c1">// Dynamic login route</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/auth/:provider&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">provider</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">registry</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">provider</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Build and redirect to the provider&#39;s auth URL...</span>
+<span class="p">});</span>
+
+<span class="c1">// Dynamic callback route</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/auth/:provider/callback&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">provider</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">registry</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">provider</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Handle the callback for this specific provider...</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Account Linking</h3>
+<p>When a user logs in with different providers, you need to link those identities to a single account in your database.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// account-linking.js</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">findOrCreateUser</span><span class="p">(</span><span class="nx">providerName</span><span class="p">,</span><span class="w"> </span><span class="nx">providerProfile</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 1. Check if this provider identity already exists</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">identity</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">.</span><span class="nx">identity</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">provider_providerId</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">provider</span><span class="o">:</span><span class="w"> </span><span class="nx">providerName</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">providerId</span><span class="o">:</span><span class="w"> </span><span class="nx">providerProfile</span><span class="p">.</span><span class="nx">sub</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">include</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">user</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">identity</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">identity</span><span class="p">.</span><span class="nx">user</span><span class="p">;</span><span class="w"> </span><span class="c1">// Existing user, known identity</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 2. Check if a user with this email already exists</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">providerProfile</span><span class="p">.</span><span class="nx">email</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">providerProfile</span><span class="p">.</span><span class="nx">email_verified</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">existingUser</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="nx">providerProfile</span><span class="p">.</span><span class="nx">email</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existingUser</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Link this new provider to the existing account</span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">.</span><span class="nx">identity</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">provider</span><span class="o">:</span><span class="w"> </span><span class="nx">providerName</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">providerId</span><span class="o">:</span><span class="w"> </span><span class="nx">providerProfile</span><span class="p">.</span><span class="nx">sub</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">existingUser</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">profile</span><span class="o">:</span><span class="w"> </span><span class="nx">providerProfile</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">existingUser</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 3. Create a brand new user</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">newUser</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">email</span><span class="o">:</span><span class="w"> </span><span class="nx">providerProfile</span><span class="p">.</span><span class="nx">email</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="nx">providerProfile</span><span class="p">.</span><span class="nx">name</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">identities</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">create</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">provider</span><span class="o">:</span><span class="w"> </span><span class="nx">providerName</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">providerId</span><span class="o">:</span><span class="w"> </span><span class="nx">providerProfile</span><span class="p">.</span><span class="nx">sub</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">profile</span><span class="o">:</span><span class="w"> </span><span class="nx">providerProfile</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">newUser</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>The Nonce Parameter</h2>
+<p>The <code>nonce</code> prevents replay attacks where an attacker captures an ID token and replays it.</p>
+<div class="highlight"><pre><span></span><code>Flow without nonce:
+  Attacker captures: id_token = eyJhbGci...
+  Attacker replays id_token to your callback
+  Your server accepts it (no way to know it is replayed)
+
+Flow with nonce:
+  Your server generates nonce = &quot;abc123&quot; and stores in session
+  Auth server includes nonce: &quot;abc123&quot; in the ID token
+  Your server verifies id_token.nonce === session.nonce
+  Attacker replays id_token but session has a DIFFERENT nonce
+  Replay is detected and rejected
+</code></pre></div>
+
+<h2>Session Management and Logout</h2>
+<p>OIDC defines several logout mechanisms.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Local logout: only clears your application&#39;s session</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/auth/logout&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">destroy</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Federated logout: also logs out of the identity provider</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/auth/logout/full&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">idToken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">idToken</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">session</span><span class="p">.</span><span class="nx">destroy</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// Redirect to the provider&#39;s logout endpoint</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">URLSearchParams</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">id_token_hint</span><span class="o">:</span><span class="w"> </span><span class="nx">idToken</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">post_logout_redirect_uri</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;http://localhost:3000&#39;</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">redirect</span><span class="p">(</span><span class="sb">`https://accounts.google.com/o/oauth2/logout?</span><span class="si">${</span><span class="nx">params</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Common OIDC Pitfalls</h2>
+<ol>
+<li><strong>Confusing OAuth2 with authentication</strong> - An OAuth2 access token does NOT prove identity. You need the ID token from OIDC.</li>
+<li><strong>Not validating the ID token</strong> - Always verify the signature, issuer, audience, and expiration. Never just base64-decode it.</li>
+<li><strong>Using unverified emails for account linking</strong> - Only link accounts based on email if <code>email_verified</code> is true. Otherwise, an attacker could create a provider account with your email.</li>
+<li><strong>Hardcoding provider URLs</strong> - Use the OIDC discovery document to dynamically fetch endpoints.</li>
+<li><strong>Forgetting the nonce</strong> - Without it, your app is vulnerable to token replay attacks.</li>
+</ol>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">OIDC Discovery Explorer</div>
+                    <div class="exercise-desc"><p>Write a Node.js script that fetches and displays the OIDC discovery document from three different providers (Google, Microsoft, and an Auth0 tenant). Compare the endpoints and supported features. Output a table showing which provider supports which response types, scopes, and signing algorithms.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Fetch from {issuer}/.well-known/openid-configuration. Google's issuer is https://accounts.google.com, Microsoft is https://login.microsoftonline.com/common/v2.0.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">ID Token Validator</div>
+                    <div class="exercise-desc"><p>Build a standalone ID token validation module that: (1) fetches the provider's JWKS, (2) finds the correct key by 'kid', (3) verifies the JWT signature, (4) checks iss, aud, exp, iat, and nonce. Write tests with a self-signed JWT to verify each validation step catches invalid tokens.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the jsonwebtoken and jwks-rsa packages. For testing, generate your own RSA key pair with crypto.generateKeyPairSync and sign test JWTs.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Multi-Provider Login Page</div>
+                    <div class="exercise-desc"><p>Build an Express application that supports login with at least two OIDC providers (e.g., Google and GitHub). Implement account linking so that if a user logs in with Google and later with GitHub using the same email, both identities are connected to one user record in a SQLite database.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a provider registry pattern. Create a 'users' table and an 'identities' table (provider, provider_id, user_id). Check email matches on new identity creation.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">ID token validation fails with 'invalid signature' even though the token looks correct</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The JWKS keys have been rotated by the provider but your application is using a cached old key. Or you are using the wrong key because the 'kid' (Key ID) in the token header does not match any cached key.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Ensure your JWKS client has a cache expiry (10-15 minutes). When a 'kid' is not found in cache, fetch the JWKS again. The jwks-rsa library handles this with the `cache` and `cacheMaxAge` options. Also verify you are fetching keys from the correct JWKS URI for your provider.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">User gets a different 'sub' claim when logging into staging vs production</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Each OAuth2 client registration (client_id) at the provider may receive a different 'sub' value for the same user, depending on the provider's policy. Or you are hitting different provider environments (sandbox vs production).
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use the same client_id across environments where possible, or use email (if verified) as the stable identifier for linking. Document your provider's 'sub' stability guarantees. Some providers guarantee sub is stable per client, others per tenant.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Account linking creates duplicate accounts for the same person</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The user logged in with Google (email: alice@gmail.com) and later with GitHub (email: alice@gmail.com) but the linking logic did not match them because the GitHub email was not verified, or the emails were compared case-sensitively.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Normalize emails to lowercase before comparison. Only auto-link when email_verified is true from the provider. For unverified emails, prompt the user to manually link accounts by logging into both providers in the same session. Add a unique constraint on the email column.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://openid.net/specs/openid-connect-core-1_0.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag specification">specification</div>
+                    <div class="resource-title">OpenID Connect Core 1.0 Specification</div>
+                    
+                    <div class="resource-note">The official OIDC specification. Section 2 (ID Token) and Section 3 (Authentication) are the most important.</div>
+                    
+                </a>
+                
+                <a href="https://auth0.com/docs/authenticate/protocols/openid-connect-protocol" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Auth0 - OpenID Connect Protocol</div>
+                    
+                    <div class="resource-note">Clear, practical explanation of OIDC concepts with code examples</div>
+                    
+                </a>
+                
+                <a href="https://github.com/panva/node-openid-client" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag github">github</div>
+                    <div class="resource-title">openid-client npm package</div>
+                    
+                    <div class="resource-note">The most widely used OIDC client library for Node.js. Handles discovery, validation, and all flows.</div>
+                    
+                </a>
+                
+                <a href="https://jwt.io/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag tool">tool</div>
+                    <div class="resource-title">JWT.io - JSON Web Token Debugger</div>
+                    
+                    <div class="resource-note">Paste any JWT to decode and inspect its header, payload, and verify its signature</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/7.2.1-js.html" class="btn">&larr; OAuth2 Flows: Authorization Code, Client Credentials, PKCE</a>
+            
+            
+            <a href="/backend-learning/lesson/7.2.3-js.html" class="btn">RBAC and ABAC: Role and Attribute-Based Access Control &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-7-js.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

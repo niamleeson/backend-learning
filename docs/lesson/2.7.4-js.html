@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ioredis: Async Client, Pipelining, and Cluster Mode - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-2-js.html">Databases</a> &rsaquo;
+            Redis with ioredis
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">2.7.4</span>
+                <span>~2h</span>
+            </div>
+            <h1>ioredis: Async Client, Pipelining, and Cluster Mode</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Pipelining is like sending a shopping list to the store instead of making a separate trip for each item. You hand over the whole list, the store gathers everything, and sends it all back in one delivery. Cluster mode is like having multiple stores in different neighborhoods, each responsible for certain products, so no single store gets overwhelmed.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>ioredis: Async Client, Pipelining, and Cluster Mode</h1>
+<h2>Introduction</h2>
+<p>ioredis is the most popular Redis client for Node.js. Beyond basic get/set operations, it provides pipelining (batch commands), cluster support, sentinel support, and advanced features that are essential for production Redis usage.</p>
+<h2>Pipelining</h2>
+<p>Pipelining sends multiple commands to Redis without waiting for each response, dramatically reducing network round trips.</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+
+<span class="c1">// Without pipelining: 100 round trips</span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">100</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="sb">`key:</span><span class="si">${</span><span class="nx">i</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="sb">`value:</span><span class="si">${</span><span class="nx">i</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span><span class="w"> </span><span class="c1">// each waits for response</span>
+<span class="p">}</span>
+
+<span class="c1">// With pipelining: 1 round trip for all 100 commands</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">100</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="sb">`key:</span><span class="si">${</span><span class="nx">i</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="sb">`value:</span><span class="si">${</span><span class="nx">i</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+<span class="c1">// results: [[null, &#39;OK&#39;], [null, &#39;OK&#39;], ...]</span>
+<span class="c1">// Each entry: [error, result]</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>Without Pipeline:           With Pipeline:
+  CMD1 -&gt; wait -&gt; resp      CMD1 |
+  CMD2 -&gt; wait -&gt; resp      CMD2 |-&gt; all sent at once
+  CMD3 -&gt; wait -&gt; resp      CMD3 |
+  ~300ms (3 round trips)    RESP1, RESP2, RESP3 (all at once)
+                            ~3ms (1 round trip)
+</code></pre></div>
+
+<h3>Pipeline with Mixed Commands</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">pipe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="nx">pipe</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;user:1:name&#39;</span><span class="p">);</span>
+<span class="nx">pipe</span><span class="p">.</span><span class="nx">hgetall</span><span class="p">(</span><span class="s1">&#39;user:1:profile&#39;</span><span class="p">);</span>
+<span class="nx">pipe</span><span class="p">.</span><span class="nx">zrevrange</span><span class="p">(</span><span class="s1">&#39;user:1:scores&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="mf">4</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;WITHSCORES&#39;</span><span class="p">);</span>
+<span class="nx">pipe</span><span class="p">.</span><span class="nx">scard</span><span class="p">(</span><span class="s1">&#39;user:1:followers&#39;</span><span class="p">);</span>
+<span class="nx">pipe</span><span class="p">.</span><span class="nx">ttl</span><span class="p">(</span><span class="s1">&#39;session:user:1&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pipe</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">profile</span><span class="p">,</span><span class="w"> </span><span class="nx">scores</span><span class="p">,</span><span class="w"> </span><span class="nx">followerCount</span><span class="p">,</span><span class="w"> </span><span class="nx">sessionTtl</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">results</span><span class="o">!</span><span class="p">.</span><span class="nx">map</span><span class="p">(([</span><span class="nx">err</span><span class="p">,</span><span class="w"> </span><span class="nx">val</span><span class="p">])</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">val</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Transactions (MULTI/EXEC)</h2>
+<p>Transactions ensure a group of commands execute atomically:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">multi</span><span class="p">()</span>
+<span class="w">  </span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="s1">&#39;key1&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;val1&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="s1">&#39;key2&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;val2&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="p">.</span><span class="nx">incr</span><span class="p">(</span><span class="s1">&#39;counter&#39;</span><span class="p">)</span>
+<span class="w">  </span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+<span class="c1">// All commands execute atomically</span>
+<span class="c1">// result: [[null, &#39;OK&#39;], [null, &#39;OK&#39;], [null, 42]]</span>
+
+<span class="c1">// With optimistic locking (WATCH)</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">transferPoints</span><span class="p">(</span><span class="nx">fromUser</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">toUser</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">amount</span><span class="o">:</span><span class="w"> </span><span class="kt">number</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">fromKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`points:</span><span class="si">${</span><span class="nx">fromUser</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">toKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`points:</span><span class="si">${</span><span class="nx">toUser</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Watch keys for changes</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">watch</span><span class="p">(</span><span class="nx">fromKey</span><span class="p">,</span><span class="w"> </span><span class="nx">toKey</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">fromPoints</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">fromKey</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;0&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">fromPoints</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">amount</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">unwatch</span><span class="p">();</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Insufficient points&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// If any watched key changed since WATCH, EXEC returns null</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">multi</span><span class="p">()</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">decrby</span><span class="p">(</span><span class="nx">fromKey</span><span class="p">,</span><span class="w"> </span><span class="nx">amount</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">incrby</span><span class="p">(</span><span class="nx">toKey</span><span class="p">,</span><span class="w"> </span><span class="nx">amount</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">result</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Transaction aborted - retry&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Redis Cluster</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">cluster</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">.</span><span class="nx">Cluster</span><span class="p">([</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-node-1&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="kt">6379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-node-2&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="kt">6379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-node-3&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="kt">6379</span><span class="w"> </span><span class="p">},</span>
+<span class="p">],</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">redisOptions</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">password</span><span class="o">:</span><span class="w"> </span><span class="kt">process.env.REDIS_PASSWORD</span><span class="p">,</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">scaleReads</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;slave&#39;</span><span class="p">,</span><span class="w"> </span><span class="c1">// read from replicas</span>
+<span class="w">  </span><span class="nx">clusterRetryStrategy</span><span class="p">(</span><span class="nx">times</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nx">times</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span><span class="w"> </span><span class="mf">3000</span><span class="p">);</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">});</span>
+
+<span class="c1">// Usage is the same as single-node Redis</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">cluster</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="s1">&#39;key&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;value&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">val</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">cluster</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;key&#39;</span><span class="p">);</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>Redis Cluster:
+
+  +--------+    +--------+    +--------+
+  | Node 1 |    | Node 2 |    | Node 3 |
+  | 0-5460 |    |5461-10922|  |10923-16383|
+  | Master |    | Master  |   | Master |
+  +---+----+    +---+-----+   +---+----+
+      |             |             |
+  +---+----+    +---+-----+   +---+----+
+  | Replica|    | Replica |   | Replica|
+  +--------+    +---------+   +--------+
+
+  Data is sharded across nodes by hash slot.
+  Key &quot;user:1&quot; -&gt; hash slot -&gt; assigned node.
+</code></pre></div>
+
+<h2>Redis Sentinel (High Availability)</h2>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">sentinels</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sentinel-1&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="kt">26379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sentinel-2&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="kt">26379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;sentinel-3&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="kt">26379</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;mymaster&#39;</span><span class="p">,</span><span class="w"> </span><span class="c1">// master group name</span>
+<span class="w">  </span><span class="nx">password</span><span class="o">:</span><span class="w"> </span><span class="kt">process.env.REDIS_PASSWORD</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="c1">// ioredis automatically handles failover</span>
+<span class="c1">// If master goes down, sentinel promotes a replica</span>
+</code></pre></div>
+
+<h2>Connection Events and Error Handling</h2>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">retryStrategy</span><span class="p">(</span><span class="nx">times</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">times</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">10</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span><span class="w"> </span><span class="c1">// stop retrying</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nx">times</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">200</span><span class="p">,</span><span class="w"> </span><span class="mf">5000</span><span class="p">);</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">reconnectOnError</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="s1">&#39;READONLY&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">lazyConnect</span><span class="o">:</span><span class="w"> </span><span class="kt">true</span><span class="p">,</span><span class="w"> </span><span class="c1">// don&#39;t connect until first command</span>
+<span class="w">  </span><span class="nx">enableOfflineQueue</span><span class="o">:</span><span class="w"> </span><span class="kt">true</span><span class="p">,</span><span class="w"> </span><span class="c1">// queue commands while disconnected</span>
+<span class="p">});</span>
+
+<span class="nx">redis</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;connect&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Connected to Redis&#39;</span><span class="p">));</span>
+<span class="nx">redis</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;ready&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Redis ready&#39;</span><span class="p">));</span>
+<span class="nx">redis</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;error&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;Redis error:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">));</span>
+<span class="nx">redis</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Redis connection closed&#39;</span><span class="p">));</span>
+<span class="nx">redis</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;reconnecting&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">ms</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Reconnecting in </span><span class="si">${</span><span class="nx">ms</span><span class="si">}</span><span class="sb">ms`</span><span class="p">));</span>
+
+<span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">connect</span><span class="p">();</span><span class="w"> </span><span class="c1">// needed with lazyConnect: true</span>
+</code></pre></div>
+
+<h2>Performance Best Practices</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// 1. Use pipelines for batch operations</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">pipe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="nx">ids</span><span class="p">.</span><span class="nx">forEach</span><span class="p">(</span><span class="nx">id</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">pipe</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="sb">`user:</span><span class="si">${</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">));</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pipe</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+
+<span class="c1">// 2. Use MGET/MSET for simple batch get/set</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">values</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">mget</span><span class="p">(...</span><span class="nx">keys</span><span class="p">);</span>
+
+<span class="c1">// 3. Avoid KEYS in production (use SCAN)</span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">cursor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;0&#39;</span><span class="p">;</span>
+<span class="k">do</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">next</span><span class="p">,</span><span class="w"> </span><span class="nx">keys</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">scan</span><span class="p">(</span><span class="nx">cursor</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;MATCH&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;prefix:*&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;COUNT&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">100</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">cursor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">next</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// process keys</span>
+<span class="p">}</span><span class="w"> </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nx">cursor</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;0&#39;</span><span class="p">);</span>
+
+<span class="c1">// 4. Set maxmemory and eviction policy</span>
+<span class="c1">// redis.conf: maxmemory 256mb, maxmemory-policy allkeys-lru</span>
+
+<span class="c1">// 5. Monitor with INFO</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">info</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">info</span><span class="p">(</span><span class="s1">&#39;memory&#39;</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">info</span><span class="p">);</span><span class="w"> </span><span class="c1">// used_memory, maxmemory, etc.</span>
+</code></pre></div>
+
+<h2>Graceful Shutdown</h2>
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">shutdown</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Closing Redis connections...&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">quit</span><span class="p">();</span><span class="w"> </span><span class="c1">// wait for pending commands, then close</span>
+<span class="w">  </span><span class="c1">// NOT redis.disconnect() which drops pending commands</span>
+<span class="w">  </span><span class="nx">process</span><span class="p">.</span><span class="nx">exit</span><span class="p">(</span><span class="mf">0</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="nx">process</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;SIGTERM&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">shutdown</span><span class="p">);</span>
+</code></pre></div>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Bulk Cache Warmer</div>
+                    <div class="exercise-desc"><p>Write a function that takes an array of 10,000 cache entries and populates Redis using pipelining. Measure the time difference between individual SET commands and pipelined commands. Include error handling for partial failures.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Pipeline in batches of 1000. Check results array for errors: <code>results.filter(([err]) =&gt; err)</code>. Use console.time to measure.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Cluster-Aware Cache</div>
+                    <div class="exercise-desc"><p>Set up a Redis Cluster (using Docker) with 3 master nodes. Build a caching layer that works with the cluster. Handle MOVED and ASK redirects gracefully.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use <code>new Redis.Cluster()</code>. ioredis handles redirects automatically. Test by getting/setting keys that hash to different nodes.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Redis Health Monitor</div>
+                    <div class="exercise-desc"><p>Build a health check module that monitors: connection status, memory usage, connected clients, keyspace hits/misses, and latency. Expose as an Express endpoint. Alert when metrics exceed thresholds.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use redis.info() to get server stats. Parse the response text. Calculate hit rate from keyspace_hits / (keyspace_hits + keyspace_misses).</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Pipeline errors are silently swallowed</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Pipeline exec() returns an array where each entry is [error, result]. If you don't check the error, failures are silent.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Always check for errors in pipeline results: `results.forEach(([err, val]) => { if (err) throw err; })`. Or write a helper that throws on any error.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">CROSSSLOT error in Redis Cluster</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> A multi-key operation (MGET, pipeline) accesses keys on different hash slots in a cluster. Redis Cluster requires all keys in a transaction to be on the same node.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use hash tags to force keys to the same slot: `{user:1}:name` and `{user:1}:email` will be on the same node because the hash is computed from `user:1` only.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Connection pool exhaustion under high load</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Not enough connections for the number of concurrent operations. Or connections are leaked by not handling errors.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> For single-node: ioredis uses a single connection by default (fine for most cases due to pipelining). For cluster: each node gets its own connection. If you need more throughput, create multiple Redis instances.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://github.com/redis/ioredis/blob/main/API.md" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">ioredis API Reference</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/docs/manual/pipelining/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Pipelining</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/docs/management/scaling/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Cluster Tutorial</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/docs/management/sentinel/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Sentinel</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/2.7.3-js.html" class="btn">&larr; Pub/Sub and Lua Scripting</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-2-js.html">&larr; Back to Databases</a>
+        </div>
+    </div>
+</body>
+</html>

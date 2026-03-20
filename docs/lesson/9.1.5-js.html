@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a News Feed (Twitter/Instagram) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Core System Design Problems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.1.5</span>
+                <span>~5h</span>
+            </div>
+            <h1>Design a News Feed (Twitter/Instagram)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>A news feed is like a personalized newspaper. For regular columnists (normal users), their articles are pre-printed and bundled into each subscriber's paper at the printing press (fan-out on write). For headline news from major figures (celebrities), the articles are pulled from the wire service and inserted into your paper right when you pick it up (fan-out on read). The editor (ranking algorithm) decides the front-page order based on what you find most interesting.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a News Feed (Twitter/Instagram)</h1>
+<h2>Introduction</h2>
+<p>A news feed aggregates and displays content from people and pages a user follows, ranked by relevance or sorted by time. Twitter's home timeline, Instagram's feed, Facebook's News Feed, and LinkedIn's feed are all variants of this system. The core challenge is the fan-out problem: when a user with millions of followers posts content, how do you efficiently deliver that content to every follower's personalized feed? This question tests your ability to reason about read vs. write trade-offs, caching strategies, and ranking systems.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ol>
+<li>Users can create posts (text, images, videos)</li>
+<li>Users can follow/unfollow other users</li>
+<li>The home feed shows posts from followed users, sorted by relevance or time</li>
+<li>Feed supports pagination (infinite scroll)</li>
+<li>Like, comment, and share on posts</li>
+<li>Content ranking based on engagement, recency, and user preferences</li>
+</ol>
+<h3>Non-Functional Requirements</h3>
+<ol>
+<li>Feed generation should be fast: &lt; 200ms latency</li>
+<li>High availability: feed must always be accessible</li>
+<li>Eventual consistency is acceptable (a new post can take a few seconds to appear in followers' feeds)</li>
+<li>Scale to 500M DAU with 10K+ posts per second</li>
+<li>Feed should not show duplicate posts</li>
+</ol>
+<h2>Step 2: Capacity Estimation</h2>
+<h3>Traffic Estimates</h3>
+<ul>
+<li>DAU: 500M users</li>
+<li>Average feed refreshes per user per day: 10</li>
+<li>Feed reads: 5B per day (~58,000 per second)</li>
+<li>New posts per day: 200M (~2,300 per second)</li>
+<li>Average followers per user: 200 (but highly skewed -- celebrities have millions)</li>
+</ul>
+<h3>Storage Estimates</h3>
+<ul>
+<li>Post metadata: ~1 KB per post</li>
+<li>Daily post storage: 200M x 1 KB = 200 GB/day</li>
+<li>Feed cache per user: 500 post IDs x 8 bytes = 4 KB</li>
+<li>Feed cache for all users: 500M x 4 KB = 2 TB (fits in distributed Redis)</li>
+</ul>
+<h3>Fan-Out Estimates</h3>
+<ul>
+<li>Average user post: 200 followers = 200 fan-out operations</li>
+<li>Celebrity post (1M followers): 1M fan-out operations</li>
+<li>If a celebrity posts, writing to 1M feed caches takes time</li>
+</ul>
+<h2>Step 3: The Fan-Out Problem</h2>
+<p>This is THE central design challenge. Two fundamental approaches:</p>
+<h3>Approach 1: Fan-Out on Write (Push Model)</h3>
+<p>When a user creates a post, immediately push it to every follower's feed cache.</p>
+<div class="highlight"><pre><span></span><code>User A posts
+     |
+     v
++------------------+
+| Fan-out Service  | --- writes to ---&gt; Follower 1&#39;s feed cache
+|                  | --- writes to ---&gt; Follower 2&#39;s feed cache
+|                  | --- writes to ---&gt; Follower 3&#39;s feed cache
+|                  | --- writes to ---&gt; ... (all N followers)
++------------------+
+
+When Follower 1 opens feed:
+  -&gt; Just read from pre-computed feed cache (FAST!)
+</code></pre></div>
+
+<ul>
+<li>Pros: Feed reads are very fast (pre-computed), simple read path</li>
+<li>Cons: Slow for users with millions of followers, wasted work for inactive followers</li>
+</ul>
+<h3>Approach 2: Fan-Out on Read (Pull Model)</h3>
+<p>When a user opens their feed, fetch recent posts from all followed users on the fly.</p>
+<div class="highlight"><pre><span></span><code>Follower 1 opens feed
+     |
+     v
++------------------+
+| Feed Service     | --- fetch from ---&gt; User A&#39;s posts
+|                  | --- fetch from ---&gt; User B&#39;s posts
+|                  | --- fetch from ---&gt; User C&#39;s posts
+|                  | --- merge + rank ----&gt; Return feed
++------------------+
+</code></pre></div>
+
+<ul>
+<li>Pros: No fan-out delay, no wasted work, always fresh</li>
+<li>Cons: Slow reads (must query N followed users), high latency</li>
+</ul>
+<h3>Approach 3: Hybrid (Recommended)</h3>
+<p>Use fan-out on write for regular users, fan-out on read for celebrities:</p>
+<div class="highlight"><pre><span></span><code>                    Post Created
+                         |
+                         v
+              +----------+-----------+
+              | Is author a celebrity |
+              | (&gt; 10K followers)?   |
+              +----------+-----------+
+                    |           |
+                   No          Yes
+                    |           |
+                    v           v
+           Fan-out on      Store in author&#39;s
+           Write (push     post timeline only
+           to all          (pull at read time)
+           followers)
+
+    Feed Read Time:
+    +-----------------------------------+
+    | Pre-computed feed (from push)     |
+    | + Recent posts from celebrities   |
+    |   user follows (fetched on read)  |
+    | = Merged, ranked, returned        |
+    +-----------------------------------+
+</code></pre></div>
+
+<h2>Step 4: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>     +----------+
+     |  Client  |
+     +----+-----+
+          |
+     +----v---------+
+     | API Gateway / |
+     | Load Balancer |
+     +----+---------+
+          |
+     +----v---------+         +------------------+
+     | Post Service  |-------&gt; | Fan-out Service  |
+     | (create/read) |         | (BullMQ workers) |
+     +----+---------+         +--------+---------+
+          |                            |
+          |                   +--------v---------+
+          |                   | Feed Cache        |
+          |                   | (Redis sorted set |
+          |                   |  per user)        |
+          |                   +------------------+
+          |
+     +----v---------+         +------------------+
+     | Feed Service  |-------&gt; | Feed Cache       |
+     | (generate     |         | (Redis)          |
+     |  user feed)   |         +------------------+
+     +----+---------+
+          |                   +------------------+
+          +-----------------&gt; | Ranking Service  |
+                              | (ML model /      |
+                              |  scoring logic)  |
+                              +------------------+
+
+    Storage:
+    +-------------+  +-------------+  +-------------+
+    | PostgreSQL  |  | Cassandra/  |  | Object      |
+    | (users,     |  | Scylla      |  | Storage     |
+    |  follows)   |  | (posts,     |  | (media)     |
+    |             |  |  feeds)     |  |             |
+    +-------------+  +-------------+  +-------------+
+</code></pre></div>
+
+<h2>Step 5: API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/v1/posts - Create a new post</span>
+<span class="c1">// Request:</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="s2">&quot;content&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;Just shipped a new feature!&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;media_urls&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;https://cdn.example.com/img1.jpg&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="s2">&quot;visibility&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;public&quot;</span><span class="w">      </span><span class="c1">// public | followers | private</span>
+<span class="p">}</span>
+<span class="c1">// Response (201 Created):</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="s2">&quot;post_id&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;post_abc123&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;author&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;id&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;user_123&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;name&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;Alice&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;avatar&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="s2">&quot;content&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;Just shipped a new feature!&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;media_urls&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;https://cdn.example.com/img1.jpg&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="s2">&quot;created_at&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;2026-03-18T10:00:00Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;likes_count&quot;</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;comments_count&quot;</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span>
+<span class="p">}</span>
+
+<span class="c1">// GET /api/v1/feed?cursor=&lt;cursor&gt;&amp;limit=20 - Get home feed</span>
+<span class="c1">// Response:</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="s2">&quot;posts&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="s2">&quot;post_id&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;post_xyz789&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="s2">&quot;author&quot;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;id&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;user_456&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;name&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;Bob&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;avatar&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="s2">&quot;content&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;Great article on system design&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="s2">&quot;created_at&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;2026-03-18T09:55:00Z&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="s2">&quot;likes_count&quot;</span><span class="o">:</span><span class="w"> </span><span class="mf">42</span><span class="p">,</span>
+<span class="w">      </span><span class="s2">&quot;comments_count&quot;</span><span class="o">:</span><span class="w"> </span><span class="mf">5</span><span class="p">,</span>
+<span class="w">      </span><span class="s2">&quot;has_liked&quot;</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">      </span><span class="s2">&quot;ranking_score&quot;</span><span class="o">:</span><span class="w"> </span><span class="mf">0.95</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// ... more posts</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="s2">&quot;next_cursor&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;eyJsYXN0X3Njb3JlIjowLjg1fQ==&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s2">&quot;has_more&quot;</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="p">}</span>
+
+<span class="c1">// POST /api/v1/users/:userId/follow - Follow a user</span>
+<span class="c1">// DELETE /api/v1/users/:userId/follow - Unfollow a user</span>
+<span class="c1">// POST /api/v1/posts/:postId/like - Like a post</span>
+<span class="c1">// POST /api/v1/posts/:postId/comments - Comment on a post</span>
+</code></pre></div>
+
+<h3>Express Implementation</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Queue</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bullmq&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">fanoutQueue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Queue</span><span class="p">(</span><span class="s1">&#39;feed-fanout&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="nx">redisConnection</span><span class="w"> </span><span class="p">});</span>
+
+<span class="c1">// Create post</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/posts&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">auth</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">content</span><span class="p">,</span><span class="w"> </span><span class="nx">media_urls</span><span class="p">,</span><span class="w"> </span><span class="nx">visibility</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">authorId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">authorId</span><span class="p">,</span><span class="w"> </span><span class="nx">content</span><span class="p">,</span><span class="w"> </span><span class="nx">mediaUrls</span><span class="o">:</span><span class="w"> </span><span class="nx">media_urls</span><span class="p">,</span><span class="w"> </span><span class="nx">visibility</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Trigger async fan-out</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">followerCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">follow</span><span class="p">.</span><span class="nx">count</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">followingId</span><span class="o">:</span><span class="w"> </span><span class="nx">authorId</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">followerCount</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mf">10000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Regular user: fan-out on write</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">fanoutQueue</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="s1">&#39;fanout&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">postId</span><span class="o">:</span><span class="w"> </span><span class="nx">post</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">authorId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nx">post</span><span class="p">.</span><span class="nx">createdAt</span><span class="p">.</span><span class="nx">getTime</span><span class="p">()</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// Celebrity: no fan-out, their posts are fetched on read</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">post</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Get home feed</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/feed&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">auth</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">cursor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">cursor</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">20</span><span class="p">,</span><span class="w"> </span><span class="mf">50</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 1. Get pre-computed feed from cache</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">cachedPostIds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getFeedFromCache</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">cursor</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 2. Get recent posts from followed celebrities (fan-out on read)</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">celebrityPosts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getCelebrityPosts</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">cursor</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 3. Merge and rank</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">allPostIds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">mergeAndDeduplicate</span><span class="p">(</span><span class="nx">cachedPostIds</span><span class="p">,</span><span class="w"> </span><span class="nx">celebrityPosts</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">posts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">enrichPosts</span><span class="p">(</span><span class="nx">allPostIds</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">rankedPosts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">rankPosts</span><span class="p">(</span><span class="nx">posts</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">nextCursor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">encodeCursor</span><span class="p">(</span><span class="nx">rankedPosts</span><span class="p">[</span><span class="nx">rankedPosts</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">]);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">posts</span><span class="o">:</span><span class="w"> </span><span class="nx">rankedPosts</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">next_cursor</span><span class="o">:</span><span class="w"> </span><span class="nx">nextCursor</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">has_more</span><span class="o">:</span><span class="w"> </span><span class="nx">rankedPosts</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">limit</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 6: Fan-Out Worker</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Worker</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;bullmq&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">();</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">fanoutWorker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s1">&#39;feed-fanout&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">job</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">postId</span><span class="p">,</span><span class="w"> </span><span class="nx">authorId</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">job</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Get all follower IDs</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">followers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">getFollowerIds</span><span class="p">(</span><span class="nx">authorId</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Batch update follower feed caches</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">BATCH_SIZE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1000</span><span class="p">;</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">followers</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">BATCH_SIZE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">batch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">followers</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">BATCH_SIZE</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">followerId</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">batch</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">feedKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`feed:</span><span class="si">${</span><span class="nx">followerId</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// Add post to follower&#39;s feed (sorted set, scored by timestamp)</span>
+<span class="w">      </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">zadd</span><span class="p">(</span><span class="nx">feedKey</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="p">,</span><span class="w"> </span><span class="nx">postId</span><span class="p">);</span>
+<span class="w">      </span><span class="c1">// Trim to keep only latest 1000 posts</span>
+<span class="w">      </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">zremrangebyrank</span><span class="p">(</span><span class="nx">feedKey</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="o">-</span><span class="mf">1001</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">},</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">connection</span><span class="o">:</span><span class="w"> </span><span class="nx">redisConnection</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">concurrency</span><span class="o">:</span><span class="w"> </span><span class="mf">10</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Feed Cache Structure (Redis Sorted Set)</h3>
+<div class="highlight"><pre><span></span><code>Key: feed:user_123
+Score: timestamp (or ranking score)
+Member: post_id
+
+  feed:user_123 = {
+    post_xyz: 1710756000,   // most recent
+    post_abc: 1710755000,
+    post_def: 1710754000,
+    ...                     // up to 1000 posts
+  }
+
+Query: ZREVRANGE feed:user_123 0 19  -&gt; top 20 posts by time
+Cursor: ZREVRANGEBYSCORE feed:user_123 1710755000 -inf LIMIT 0 20
+</code></pre></div>
+
+<h2>Step 7: Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Users and follow relationships (PostgreSQL)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">username</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">display_name</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">),</span>
+<span class="w">  </span><span class="n">avatar_url</span><span class="w">      </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_celebrity</span><span class="w">    </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">false</span><span class="p">,</span><span class="w">  </span><span class="c1">-- true if followers &gt; 10K</span>
+<span class="w">  </span><span class="n">follower_count</span><span class="w">  </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">following_count</span><span class="w"> </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">follows</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">follower_id</span><span class="w">     </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">following_id</span><span class="w">    </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">follower_id</span><span class="p">,</span><span class="w"> </span><span class="n">following_id</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_follows_following</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">follows</span><span class="p">(</span><span class="n">following_id</span><span class="p">);</span>
+
+<span class="c1">-- Posts (Cassandra or PostgreSQL depending on scale)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">posts</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">author_id</span><span class="w">       </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">content</span><span class="w">         </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">media_urls</span><span class="w">      </span><span class="nb">TEXT</span><span class="p">[],</span>
+<span class="w">  </span><span class="n">visibility</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;public&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">likes_count</span><span class="w">     </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">comments_count</span><span class="w">  </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">shares_count</span><span class="w">    </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_posts_author</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">posts</span><span class="p">(</span><span class="n">author_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+
+<span class="c1">-- Likes (for checking has_liked efficiently)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">likes</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">         </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">post_id</span><span class="w">         </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">posts</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">post_id</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_likes_post</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">likes</span><span class="p">(</span><span class="n">post_id</span><span class="p">);</span>
+
+<span class="c1">-- Comments</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">comments</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">post_id</span><span class="w">         </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">posts</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">author_id</span><span class="w">       </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">content</span><span class="w">         </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">parent_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">comments</span><span class="p">(</span><span class="n">id</span><span class="p">),</span><span class="w">  </span><span class="c1">-- threaded comments</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_comments_post</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">comments</span><span class="p">(</span><span class="n">post_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="p">);</span>
+</code></pre></div>
+
+<h2>Step 8: Ranking and Scoring</h2>
+<p>A chronological feed is simple but a ranked feed drives much higher engagement:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">function</span><span class="w"> </span><span class="nx">calculateFeedScore</span><span class="p">(</span><span class="nx">post</span><span class="p">,</span><span class="w"> </span><span class="nx">user</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">recencyScore</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getRecencyDecay</span><span class="p">(</span><span class="nx">post</span><span class="p">.</span><span class="nx">created_at</span><span class="p">);</span><span class="w">  </span><span class="c1">// 0-1, exponential decay</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">engagementScore</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">normalizeEngagement</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">post</span><span class="p">.</span><span class="nx">likes_count</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">post</span><span class="p">.</span><span class="nx">comments_count</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">post</span><span class="p">.</span><span class="nx">shares_count</span>
+<span class="w">  </span><span class="p">);</span><span class="w">  </span><span class="c1">// 0-1</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">affinityScore</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getUserAffinity</span><span class="p">(</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">post</span><span class="p">.</span><span class="nx">author_id</span><span class="p">);</span><span class="w">  </span><span class="c1">// 0-1</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">contentTypeBoost</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">post</span><span class="p">.</span><span class="nx">media_urls</span><span class="o">?</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mf">1.2</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mf">1.0</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Weighted combination</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="mf">0.3</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">recencyScore</span><span class="w"> </span><span class="o">+</span>
+<span class="w">    </span><span class="mf">0.3</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">engagementScore</span><span class="w"> </span><span class="o">+</span>
+<span class="w">    </span><span class="mf">0.3</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">affinityScore</span><span class="w"> </span><span class="o">+</span>
+<span class="w">    </span><span class="mf">0.1</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">contentTypeBoost</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">getRecencyDecay</span><span class="p">(</span><span class="nx">createdAt</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">hoursAgo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">createdAt</span><span class="p">).</span><span class="nx">getTime</span><span class="p">())</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">3600000</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">exp</span><span class="p">(</span><span class="o">-</span><span class="mf">0.05</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">hoursAgo</span><span class="p">);</span><span class="w"> </span><span class="c1">// half-life of ~14 hours</span>
+<span class="p">}</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">getUserAffinity</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">authorId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Based on past interactions: likes, comments, profile visits</span>
+<span class="w">  </span><span class="c1">// In production, this is a ML model</span>
+<span class="w">  </span><span class="c1">// For interview: mention collaborative filtering, interaction history</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">interactionScore</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">authorId</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 9: Scaling Strategies</h2>
+<h3>Cache Warming</h3>
+<p>When a user's feed cache is empty (cold start), generate it on the fly:</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">getFeedFromCache</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">cursor</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">feedKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`feed:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">exists</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">exists</span><span class="p">(</span><span class="nx">feedKey</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">exists</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Cold start: build feed from scratch</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">warmFeedCache</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">cursor</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">score</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">decodeCursorScore</span><span class="p">(</span><span class="nx">cursor</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">zrevrangebyscore</span><span class="p">(</span><span class="nx">feedKey</span><span class="p">,</span><span class="w"> </span><span class="nx">score</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;-inf&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;LIMIT&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">zrevrange</span><span class="p">(</span><span class="nx">feedKey</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">warmFeedCache</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Get users this person follows</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">following</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">follow</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">followerId</span><span class="o">:</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">select</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">followingId</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Fetch recent posts from each (limited)</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">recentPosts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">authorId</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="ow">in</span><span class="o">:</span><span class="w"> </span><span class="nx">following</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">f</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">f</span><span class="p">.</span><span class="nx">followingId</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">createdAt</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">gte</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">7</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">86400000</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="c1">// last 7 days</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">orderBy</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">createdAt</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;desc&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">take</span><span class="o">:</span><span class="w"> </span><span class="mf">500</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Populate cache</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">recentPosts</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">recentPosts</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">zadd</span><span class="p">(</span><span class="sb">`feed:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">post</span><span class="p">.</span><span class="nx">createdAt</span><span class="p">.</span><span class="nx">getTime</span><span class="p">(),</span><span class="w"> </span><span class="nx">post</span><span class="p">.</span><span class="nx">id</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">expire</span><span class="p">(</span><span class="sb">`feed:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="mf">86400</span><span class="p">);</span><span class="w"> </span><span class="c1">// 24h TTL</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Sharding the Feed Cache</h3>
+<p>With 500M users and 4 KB per feed, the total cache is 2 TB. Use Redis Cluster to distribute across nodes:</p>
+<div class="highlight"><pre><span></span><code>Redis Cluster (6 nodes):
+  Node 1: hash slots 0-2730      (feeds for ~83M users)
+  Node 2: hash slots 2731-5460   (feeds for ~83M users)
+  Node 3: hash slots 5461-8191   (feeds for ~83M users)
+  Node 4-6: replicas of nodes 1-3
+</code></pre></div>
+
+<h3>Handling Unfollow</h3>
+<p>When a user unfollows someone, remove that person's posts from the feed cache:</p>
+<div class="highlight"><pre><span></span><code><span class="nx">router</span><span class="p">.</span><span class="ow">delete</span><span class="p">(</span><span class="s1">&#39;/api/v1/users/:userId/follow&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">auth</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">followerId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">followingId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">userId</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">follow</span><span class="p">.</span><span class="ow">delete</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">followerId_followingId</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">followerId</span><span class="p">,</span><span class="w"> </span><span class="nx">followingId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Remove unfollowed user&#39;s posts from feed cache</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">posts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">post</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">authorId</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">followingId</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">select</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">take</span><span class="o">:</span><span class="w"> </span><span class="mf">1000</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">posts</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">zrem</span><span class="p">(</span><span class="sb">`feed:</span><span class="si">${</span><span class="nx">followerId</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="p">...</span><span class="nx">posts</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">p</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">id</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">204</span><span class="p">).</span><span class="nx">send</span><span class="p">();</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Step 10: Trade-Offs and Discussion Points</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Fan-out</td>
+<td>On write</td>
+<td>On read</td>
+<td>Hybrid (write for normal, read for celebrities)</td>
+</tr>
+<tr>
+<td>Feed order</td>
+<td>Chronological</td>
+<td>Ranked</td>
+<td>Ranked (higher engagement) with chronological option</td>
+</tr>
+<tr>
+<td>Feed storage</td>
+<td>Redis sorted set</td>
+<td>Cassandra</td>
+<td>Redis for hot feeds, Cassandra for cold</td>
+</tr>
+<tr>
+<td>Pagination</td>
+<td>Offset</td>
+<td>Cursor</td>
+<td>Cursor (stable with new inserts)</td>
+</tr>
+<tr>
+<td>Post storage</td>
+<td>PostgreSQL</td>
+<td>Cassandra</td>
+<td>PostgreSQL to start, Cassandra at extreme scale</td>
+</tr>
+<tr>
+<td>Celebrity threshold</td>
+<td>10K followers</td>
+<td>100K</td>
+<td>10K (tune based on fanout latency metrics)</td>
+</tr>
+</tbody>
+</table>
+<h3>Why Cursor Pagination for Feeds?</h3>
+<p>Offset pagination breaks when new items are inserted:</p>
+<div class="highlight"><pre><span></span><code>Page 1: items 1-20 (user sees these)
+New item inserted at position 1
+Page 2: items 21-40 ... but item 20 shifted to position 21
+  -&gt; User sees item 20 TWICE (duplicate!)
+
+Cursor pagination:
+Page 1: items with score &gt; 0, limit 20, last item score = 1710755000
+Page 2: items with score &lt; 1710755000, limit 20
+  -&gt; No duplicates regardless of inserts
+</code></pre></div>
+
+<h3>The Thundering Herd Problem</h3>
+<p>When a celebrity with 10M followers posts, if using fan-out on write, the system must update 10M feed caches simultaneously. This creates a write spike that can overwhelm Redis:</p>
+<ul>
+<li>Solution 1: Rate-limit the fan-out (spread over minutes using delayed jobs)</li>
+<li>Solution 2: Use fan-out on read for celebrities (our hybrid approach)</li>
+<li>Solution 3: Probabilistic fan-out: only push to recently active followers</li>
+</ul>
+<h2>Summary</h2>
+<p>A news feed system's central challenge is the fan-out problem. The hybrid approach -- push for regular users and pull for celebrities -- balances write amplification against read latency. The architecture uses Redis sorted sets for pre-computed feed caches, BullMQ workers for async fan-out, cursor-based pagination for stable scrolling, and a ranking function that combines recency, engagement, and user affinity. At interview time, the key discussion points are: justifying the celebrity threshold, explaining cursor pagination over offset, discussing ranking vs. chronological ordering, and reasoning about cache warming strategies for cold-start users.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Implement Fan-Out on Write</div>
+                    <div class="exercise-desc"><p>Build a BullMQ worker that processes new posts and pushes them to follower feed caches in Redis. Use Redis sorted sets with timestamps as scores. Implement batched processing (1000 followers per batch) to avoid blocking Redis. Test with a user who has 5000 followers and verify all feeds are updated.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use redis.pipeline() to batch ZADD commands. For each batch of 1000 followers, create a pipeline that does zadd('feed:followerId', timestamp, postId) for each follower. Use ZREMRANGEBYRANK to trim feeds to the latest 1000 posts.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build the Feed Retrieval Endpoint</div>
+                    <div class="exercise-desc"><p>Implement GET /api/v1/feed with cursor-based pagination. Read post IDs from the user's Redis sorted set, fetch post details from the database, enrich with has_liked status, and return with a cursor for the next page. Handle the cold-start case where the feed cache is empty by building it on the fly from the database.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use ZREVRANGEBYSCORE with the cursor score as the max for pagination. For cold start, query posts from followed users in the last 7 days. Encode the cursor as base64({ lastScore: timestamp }). Use prisma.findMany with an IN clause for post IDs.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Hybrid Fan-Out</div>
+                    <div class="exercise-desc"><p>Modify the post creation flow to use hybrid fan-out. When a regular user (&lt; 10K followers) posts, push to all followers. When a celebrity posts, do not fan out -- instead, modify the feed read path to fetch the celebrity's recent posts and merge them with the cached feed. Test both paths.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>On post creation, check followerCount. On feed read, maintain a list of followed celebrities (store in Redis set). For each celebrity, fetch their last 20 posts from the posts table and merge into the feed results by timestamp before pagination.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Add a Simple Ranking Function</div>
+                    <div class="exercise-desc"><p>Replace chronological ordering with a ranking function. Score each post based on: recency (exponential decay), engagement (likes + 2<em>comments + 3</em>shares, normalized), and author affinity (how often the user has liked the author's posts). Re-sort the feed by ranking score instead of timestamp. Compare the ranked feed to the chronological feed.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Calculate recencyScore = Math.exp(-0.05 * hoursAgo). For affinity, count likes by the user on the author's posts in the last 30 days, normalize to 0-1. Combine with weights: 0.4<em>recency + 0.3</em>engagement + 0.3*affinity. Sort descending by score.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Celebrity posts take minutes to appear in followers' feeds</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Fan-out on write for a user with 5M followers requires 5M Redis write operations. Even at 100K ops/second, this takes 50 seconds, during which the fan-out queue is backed up.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Switch to the hybrid model: do not fan-out for users above a follower threshold (e.g., 10K). Instead, fetch their recent posts at feed-read time and merge with the pre-computed feed. This eliminates the write amplification problem for celebrities.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Users see duplicate posts when scrolling through their feed</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Using offset-based pagination (page=1, page=2), and new posts are inserted between page loads, shifting items down and causing the same post to appear on both pages.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Switch to cursor-based pagination. Use the last post's timestamp (or ranking score) as the cursor. The next page fetches posts with score less than the cursor, which is stable regardless of new insertions.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Feed cache misses are slow, causing timeouts for users who have not opened the app in days</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> When a user's feed cache has expired (TTL exceeded) or was never populated, the system must build the entire feed from scratch by querying posts from all followed users -- a slow, expensive operation.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement proactive cache warming: when a user opens the app, if the cache is older than 1 hour, start warming in the background. Use a 'stale-while-revalidate' pattern where the stale cache is served immediately while a fresh one is being built. Also, schedule periodic cache warming for frequently active users.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://bytebytego.com/courses/system-design-interview/design-a-news-feed-system" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Designing a News Feed System - ByteByteGo</div>
+                    
+                    <div class="resource-note">Comprehensive walkthrough of feed design including fan-out analysis and ranking</div>
+                    
+                </a>
+                
+                <a href="https://blog.twitter.com/engineering/en_us/topics/infrastructure/2017/the-infrastructure-behind-twitter-scale" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">How Twitter's Timeline Works</div>
+                    
+                    <div class="resource-note">Twitter engineering blog on the infrastructure behind their timeline at scale</div>
+                    
+                </a>
+                
+                <a href="https://engineering.fb.com/2015/04/15/production-engineering/serving-facebook-multifeed-efficiency-performance-gains-through-redesign/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Scaling the Facebook News Feed</div>
+                    
+                    <div class="resource-note">Facebook's engineering approach to serving billions of personalized feeds</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/docs/latest/develop/data-types/sorted-sets/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Sorted Sets Documentation</div>
+                    
+                    <div class="resource-note">The core data structure used for feed caches -- understanding ZADD, ZRANGE, and ZRANGEBYSCORE is essential</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.1.4-js.html" class="btn">&larr; Design a Chat System (WhatsApp)</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

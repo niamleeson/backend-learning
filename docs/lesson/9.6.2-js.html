@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design an Email Service (Gmail) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Data & Analytics
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.6.2</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design an Email Service (Gmail)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of an email service like a postal system for a city of 1 billion people. Each person has a private mailbox (sharded storage). The post office (SMTP gateway) receives mail, a sorting facility (spam filter + routing) processes it, and letter carriers (delivery workers) place it in the right mailbox. The key insight: you organize everything around individual mailboxes, not around letters.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design an Email Service (Gmail)</h1>
+<h2>Introduction</h2>
+<p>Email is one of the oldest and most widely used distributed systems on the internet. Designing a large-scale email service like Gmail involves handling billions of messages daily, supporting full-text search across massive mailboxes, managing attachments efficiently, and maintaining real-time notifications. This is a rich system design problem that touches storage, search, queueing, and push notifications.</p>
+<h2>Requirements</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li>Users can <strong>send</strong> emails to one or many recipients (including CC, BCC)</li>
+<li>Users can <strong>receive</strong> emails and see them in their inbox</li>
+<li>Support <strong>folders</strong> (Inbox, Sent, Drafts, Trash, Spam, custom labels)</li>
+<li>Full-text <strong>search</strong> across all emails</li>
+<li>Support <strong>attachments</strong> up to 25 MB per email</li>
+<li><strong>Push notifications</strong> for new email arrival</li>
+<li>Support <strong>threading</strong> — group related emails into conversations</li>
+<li>Mark emails as read/unread, star, archive</li>
+<li>Spam and phishing <strong>detection</strong></li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li>1 billion active users</li>
+<li>300 billion emails sent/received per day (across all users)</li>
+<li>Average mailbox: 10 GB (growing)</li>
+<li>Search latency: &lt; 500 ms for full-text search</li>
+<li>Availability: 99.99%</li>
+<li>Durability: zero data loss for stored email</li>
+</ul>
+<h2>Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Users:                  1 billion
+Emails/day:             300 billion (~3,500 per second per user is wrong; 
+                        avg ~100 emails/user/day, many are B2B/automated)
+Emails/second:          300B / 86,400 = ~3.5 million emails/sec
+Avg email size:         50 KB (without attachments)
+With attachments (20%): 50 KB * 0.8 + 500 KB * 0.2 = 140 KB avg
+Storage/day:            3.5M/s * 140 KB * 86,400 = ~42 PB/day
+Storage/year:           ~15 EB (exabytes)
+Bandwidth (ingress):    3.5M/s * 140 KB = ~490 GB/s
+
+Simplified per-user:
+  Emails/day:           100
+  Storage growth/day:   100 * 140 KB = 14 MB/day
+  Storage growth/year:  ~5 GB/year
+</code></pre></div>
+
+<h2>High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────────────────┐
+│                        Clients                               │
+│  ┌────────┐  ┌────────┐  ┌────────┐  ┌─────────────────┐   │
+│  │Web App │  │Mobile  │  │Desktop │  │SMTP/IMAP Clients│   │
+│  └───┬────┘  └───┬────┘  └───┬────┘  └───────┬─────────┘   │
+└──────┼───────────┼───────────┼────────────────┼─────────────┘
+       │           │           │                │
+       ▼           ▼           ▼                ▼
+┌──────────────────────────────┐  ┌──────────────────────────┐
+│     API Gateway / LB         │  │    SMTP Gateway          │
+│  (REST/GraphQL, WebSocket)   │  │  (Inbound/Outbound MTA)  │
+└──────────────┬───────────────┘  └────────────┬─────────────┘
+               │                               │
+       ┌───────┴────────┐              ┌───────┴──────────┐
+       ▼                ▼              ▼                  ▼
+┌─────────────┐  ┌─────────────┐  ┌──────────┐  ┌──────────────┐
+│ Email Send  │  │ Email Read  │  │ Inbound  │  │  Outbound    │
+│ Service     │  │ Service     │  │ Processor│  │  Delivery    │
+└──────┬──────┘  └──────┬──────┘  └────┬─────┘  └──────┬───────┘
+       │                │              │               │
+       ▼                ▼              ▼               ▼
+┌──────────────────────────────────────────────────────────────┐
+│                    Message Queue (Kafka)                      │
+│  Topics: email-send, email-receive, spam-check,              │
+│          notification, search-index                           │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+       ┌───────────────────┼───────────────────┐
+       ▼                   ▼                   ▼
+┌─────────────┐  ┌─────────────┐  ┌───────────────────┐
+│ Spam Filter │  │Notification │  │ Search Indexer     │
+│ Service     │  │ Service     │  │ (Elasticsearch)    │
+└─────────────┘  └─────────────┘  └───────────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│                      Storage Layer                            │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
+│  │Email DB  │  │Attachment │  │Search    │  │User Metadata │ │
+│  │(Bigtable/│  │Store     │  │Index     │  │(PostgreSQL)  │ │
+│  │Cassandra)│  │(S3/GCS)  │  │(Elastic) │  │              │ │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────────┘ │
+└──────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>API Design</h2>
+<h3>Send Email</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="nx">multer</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;multer&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">upload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">multer</span><span class="p">({</span><span class="w"> </span><span class="nx">limits</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">fileSize</span><span class="o">:</span><span class="w"> </span><span class="mf">25</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1024</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+
+<span class="c1">// POST /api/v1/emails/send</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/emails/send&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">upload</span><span class="p">.</span><span class="nx">array</span><span class="p">(</span><span class="s1">&#39;attachments&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">10</span><span class="p">),</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">to</span><span class="p">,</span><span class="w"> </span><span class="nx">cc</span><span class="p">,</span><span class="w"> </span><span class="nx">bcc</span><span class="p">,</span><span class="w"> </span><span class="nx">subject</span><span class="p">,</span><span class="w"> </span><span class="nx">body</span><span class="p">,</span><span class="w"> </span><span class="nx">bodyHtml</span><span class="p">,</span><span class="w"> </span><span class="nx">inReplyTo</span><span class="p">,</span><span class="w"> </span><span class="nx">threadId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">attachments</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">files</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">[];</span>
+
+<span class="w">  </span><span class="c1">// Validate recipients</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">allRecipients</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">...</span><span class="nx">parseRecipients</span><span class="p">(</span><span class="nx">to</span><span class="p">),</span>
+<span class="w">    </span><span class="p">...</span><span class="nx">parseRecipients</span><span class="p">(</span><span class="nx">cc</span><span class="p">),</span>
+<span class="w">    </span><span class="p">...</span><span class="nx">parseRecipients</span><span class="p">(</span><span class="nx">bcc</span><span class="p">),</span>
+<span class="w">  </span><span class="p">];</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">allRecipients</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;At least one recipient required&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">allRecipients</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">500</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Maximum 500 recipients&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Upload attachments to object store</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">attachmentRefs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">attachments</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">file</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">attachmentStore</span><span class="p">.</span><span class="nx">upload</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">buffer</span><span class="o">:</span><span class="w"> </span><span class="nx">file</span><span class="p">.</span><span class="nx">buffer</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">filename</span><span class="o">:</span><span class="w"> </span><span class="nx">file</span><span class="p">.</span><span class="nx">originalname</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">contentType</span><span class="o">:</span><span class="w"> </span><span class="nx">file</span><span class="p">.</span><span class="nx">mimetype</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">size</span><span class="o">:</span><span class="w"> </span><span class="nx">file</span><span class="p">.</span><span class="nx">size</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}))</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Create email record</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">emailService</span><span class="p">.</span><span class="nx">create</span><span class="p">({</span>
+<span class="w">    </span><span class="kr">from</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">email</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">to</span><span class="o">:</span><span class="w"> </span><span class="nx">parseRecipients</span><span class="p">(</span><span class="nx">to</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">cc</span><span class="o">:</span><span class="w"> </span><span class="nx">parseRecipients</span><span class="p">(</span><span class="nx">cc</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">bcc</span><span class="o">:</span><span class="w"> </span><span class="nx">parseRecipients</span><span class="p">(</span><span class="nx">bcc</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">subject</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">body</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">bodyHtml</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">attachments</span><span class="o">:</span><span class="w"> </span><span class="nx">attachmentRefs</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">threadId</span><span class="o">:</span><span class="w"> </span><span class="nx">threadId</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">generateThreadId</span><span class="p">(),</span>
+<span class="w">    </span><span class="nx">inReplyTo</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">messageId</span><span class="o">:</span><span class="w"> </span><span class="nx">generateMessageId</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">domain</span><span class="p">),</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Enqueue for async delivery</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">messageQueue</span><span class="p">.</span><span class="nx">produce</span><span class="p">(</span><span class="s1">&#39;email-send&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">email</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nx">email</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">202</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">email</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">messageId</span><span class="o">:</span><span class="w"> </span><span class="nx">email</span><span class="p">.</span><span class="nx">messageId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;queued&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Read Emails (Inbox)</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// GET /api/v1/emails?folder=inbox&amp;page=1&amp;limit=50</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/emails&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">folder</span><span class="p">,</span><span class="w"> </span><span class="nx">page</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span><span class="w"> </span><span class="nx">q</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">emails</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">q</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Full-text search via Elasticsearch</span>
+<span class="w">    </span><span class="nx">emails</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">searchService</span><span class="p">.</span><span class="nx">searchEmails</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">query</span><span class="o">:</span><span class="w"> </span><span class="nx">q</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">folder</span><span class="p">,</span>
+<span class="w">      </span><span class="kr">from</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">page</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">limit</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">size</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">50</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">emails</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">emailService</span><span class="p">.</span><span class="nx">listByFolder</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">folder</span><span class="o">:</span><span class="w"> </span><span class="nx">folder</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;inbox&#39;</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">page</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">page</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">50</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">emails</span><span class="o">:</span><span class="w"> </span><span class="nx">emails</span><span class="p">.</span><span class="nx">items</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">e</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">threadId</span><span class="o">:</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">threadId</span><span class="p">,</span>
+<span class="w">      </span><span class="kr">from</span><span class="o">:</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="kr">from</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">to</span><span class="o">:</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">to</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">subject</span><span class="o">:</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">subject</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">snippet</span><span class="o">:</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">substring</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="mf">200</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">isRead</span><span class="o">:</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">isRead</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">isStarred</span><span class="o">:</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">isStarred</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">labels</span><span class="o">:</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">labels</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">hasAttachments</span><span class="o">:</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">attachments</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">receivedAt</span><span class="o">:</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">receivedAt</span><span class="p">,</span>
+<span class="w">    </span><span class="p">})),</span>
+<span class="w">    </span><span class="nx">pagination</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">page</span><span class="o">:</span><span class="w"> </span><span class="nx">emails</span><span class="p">.</span><span class="nx">page</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="nx">emails</span><span class="p">.</span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">total</span><span class="o">:</span><span class="w"> </span><span class="nx">emails</span><span class="p">.</span><span class="nx">total</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">hasMore</span><span class="o">:</span><span class="w"> </span><span class="nx">emails</span><span class="p">.</span><span class="nx">hasMore</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Thread View</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// GET /api/v1/emails/threads/:threadId</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/emails/threads/:threadId&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">threadId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">thread</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">emailService</span><span class="p">.</span><span class="nx">getThread</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">threadId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">thread</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">404</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Thread not found&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Mark all unread messages in thread as read</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">emailService</span><span class="p">.</span><span class="nx">markThreadRead</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">threadId</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">threadId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">subject</span><span class="o">:</span><span class="w"> </span><span class="nx">thread</span><span class="p">.</span><span class="nx">subject</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">participants</span><span class="o">:</span><span class="w"> </span><span class="nx">thread</span><span class="p">.</span><span class="nx">participants</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">messageCount</span><span class="o">:</span><span class="w"> </span><span class="nx">thread</span><span class="p">.</span><span class="nx">messages</span><span class="p">.</span><span class="nx">length</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">messages</span><span class="o">:</span><span class="w"> </span><span class="nx">thread</span><span class="p">.</span><span class="nx">messages</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">m</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="kr">from</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="kr">from</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">to</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">to</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">cc</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">cc</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">body</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">bodyHtml</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">bodyHtml</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">attachments</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">attachments</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">a</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">        </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">filename</span><span class="o">:</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">filename</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">size</span><span class="o">:</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">size</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">contentType</span><span class="o">:</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">contentType</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">downloadUrl</span><span class="o">:</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">downloadUrl</span><span class="p">,</span>
+<span class="w">      </span><span class="p">})),</span>
+<span class="w">      </span><span class="nx">sentAt</span><span class="o">:</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">sentAt</span><span class="p">,</span>
+<span class="w">    </span><span class="p">})),</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- User accounts</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">email</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">display_name</span><span class="w">  </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">password_hash</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">storage_used</span><span class="w">  </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">storage_limit</span><span class="w"> </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">15737418240</span><span class="p">,</span><span class="w"> </span><span class="c1">-- 15 GB</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Emails (denormalized for read performance)</span>
+<span class="c1">-- In production this would be a wide-column store like Bigtable or Cassandra</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">emails</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">message_id</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- RFC 5322 Message-ID</span>
+<span class="w">  </span><span class="n">thread_id</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">from_addr</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">to_addrs</span><span class="w">      </span><span class="nb">TEXT</span><span class="p">[]</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">cc_addrs</span><span class="w">      </span><span class="nb">TEXT</span><span class="p">[]</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">bcc_addrs</span><span class="w">     </span><span class="nb">TEXT</span><span class="p">[]</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">subject</span><span class="w">       </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">body_text</span><span class="w">     </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">body_html</span><span class="w">     </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">size_bytes</span><span class="w">    </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">in_reply_to</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">),</span>
+<span class="w">  </span><span class="n">has_attachments</span><span class="w"> </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">FALSE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">spam_score</span><span class="w">    </span><span class="nb">FLOAT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">.</span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_emails_thread</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">emails</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_emails_message_id</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">emails</span><span class="p">(</span><span class="n">message_id</span><span class="p">);</span>
+
+<span class="c1">-- User-email relationship (per-user view of emails)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">user_emails</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">email_id</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">emails</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">folder</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;inbox&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">labels</span><span class="w">        </span><span class="nb">TEXT</span><span class="p">[]</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_read</span><span class="w">       </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">FALSE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_starred</span><span class="w">    </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">FALSE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_draft</span><span class="w">      </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">FALSE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_spam</span><span class="w">       </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">FALSE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_trash</span><span class="w">      </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">FALSE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">snoozed_until</span><span class="w"> </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">received_at</span><span class="w">   </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">email_id</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_user_emails_folder</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">user_emails</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">folder</span><span class="p">,</span><span class="w"> </span><span class="n">received_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_user_emails_labels</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">user_emails</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">GIN</span><span class="p">(</span><span class="n">labels</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_user_emails_unread</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">user_emails</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">folder</span><span class="p">)</span>
+<span class="w">  </span><span class="k">WHERE</span><span class="w"> </span><span class="n">is_read</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">FALSE</span><span class="p">;</span>
+
+<span class="c1">-- Attachments metadata</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">attachments</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">email_id</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">emails</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">filename</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">content_type</span><span class="w">  </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">size_bytes</span><span class="w">    </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">storage_key</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">1024</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w"> </span><span class="c1">-- S3/GCS key</span>
+<span class="w">  </span><span class="n">checksum</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">   </span><span class="c1">-- SHA-256</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_attachments_email</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">attachments</span><span class="p">(</span><span class="n">email_id</span><span class="p">);</span>
+
+<span class="c1">-- Labels (user-defined)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">labels</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">       </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">name</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">color</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">7</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="p">)</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Deep Dive: Email Delivery Pipeline</h2>
+<div class="highlight"><pre><span></span><code>Sender composes email
+        │
+        ▼
+┌─────────────────┐
+│ Email Send Svc  │──&gt; Store in Sent folder for sender
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐    ┌──────────────────┐
+│ Spam/Virus      │───&gt;│ Rejected? Bounce  │
+│ Filter          │    │ back to sender    │
+└────────┬────────┘    └──────────────────┘
+         │ (passes)
+         ▼
+┌─────────────────┐
+│ Routing Logic   │
+│                 │
+│ Internal user?  │──Yes──&gt; Direct delivery to mailbox
+│                 │
+│ External user?  │──Yes──&gt; SMTP outbound delivery
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Mailbox Write   │──&gt; Write to email store
+│                 │──&gt; Update search index
+│                 │──&gt; Send push notification
+│                 │──&gt; Update unread count cache
+└─────────────────┘
+</code></pre></div>
+
+<h2>Scaling Strategies</h2>
+<ul>
+<li><strong>Sharding by user ID</strong>: Each user's mailbox lives on a deterministic shard. This is the primary scaling axis.</li>
+<li><strong>Attachment deduplication</strong>: Hash attachments; if the same file is sent to 1000 people, store it once.</li>
+<li><strong>Search index partitioning</strong>: Each user's search index is colocated with their email shard.</li>
+<li><strong>Read replicas</strong>: Heavy read workload (inbox refresh) served by replicas; writes go to the leader.</li>
+<li><strong>CDN for attachments</strong>: Large files served from edge locations.</li>
+<li><strong>Tiered storage</strong>: Recent emails on SSD, older emails on cheaper HDD/object storage.</li>
+</ul>
+<h2>Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Pros</th>
+<th>Cons</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Shard by user ID</td>
+<td>Queries are single-shard</td>
+<td>Cross-user queries (admin) require scatter-gather</td>
+</tr>
+<tr>
+<td>Separate attachment store (S3)</td>
+<td>Dedup, CDN, cheap storage</td>
+<td>Extra hop to fetch, eventual consistency</td>
+</tr>
+<tr>
+<td>Async delivery via queue</td>
+<td>Absorbs spikes, retry logic</td>
+<td>Email not instant — slight delay</td>
+</tr>
+<tr>
+<td>Elasticsearch for search</td>
+<td>Powerful full-text search</td>
+<td>Another system to maintain, index lag</td>
+</tr>
+<tr>
+<td>Denormalized user_emails table</td>
+<td>Fast reads per user</td>
+<td>Data duplication across recipients</td>
+</tr>
+</tbody>
+</table>
+<h2>Summary</h2>
+<p>Designing an email service at scale requires separating the write path (sending/receiving) from the read path (inbox/search), using message queues for reliable async processing, object storage for attachments, full-text search engines for queries, and sharding by user for horizontal scale. The key insight is that email is fundamentally a per-user system — almost every query is scoped to a single user, making user-based sharding natural and effective.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build an Email Send Pipeline</div>
+                    <div class="exercise-desc"><p>Create a Node.js service with Express that accepts an email send request, validates it, stores the email in a database (SQLite or PostgreSQL), and enqueues it for delivery using BullMQ. Create a worker that processes the queue, simulates SMTP delivery, and updates the email status.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use BullMQ with Redis for the queue. Create separate 'send' and 'delivery-status' queues. The worker should simulate delivery with a random delay and occasionally fail to test retry logic.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Email Threading</div>
+                    <div class="exercise-desc"><p>Build a threading system that groups emails into conversations. Use the In-Reply-To and References headers to link emails. Given a set of 20 emails, correctly group them into threads and display them in chronological order within each thread.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Parse the Message-ID, In-Reply-To, and References headers. Build a tree structure where each email is a node. Use the References header as a fallback when In-Reply-To is missing.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Full-Text Search with Elasticsearch</div>
+                    <div class="exercise-desc"><p>Set up Elasticsearch and index 1000 sample emails. Implement search that supports: keyword search in subject and body, filtering by date range, filtering by sender, and highlighting matched terms in results.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the @elastic/elasticsearch Node.js client. Create a mapping with text fields for subject and body, keyword fields for from/to, and date fields. Use multi_match queries with highlighting.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Inbox loading is slow for users with 100,000+ emails</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Inbox API response time > 2 seconds for power users. Database CPU spikes during inbox loads.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The inbox query scans too many rows even with pagination because the index on (user_id, folder, received_at) is not selective enough, or the query plan does a sort on disk for non-indexed label combinations.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Ensure a covering index on (user_id, folder, received_at DESC) that includes the columns needed for the inbox list view. Consider materialized views for common folder views. Use cursor-based pagination (WHERE received_at < :lastSeen) instead of OFFSET-based pagination.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Search index falls behind during high email volume periods</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Users search for a recently received email and cannot find it. Search index consumer lag grows during peak hours.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The search indexer cannot keep up with the email ingestion rate. Elasticsearch bulk indexing is bottlenecked by JVM garbage collection or disk I/O.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Increase the search indexer consumer parallelism. Use Elasticsearch bulk API with optimal batch sizes (5-15 MB per batch). Implement backpressure — if the indexing queue grows too large, temporarily buffer in Kafka and replay. Consider separate hot/warm Elasticsearch clusters.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Attachment storage costs are growing faster than user base</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The same attachment (e.g., a company-wide PDF) is stored once per recipient instead of being deduplicated. Deleted emails still have their attachments stored.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement content-addressable storage: hash each attachment and store it once. Use reference counting to track how many emails reference each attachment. Run a garbage collector that deletes unreferenced attachments after a grace period.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://research.google/pubs/pub36632/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag paper">paper</div>
+                    <div class="resource-title">Gmail Architecture at Scale</div>
+                    
+                    <div class="resource-note">How Google built one of the world's largest email systems</div>
+                    
+                </a>
+                
+                <a href="https://nodemailer.com/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Nodemailer Documentation</div>
+                    
+                    <div class="resource-note">The most popular Node.js library for sending emails via SMTP</div>
+                    
+                </a>
+                
+                <a href="https://datatracker.ietf.org/doc/html/rfc5322" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag specification">specification</div>
+                    <div class="resource-title">RFC 5322 - Internet Message Format</div>
+                    
+                    <div class="resource-note">The official specification for email message format including headers and threading</div>
+                    
+                </a>
+                
+                <a href="https://www.elastic.co/guide/en/elasticsearch/client/javascript-api/current/index.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Elasticsearch Node.js Client</div>
+                    
+                    <div class="resource-note">Official Node.js client for building search features</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.6.1-js.html" class="btn">&larr; Design a Distributed Message Queue (Kafka)</a>
+            
+            
+            <a href="/backend-learning/lesson/9.6.3-js.html" class="btn">Design a Logging/Analytics Pipeline &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

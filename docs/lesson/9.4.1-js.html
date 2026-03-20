@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design Search Autocomplete (Google) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Infrastructure & Platform
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.4.1</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design Search Autocomplete (Google)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of autocomplete like a librarian who has memorized the most popular book titles. When you say "har...", they immediately suggest "Harry Potter" without searching every shelf. The trie is like an organized card catalog where following letters down a path instantly narrows options, and the librarian has pre-sorted the most popular completions for every prefix they know.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design Search Autocomplete (Google)</h1>
+<h2>Introduction</h2>
+<p>Search autocomplete (also called typeahead or search suggestions) is the feature that predicts what a user is about to type and shows real-time suggestions as they enter characters. Google processes over 8.5 billion searches per day, and autocomplete must respond within 100ms for every keystroke. This problem tests your ability to design a system that handles extreme read throughput with ultra-low latency.</p>
+<h2>Step 1: Requirements Gathering</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li>As a user types in a search box, the system returns the top 5-10 suggestions matching the prefix</li>
+<li>Suggestions are ranked by popularity (search frequency)</li>
+<li>Suggestions update periodically to reflect trending queries</li>
+<li>Support for multiple languages</li>
+<li>Filter out offensive or inappropriate suggestions</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li><strong>Latency</strong>: &lt; 100ms p99 response time</li>
+<li><strong>Availability</strong>: 99.99% uptime</li>
+<li><strong>Scale</strong>: 10 billion queries per day, suggestions for every keystroke</li>
+<li><strong>Freshness</strong>: Trending topics appear within minutes</li>
+<li><strong>Consistency</strong>: Eventual consistency is acceptable</li>
+</ul>
+<h3>Out of Scope</h3>
+<ul>
+<li>Personalized suggestions (per-user history)</li>
+<li>Spell correction</li>
+<li>The actual search results page</li>
+</ul>
+<h2>Step 2: Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Assumptions:
+- 500 million daily active users (DAU)
+- Average 6 searches per user per day = 3 billion searches/day
+- Average 5 characters typed per search (with autocomplete reducing typing)
+- Each keystroke triggers a suggestion request
+
+Query Volume:
+- 3 billion searches x 5 keystrokes = 15 billion suggestion requests/day
+- 15 billion / 86,400 seconds = ~174,000 requests/second (QPS)
+- Peak QPS (3x average) = ~520,000 QPS
+
+Storage:
+- Unique search queries: ~500 million
+- Average query length: 20 characters = 20 bytes
+- Frequency counter: 8 bytes
+- Total raw data: 500M x 28 bytes = ~14 GB
+- Trie structure overhead (3-5x): ~70 GB
+- With replication (3x): ~210 GB
+
+Bandwidth:
+- Average response: 10 suggestions x 20 chars = 200 bytes + overhead = ~500 bytes
+- 174,000 QPS x 500 bytes = ~87 MB/s outbound
+- Peak: ~260 MB/s outbound
+</code></pre></div>
+
+<h2>Step 3: High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────────────────────┐
+│                         SEARCH AUTOCOMPLETE SYSTEM                      │
+│                                                                        │
+│  ┌─────────┐     ┌──────────────┐     ┌────────────────────────────┐   │
+│  │  Client  │────&gt;│   CDN/Edge   │────&gt;│    API Gateway / LB        │   │
+│  │ (Browser)│&lt;────│   Cache      │&lt;────│    (Rate Limiting)         │   │
+│  └─────────┘     └──────────────┘     └────────────┬───────────────┘   │
+│                                                     │                  │
+│                          ┌──────────────────────────┼──────────┐       │
+│                          │                          │          │       │
+│                          ▼                          ▼          │       │
+│                   ┌─────────────┐         ┌──────────────┐     │       │
+│                   │ Suggestion  │         │   Data       │     │       │
+│                   │ Service     │         │   Collection │     │       │
+│                   │ (Read Path) │         │   Service    │     │       │
+│                   └──────┬──────┘         └──────┬───────┘     │       │
+│                          │                       │             │       │
+│                          ▼                       ▼             │       │
+│                   ┌─────────────┐         ┌──────────────┐     │       │
+│                   │  Trie Cache │         │   Analytics  │     │       │
+│                   │  (Redis /   │         │   Pipeline   │     │       │
+│                   │   In-Memory)│         │  (Kafka +    │     │       │
+│                   └──────┬──────┘         │   Aggregator)│     │       │
+│                          │                └──────┬───────┘     │       │
+│                          │                       │             │       │
+│                          ▼                       ▼             │       │
+│                   ┌─────────────┐         ┌──────────────┐     │       │
+│                   │  Trie       │         │   Query      │     │       │
+│                   │  Store      │◄────────│   Frequency  │     │       │
+│                   │  (Snapshots)│  build  │   DB         │     │       │
+│                   └─────────────┘         └──────────────┘     │       │
+│                                                                        │
+└──────────────────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>Step 4: Core Data Structure - The Trie</h2>
+<p>A <strong>trie</strong> (prefix tree) is the ideal data structure for autocomplete. Each node represents a character, and paths from root to node form prefixes.</p>
+<div class="highlight"><pre><span></span><code>Root
+├── t
+│   ├── h
+│   │   └── e [freq: 50000]
+│   │       ├── r
+│   │       │   └── e [freq: 12000]
+│   │       └── n [freq: 8000]
+│   ├── r
+│   │   ├── u
+│   │   │   └── m
+│   │   │       └── p [freq: 25000]
+│   │   └── e
+│   │       └── n
+│   │           └── d [freq: 15000]
+│   └── o
+│       └── p [freq: 9000]
+└── ...
+
+Query: &quot;tr&quot; -&gt; Returns: [&quot;trump&quot;, &quot;trend&quot;, &quot;tree&quot;, ...]
+</code></pre></div>
+
+<h3>Trie Implementation in JavaScript</h3>
+<div class="highlight"><pre><span></span><code><span class="kd">class</span><span class="w"> </span><span class="nx">TrieNode</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">children</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">isEnd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">frequency</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// Cache top-k suggestions at each node for O(1) lookup</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">topSuggestions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">AutocompleteTrie</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">k</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">10</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">root</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">TrieNode</span><span class="p">();</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">k</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">k</span><span class="p">;</span><span class="w"> </span><span class="c1">// number of suggestions to return</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">insert</span><span class="p">(</span><span class="nx">word</span><span class="p">,</span><span class="w"> </span><span class="nx">frequency</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">root</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="kr">char</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">word</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">node</span><span class="p">.</span><span class="nx">children</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="kr">char</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">node</span><span class="p">.</span><span class="nx">children</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="kr">char</span><span class="p">,</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">TrieNode</span><span class="p">());</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">children</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="kr">char</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="nx">node</span><span class="p">.</span><span class="nx">isEnd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">node</span><span class="p">.</span><span class="nx">frequency</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">frequency</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Pre-compute top-k suggestions at every node</span>
+<span class="w">  </span><span class="nx">buildTopSuggestions</span><span class="p">(</span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">root</span><span class="p">,</span><span class="w"> </span><span class="nx">prefix</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">suggestions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">_collectAll</span><span class="p">(</span><span class="nx">node</span><span class="p">,</span><span class="w"> </span><span class="nx">prefix</span><span class="p">,</span><span class="w"> </span><span class="nx">suggestions</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">suggestions</span><span class="p">.</span><span class="nx">sort</span><span class="p">((</span><span class="nx">a</span><span class="p">,</span><span class="w"> </span><span class="nx">b</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">frequency</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">frequency</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">node</span><span class="p">.</span><span class="nx">topSuggestions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">suggestions</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">k</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="kr">char</span><span class="p">,</span><span class="w"> </span><span class="nx">child</span><span class="p">]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">children</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">buildTopSuggestions</span><span class="p">(</span><span class="nx">child</span><span class="p">,</span><span class="w"> </span><span class="nx">prefix</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="kr">char</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">_collectAll</span><span class="p">(</span><span class="nx">node</span><span class="p">,</span><span class="w"> </span><span class="nx">prefix</span><span class="p">,</span><span class="w"> </span><span class="nx">results</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">node</span><span class="p">.</span><span class="nx">isEnd</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">results</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span><span class="w"> </span><span class="nx">word</span><span class="o">:</span><span class="w"> </span><span class="nx">prefix</span><span class="p">,</span><span class="w"> </span><span class="nx">frequency</span><span class="o">:</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">frequency</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="kr">char</span><span class="p">,</span><span class="w"> </span><span class="nx">child</span><span class="p">]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">children</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="p">.</span><span class="nx">_collectAll</span><span class="p">(</span><span class="nx">child</span><span class="p">,</span><span class="w"> </span><span class="nx">prefix</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="kr">char</span><span class="p">,</span><span class="w"> </span><span class="nx">results</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// O(L) lookup where L = prefix length</span>
+<span class="w">  </span><span class="nx">getSuggestions</span><span class="p">(</span><span class="nx">prefix</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">root</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="kr">char</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">prefix</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">node</span><span class="p">.</span><span class="nx">children</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="kr">char</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">      </span><span class="nx">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">children</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="kr">char</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">node</span><span class="p">.</span><span class="nx">topSuggestions</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Usage</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">trie</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">AutocompleteTrie</span><span class="p">(</span><span class="mf">5</span><span class="p">);</span>
+<span class="nx">trie</span><span class="p">.</span><span class="nx">insert</span><span class="p">(</span><span class="s1">&#39;the&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">50000</span><span class="p">);</span>
+<span class="nx">trie</span><span class="p">.</span><span class="nx">insert</span><span class="p">(</span><span class="s1">&#39;there&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">12000</span><span class="p">);</span>
+<span class="nx">trie</span><span class="p">.</span><span class="nx">insert</span><span class="p">(</span><span class="s1">&#39;then&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">8000</span><span class="p">);</span>
+<span class="nx">trie</span><span class="p">.</span><span class="nx">insert</span><span class="p">(</span><span class="s1">&#39;trump&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">25000</span><span class="p">);</span>
+<span class="nx">trie</span><span class="p">.</span><span class="nx">insert</span><span class="p">(</span><span class="s1">&#39;trend&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">15000</span><span class="p">);</span>
+<span class="nx">trie</span><span class="p">.</span><span class="nx">buildTopSuggestions</span><span class="p">();</span>
+
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">trie</span><span class="p">.</span><span class="nx">getSuggestions</span><span class="p">(</span><span class="s1">&#39;tr&#39;</span><span class="p">));</span>
+<span class="c1">// [{ word: &#39;trump&#39;, frequency: 25000 }, { word: &#39;trend&#39;, frequency: 15000 }]</span>
+</code></pre></div>
+
+<h2>Step 5: API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="c1">// GET /api/v1/suggestions?q=prefix&amp;limit=10&amp;lang=en</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/suggestions&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">q</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">10</span><span class="p">,</span><span class="w"> </span><span class="nx">lang</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;en&#39;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">q</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">q</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">suggestions</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">q</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">100</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Query too long&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">sanitizedQuery</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">q</span><span class="p">.</span><span class="nx">toLowerCase</span><span class="p">().</span><span class="nx">trim</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">suggestionService</span><span class="p">.</span><span class="nx">getSuggestions</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">sanitizedQuery</span><span class="p">,</span>
+<span class="w">    </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">limit</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">lang</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">query</span><span class="o">:</span><span class="w"> </span><span class="nx">sanitizedQuery</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">suggestions</span><span class="o">:</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">text</span><span class="o">:</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">word</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">score</span><span class="o">:</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">frequency</span><span class="p">,</span>
+<span class="w">    </span><span class="p">})),</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// POST /api/v1/queries (data collection - async, fire-and-forget)</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/queries&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">query</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// Send to Kafka for async processing</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">kafkaProducer</span><span class="p">.</span><span class="nx">send</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;search-queries&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">messages</span><span class="o">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">      </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">query</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">query</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">timestamp</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="p">}],</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">202</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;accepted&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Client-Side Optimization</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// Debounce requests - don&#39;t send on every keystroke</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">debounce</span><span class="p">(</span><span class="nx">fn</span><span class="p">,</span><span class="w"> </span><span class="nx">delay</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">timer</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="p">(...</span><span class="nx">args</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">clearTimeout</span><span class="p">(</span><span class="nx">timer</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">timer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">setTimeout</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">fn</span><span class="p">.</span><span class="nx">apply</span><span class="p">(</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">),</span><span class="w"> </span><span class="nx">delay</span><span class="p">);</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">fetchSuggestions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">debounce</span><span class="p">(</span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">prefix</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`/api/v1/suggestions?q=</span><span class="si">${</span><span class="nb">encodeURIComponent</span><span class="p">(</span><span class="nx">prefix</span><span class="p">)</span><span class="si">}</span><span class="sb">&amp;limit=5`</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">renderSuggestions</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">suggestions</span><span class="p">);</span>
+<span class="p">},</span><span class="w"> </span><span class="mf">150</span><span class="p">);</span><span class="w"> </span><span class="c1">// 150ms debounce</span>
+
+<span class="c1">// Also: abort previous in-flight requests</span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">controller</span><span class="p">;</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">fetchWithAbort</span><span class="p">(</span><span class="nx">prefix</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">controller</span><span class="o">?</span><span class="p">.</span><span class="nx">abort</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">controller</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">AbortController</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="sb">`/api/v1/suggestions?q=</span><span class="si">${</span><span class="nx">prefix</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">signal</span><span class="o">:</span><span class="w"> </span><span class="nx">controller</span><span class="p">.</span><span class="nx">signal</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 6: Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Query frequency table (aggregated)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">query_frequencies</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">query_text</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">200</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="k">language</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">5</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;en&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">frequency</span><span class="w">    </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">last_updated</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">    </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">query_text</span><span class="p">,</span><span class="w"> </span><span class="k">language</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_freq_language</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">query_frequencies</span><span class="p">(</span><span class="k">language</span><span class="p">,</span><span class="w"> </span><span class="n">frequency</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+
+<span class="c1">-- Raw query log (for analytics pipeline)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">raw_query_log</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">          </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">query_text</span><span class="w">  </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">200</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">user_id</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">),</span>
+<span class="w">    </span><span class="n">region</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">),</span>
+<span class="w">    </span><span class="k">timestamp</span><span class="w">   </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">)</span><span class="w"> </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">RANGE</span><span class="w"> </span><span class="p">(</span><span class="k">timestamp</span><span class="p">);</span>
+
+<span class="c1">-- Daily partitions</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">raw_query_log_2026_03_18</span>
+<span class="w">    </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">OF</span><span class="w"> </span><span class="n">raw_query_log</span>
+<span class="w">    </span><span class="k">FOR</span><span class="w"> </span><span class="k">VALUES</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="p">(</span><span class="s1">&#39;2026-03-18&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="p">(</span><span class="s1">&#39;2026-03-19&#39;</span><span class="p">);</span>
+
+<span class="c1">-- Blocked terms (content moderation)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">blocked_terms</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">term</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">200</span><span class="p">)</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">reason</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">),</span>
+<span class="w">    </span><span class="n">blocked_at</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Step 7: Data Collection and Trie Building Pipeline</h2>
+<div class="highlight"><pre><span></span><code>┌───────────┐     ┌─────────┐     ┌─────────────┐     ┌────────────┐
+│  Search   │────&gt;│  Kafka  │────&gt;│  Aggregator │────&gt;│  Frequency │
+│  Queries  │     │  Topic  │     │  (Flink /   │     │  DB        │
+└───────────┘     └─────────┘     │  Worker)    │     └─────┬──────┘
+                                  └─────────────┘           │
+                                                            │ periodic
+                                                            ▼
+┌──────────────┐     ┌──────────────┐     ┌─────────────────────┐
+│  Trie Server │◄────│  Trie Builder│◄────│  Snapshot Builder   │
+│  (serves     │     │  (offline)   │     │  (every 15 minutes) │
+│   queries)   │     └──────────────┘     └─────────────────────┘
+└──────────────┘
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// Aggregator worker - processes Kafka messages</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Kafka</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;kafkajs&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@prisma/client&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">kafka</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Kafka</span><span class="p">({</span><span class="w"> </span><span class="nx">brokers</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;kafka:9092&#39;</span><span class="p">]</span><span class="w"> </span><span class="p">});</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">consumer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">kafka</span><span class="p">.</span><span class="nx">consumer</span><span class="p">({</span><span class="w"> </span><span class="nx">groupId</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;query-aggregator&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">runAggregator</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">consumer</span><span class="p">.</span><span class="nx">connect</span><span class="p">();</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">consumer</span><span class="p">.</span><span class="nx">subscribe</span><span class="p">({</span><span class="w"> </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;search-queries&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Batch aggregation in memory</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">batchCounts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">lastFlush</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">consumer</span><span class="p">.</span><span class="nx">run</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">eachMessage</span><span class="o">:</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">message</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">query</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">message</span><span class="p">.</span><span class="nx">value</span><span class="p">.</span><span class="nx">toString</span><span class="p">());</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">normalized</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">query</span><span class="p">.</span><span class="nx">toLowerCase</span><span class="p">().</span><span class="nx">trim</span><span class="p">();</span>
+<span class="w">      </span><span class="nx">batchCounts</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">normalized</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">batchCounts</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">normalized</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// Flush to DB every 60 seconds or every 10,000 entries</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">lastFlush</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">60000</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">batchCounts</span><span class="p">.</span><span class="nx">size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">10000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nx">flushToDatabase</span><span class="p">(</span><span class="nx">batchCounts</span><span class="p">);</span>
+<span class="w">        </span><span class="nx">batchCounts</span><span class="p">.</span><span class="nx">clear</span><span class="p">();</span>
+<span class="w">        </span><span class="nx">lastFlush</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">flushToDatabase</span><span class="p">(</span><span class="nx">counts</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">entries</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Array</span><span class="p">.</span><span class="kr">from</span><span class="p">(</span><span class="nx">counts</span><span class="p">.</span><span class="nx">entries</span><span class="p">());</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$transaction</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">entries</span><span class="p">.</span><span class="nx">map</span><span class="p">(([</span><span class="nx">query</span><span class="p">,</span><span class="w"> </span><span class="nx">count</span><span class="p">])</span><span class="w"> </span><span class="p">=&gt;</span>
+<span class="w">      </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$executeRaw</span><span class="sb">`</span>
+<span class="sb">        INSERT INTO query_frequencies (query_text, frequency)</span>
+<span class="sb">        VALUES (</span><span class="si">${</span><span class="nx">query</span><span class="si">}</span><span class="sb">, </span><span class="si">${</span><span class="nx">count</span><span class="si">}</span><span class="sb">)</span>
+<span class="sb">        ON CONFLICT (query_text, language)</span>
+<span class="sb">        DO UPDATE SET</span>
+<span class="sb">          frequency = query_frequencies.frequency + </span><span class="si">${</span><span class="nx">count</span><span class="si">}</span><span class="sb">,</span>
+<span class="sb">          last_updated = NOW()</span>
+<span class="sb">      `</span>
+<span class="w">    </span><span class="p">)</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="nx">runAggregator</span><span class="p">();</span>
+</code></pre></div>
+
+<h2>Step 8: Serving Layer with Redis</h2>
+<p>For production, we cache trie lookups in Redis for sub-millisecond responses:</p>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">({</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-cluster&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">6379</span><span class="w"> </span><span class="p">});</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">RedisSuggestionService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">redis</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">TTL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">3600</span><span class="p">;</span><span class="w"> </span><span class="c1">// 1 hour cache</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Store suggestions using sorted sets</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">populateSuggestions</span><span class="p">(</span><span class="nx">prefix</span><span class="p">,</span><span class="w"> </span><span class="nx">suggestions</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`autocomplete:</span><span class="si">${</span><span class="nx">prefix</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="w">    </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">del</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">word</span><span class="p">,</span><span class="w"> </span><span class="nx">frequency</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">suggestions</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">zadd</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">frequency</span><span class="p">,</span><span class="w"> </span><span class="nx">word</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">expire</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">TTL</span><span class="p">);</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Retrieve top-k suggestions</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getSuggestions</span><span class="p">(</span><span class="nx">prefix</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">10</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`autocomplete:</span><span class="si">${</span><span class="nx">prefix</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// ZREVRANGE returns highest scores first</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">redis</span><span class="p">.</span><span class="nx">zrevrange</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;WITHSCORES&#39;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">suggestions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">let</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mf">2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">suggestions</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">word</span><span class="o">:</span><span class="w"> </span><span class="nx">results</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span>
+<span class="w">        </span><span class="nx">frequency</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">results</span><span class="p">[</span><span class="nx">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">]),</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">suggestions</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Step 9: Scaling Strategies</h2>
+<h3>Sharding by Prefix</h3>
+<div class="highlight"><pre><span></span><code>Shard A: a-f prefixes  -&gt;  Trie Server Cluster A (3 replicas)
+Shard B: g-m prefixes  -&gt;  Trie Server Cluster B (3 replicas)
+Shard C: n-s prefixes  -&gt;  Trie Server Cluster C (3 replicas)
+Shard D: t-z prefixes  -&gt;  Trie Server Cluster D (3 replicas)
+</code></pre></div>
+
+<h3>Multi-Layer Caching</h3>
+<div class="highlight"><pre><span></span><code>Layer 1: Browser cache (Cache-Control headers, 5 min TTL)
+    |
+Layer 2: CDN edge cache (popular prefixes like &quot;wh&quot;, &quot;ho&quot;)
+    |
+Layer 3: Application-level LRU cache (in-memory, per-server)
+    |
+Layer 4: Redis distributed cache
+    |
+Layer 5: Trie store (source of truth)
+</code></pre></div>
+
+<h3>Edge Deployment</h3>
+<p>Deploy suggestion servers in edge locations close to users to minimize network latency:</p>
+<div class="highlight"><pre><span></span><code>US-East User ──&gt; US-East Edge Server ──&gt; US-East Redis Replica
+EU User ──────&gt; EU Edge Server ────────&gt; EU Redis Replica
+Asia User ────&gt; Asia Edge Server ──────&gt; Asia Redis Replica
+</code></pre></div>
+
+<h2>Step 10: Trade-offs and Decisions</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Data structure</td>
+<td>Trie (prefix tree)</td>
+<td>Sorted set in Redis</td>
+<td>Trie for complex ranking; Redis sorted sets for simpler systems</td>
+</tr>
+<tr>
+<td>Storage</td>
+<td>In-memory trie</td>
+<td>Redis cluster</td>
+<td>In-memory for lowest latency; Redis for shared state</td>
+</tr>
+<tr>
+<td>Update frequency</td>
+<td>Real-time</td>
+<td>Batch (every 15 min)</td>
+<td>Batch for most queries; real-time for trending</td>
+</tr>
+<tr>
+<td>Ranking</td>
+<td>Pure frequency</td>
+<td>ML-based scoring</td>
+<td>Frequency first; add ML later for personalization</td>
+</tr>
+<tr>
+<td>Sharding</td>
+<td>By prefix range</td>
+<td>By consistent hash</td>
+<td>Prefix range for locality; consistent hash for even distribution</td>
+</tr>
+</tbody>
+</table>
+<h3>Handling Trending Topics</h3>
+<p>Use a two-layer ranking: a base layer from historical frequency (updated hourly) and a trending layer from recent spikes (updated every few minutes). Combine with a weighted formula:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">function</span><span class="w"> </span><span class="nx">computeScore</span><span class="p">(</span><span class="nx">historicalFreq</span><span class="p">,</span><span class="w"> </span><span class="nx">recentFreq</span><span class="p">,</span><span class="w"> </span><span class="nx">hoursAgo</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">decayFactor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">exp</span><span class="p">(</span><span class="o">-</span><span class="mf">0.1</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">hoursAgo</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">trendBoost</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">recentFreq</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">decayFactor</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">10</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">historicalFreq</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">trendBoost</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Content Filtering</h3>
+<p>Maintain a blocklist of offensive terms. Filter at both the trie-building stage and at query time as a safety net. Use a Bloom filter for fast membership checks.</p>
+<h2>Summary</h2>
+<p>Search autocomplete requires a read-heavy architecture optimized for sub-100ms latency. The core data structure is a trie with pre-computed top-k suggestions at each node. A data collection pipeline aggregates query frequencies, and a periodic trie builder creates snapshots that are distributed to serving nodes. Multi-layer caching (browser, CDN, in-memory, Redis) absorbs the massive read load, while sharding by prefix range distributes the trie across multiple servers.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Trie with Top-K Caching</div>
+                    <div class="exercise-desc"><p>Implement an AutocompleteTrie class in JavaScript that inserts words with frequencies, pre-computes the top 5 suggestions at every node, and returns suggestions in O(prefix_length) time. Load it with 10,000 words from a dictionary file and benchmark lookup speed.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>After all insertions, call a recursive buildTopSuggestions() that traverses the entire trie bottom-up, collecting and sorting all completions at each node.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Redis-Backed Autocomplete Service</div>
+                    <div class="exercise-desc"><p>Build an Express API that stores autocomplete suggestions in Redis sorted sets. Implement endpoints to add queries with frequencies and retrieve top-k suggestions for a prefix. Use pipelining for batch inserts.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use ZADD to insert with scores and ZREVRANGE to retrieve top results. Store one sorted set per prefix (e.g., key 'ac:he' for prefix 'he').</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Debounced Client with Request Cancellation</div>
+                    <div class="exercise-desc"><p>Create a frontend search input that debounces API calls by 200ms and cancels in-flight requests when new keystrokes arrive. Measure how many API calls are saved compared to calling on every keystroke.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use AbortController to cancel previous fetch requests. Track total keystrokes vs actual API calls to compute savings.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Autocomplete suggestions are stale and don't reflect trending topics</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> A major news event occurs but related search suggestions don't appear for hours. Users notice autocomplete is "behind" compared to competitors.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The trie is rebuilt too infrequently (e.g., daily) and the data pipeline has too much lag between query collection and trie updates.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement a two-tier system: a base trie rebuilt hourly from historical data, plus a real-time trending layer using a sliding window counter in Redis. Merge results at query time with a weighted scoring formula that boosts recent spikes.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Memory usage on trie servers keeps growing and eventually causes OOM crashes</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The trie stores every unique query ever seen, including long-tail queries with very low frequency. Rare queries consume memory without providing useful suggestions.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Set a minimum frequency threshold (e.g., 10 searches/week) for trie inclusion. Periodically prune low-frequency entries. Use compact trie representations (compressed/Patricia trie) to reduce node count.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Latency spikes during trie rebuilds</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The trie is rebuilt in-place on the serving node, causing garbage collection pressure and contention during the build process.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Build the new trie offline on a separate builder service. Serialize it to a binary snapshot, distribute the snapshot to serving nodes, and atomically swap the old trie for the new one. This ensures zero-downtime updates.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://medium.com/@prefixyteam/how-we-built-prefixy-a-scalable-prefix-search-service-for-powering-autocomplete-c20f98e2afe1" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">How We Built Prefixy - A Scalable Prefix Search Service</div>
+                    
+                    <div class="resource-note">Real-world implementation of a prefix search service with trie sharding</div>
+                    
+                </a>
+                
+                <a href="https://www.youtube.com/watch?v=us0qySiUsGU" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag video">video</div>
+                    <div class="resource-title">System Design: Autocomplete / Typeahead Suggestions</div>
+                    
+                    <div class="resource-note">Comprehensive walkthrough of the autocomplete system design problem</div>
+                    
+                </a>
+                
+                <a href="https://en.wikipedia.org/wiki/Trie" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag reference">reference</div>
+                    <div class="resource-title">Trie Data Structure - Wikipedia</div>
+                    
+                    <div class="resource-note">Formal description of trie variants including compressed tries and Patricia tries</div>
+                    
+                </a>
+                
+                <a href="https://redis.io/docs/data-types/sorted-sets/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Redis Sorted Sets Documentation</div>
+                    
+                    <div class="resource-note">Official Redis docs on sorted sets, the foundation for simple autocomplete systems</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/9.4.2-js.html" class="btn">Design a Distributed Task Scheduler &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

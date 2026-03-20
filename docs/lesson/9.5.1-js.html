@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Social Graph (Facebook/LinkedIn) - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Social & Real-Time Systems
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.5.1</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design a Social Graph (Facebook/LinkedIn)</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a social graph like a city road map. Each person is an intersection, and each friendship is a road connecting two intersections. Finding mutual friends is like asking which intersections can be reached directly from both of two given intersections. Finding degrees of separation is like finding the shortest driving route between two points. At city scale you need a good index (GPS/map), not brute-force exploration of every road.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Social Graph (Facebook/LinkedIn)</h1>
+<h2>Introduction</h2>
+<p>A social graph is the data structure and system behind every social network — it models relationships between people (friends, followers, connections) and powers features like friend suggestions, mutual connections, degree-of-separation queries, and news feed ranking. Companies like Facebook (2.9B+ users), LinkedIn (900M+ members), and Twitter use social graphs at massive scale.</p>
+<p>In a system design interview, this problem tests your ability to model graph data at scale, choose between graph databases and relational stores, handle fan-out for relationship queries, and design APIs that feel instantaneous despite billions of edges.</p>
+<h2>Requirements</h2>
+<h3>Functional Requirements</h3>
+<ol>
+<li><strong>Add/remove connections</strong> — Users can send friend/connection requests, accept them, and remove connections</li>
+<li><strong>Query connections</strong> — Get a user's direct connections (1st degree)</li>
+<li><strong>Mutual connections</strong> — Find shared connections between two users</li>
+<li><strong>Degree of separation</strong> — Find the shortest path between two users (up to 3 degrees)</li>
+<li><strong>Friend/connection suggestions</strong> — Recommend people the user may know (friends-of-friends)</li>
+<li><strong>Search within network</strong> — Search for people with filters (company, location, school)</li>
+<li><strong>Block users</strong> — Prevent specific users from appearing in results or sending requests</li>
+</ol>
+<h3>Non-Functional Requirements</h3>
+<ol>
+<li><strong>Low latency</strong> — Connection list and mutual friends must load in &lt;200ms</li>
+<li><strong>High availability</strong> — 99.99% uptime, the social graph is the backbone of the platform</li>
+<li><strong>Consistency</strong> — Eventually consistent is acceptable for suggestions; strong consistency for connection status</li>
+<li><strong>Scalability</strong> — Support 500M+ users with average 500 connections each</li>
+</ol>
+<h2>Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Users:                 500 million
+Avg connections/user:  500
+Total edges:           500M * 500 / 2 = 125 billion edges
+                       (divide by 2 because each edge is bidirectional)
+
+Storage per edge:      user_id_1 (8B) + user_id_2 (8B) + metadata (16B) = 32 bytes
+Total edge storage:    125B * 32B = 4 TB
+
+Storage per user:      user_id (8B) + profile data (2KB avg) = ~2KB
+Total user storage:    500M * 2KB = 1 TB
+
+Read QPS:
+  - View connections:   50,000 QPS
+  - Mutual friends:     20,000 QPS
+  - Friend suggestions: 10,000 QPS
+  - Search:             30,000 QPS
+
+Write QPS:
+  - New connections:    5,000 QPS
+  - Remove connections: 500 QPS
+
+Bandwidth:
+  - Avg response size:  5KB (list of 20 connections with basic profiles)
+  - Read bandwidth:     50,000 * 5KB = 250 MB/s
+</code></pre></div>
+
+<h2>High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────┐     ┌──────────────┐     ┌─────────────────────────┐
+│  Client  │────&gt;│   API GW /   │────&gt;│    Graph Service         │
+│  (App)   │     │   Load Bal.  │     │    (Node.js)             │
+└──────────┘     └──────────────┘     │                         │
+                                      │  ┌───────────────────┐  │
+                                      │  │ Connection API     │  │
+                                      │  │ Mutual Friends API │  │
+                                      │  │ Suggestions API    │  │
+                                      │  │ Search API         │  │
+                                      │  └───────────────────┘  │
+                                      └──────────┬──────────────┘
+                                                  │
+                        ┌─────────────────────────┼──────────────────────┐
+                        │                         │                      │
+                        ▼                         ▼                      ▼
+               ┌────────────────┐     ┌──────────────────┐    ┌─────────────────┐
+               │  Graph Store   │     │   Redis Cluster   │    │  Search Index   │
+               │  (Adjacency    │     │   (Cache +        │    │  (Elasticsearch)│
+               │   Lists in DB) │     │    Suggestions)   │    │                 │
+               └────────────────┘     └──────────────────┘    └─────────────────┘
+                        │
+              ┌─────────┴──────────┐
+              ▼                    ▼
+     ┌────────────────┐   ┌────────────────┐
+     │  PostgreSQL    │   │  Neo4j /       │
+     │  (Edge Table   │   │  Graph DB      │
+     │   + Users)     │   │  (BFS/DFS)     │
+     └────────────────┘   └────────────────┘
+</code></pre></div>
+
+<h2>API Design</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">.</span><span class="nx">Router</span><span class="p">();</span>
+
+<span class="c1">// Send a connection request</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/connections/request&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// POST /api/v1/connections/request</span>
+<span class="w">  </span><span class="c1">// Body: { target_user_id: string }</span>
+<span class="w">  </span><span class="c1">// Response: { request_id, status: &#39;pending&#39;, created_at }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">target_user_id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">request</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">connectionService</span><span class="p">.</span><span class="nx">sendRequest</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">target_user_id</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">request</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Accept or reject a connection request</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">put</span><span class="p">(</span><span class="s1">&#39;/connections/request/:requestId&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// PUT /api/v1/connections/request/:requestId</span>
+<span class="w">  </span><span class="c1">// Body: { action: &#39;accept&#39; | &#39;reject&#39; }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">action</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">connectionService</span><span class="p">.</span><span class="nx">respondToRequest</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">requestId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">action</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Get a user&#39;s connections (paginated)</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/users/:userId/connections&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// GET /api/v1/users/:userId/connections?cursor=abc&amp;limit=20</span>
+<span class="w">  </span><span class="c1">// Response: { connections: [...], next_cursor, total_count }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">cursor</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">20</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">connections</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">graphService</span><span class="p">.</span><span class="nx">getConnections</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">cursor</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">connections</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Get mutual connections between two users</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/users/:userId/mutual/:otherUserId&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// GET /api/v1/users/:userId/mutual/:otherUserId?limit=20</span>
+<span class="w">  </span><span class="c1">// Response: { mutual_connections: [...], count }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">graphService</span><span class="p">.</span><span class="nx">getMutualConnections</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">otherUserId</span><span class="p">,</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">20</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Get degree of separation</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/users/:userId/distance/:otherUserId&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// GET /api/v1/users/:userId/distance/:otherUserId</span>
+<span class="w">  </span><span class="c1">// Response: { degree: 2, path: [userId, intermediary, otherUserId] }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">graphService</span><span class="p">.</span><span class="nx">getDegreesOfSeparation</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">otherUserId</span><span class="p">,</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">maxDegree</span><span class="o">:</span><span class="w"> </span><span class="mf">3</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Get connection suggestions (People You May Know)</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/users/:userId/suggestions&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// GET /api/v1/users/:userId/suggestions?limit=20</span>
+<span class="w">  </span><span class="c1">// Response: { suggestions: [{ user, mutual_count, reason }] }</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">suggestions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">suggestionService</span><span class="p">.</span><span class="nx">getSuggestions</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">20</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">suggestions</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Block a user</span>
+<span class="nx">router</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/users/block&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// POST /api/v1/users/block</span>
+<span class="w">  </span><span class="c1">// Body: { blocked_user_id: string }</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">connectionService</span><span class="p">.</span><span class="nx">blockUser</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">blocked_user_id</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">204</span><span class="p">).</span><span class="nx">send</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="k">export</span><span class="w"> </span><span class="k">default</span><span class="w"> </span><span class="nx">router</span><span class="p">;</span>
+</code></pre></div>
+
+<h2>Database Schema</h2>
+<h3>PostgreSQL — Edge Table Approach</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Users table (core profile data)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">username</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">display_name</span><span class="w">  </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">email</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">company</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">128</span><span class="p">),</span>
+<span class="w">  </span><span class="k">location</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">128</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Connections (edges) - store both directions for fast lookup</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">connections</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">user_id_1</span><span class="w">     </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">user_id_2</span><span class="w">     </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">user_id_1</span><span class="p">,</span><span class="w"> </span><span class="n">user_id_2</span><span class="p">),</span>
+<span class="w">  </span><span class="k">CHECK</span><span class="w"> </span><span class="p">(</span><span class="n">user_id_1</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">user_id_2</span><span class="p">)</span><span class="w">  </span><span class="c1">-- canonical ordering to prevent duplicates</span>
+<span class="p">);</span>
+
+<span class="c1">-- Adjacency list for fast lookups from either direction</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">adjacency_list</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">       </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">friend_id</span><span class="w">     </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">friend_id</span><span class="p">)</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_adjacency_user</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">adjacency_list</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+
+<span class="c1">-- Connection requests</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">connection_requests</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">            </span><span class="n">BIGSERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">sender_id</span><span class="w">     </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">receiver_id</span><span class="w">   </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">status</span><span class="w">        </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;pending&#39;</span><span class="p">,</span><span class="w">  </span><span class="c1">-- pending, accepted, rejected</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">(</span><span class="n">sender_id</span><span class="p">,</span><span class="w"> </span><span class="n">receiver_id</span><span class="p">)</span>
+<span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_request_receiver</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">connection_requests</span><span class="p">(</span><span class="n">receiver_id</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+
+<span class="c1">-- Block list</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">blocks</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">blocker_id</span><span class="w">    </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">blocked_id</span><span class="w">    </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">users</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">blocker_id</span><span class="p">,</span><span class="w"> </span><span class="n">blocked_id</span><span class="p">)</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h3>Graph Database (Neo4j) for Complex Traversals</h3>
+<div class="highlight"><pre><span></span><code>(User)-[:CONNECTED_TO]-&gt;(User)
+(User)-[:BLOCKED]-&gt;(User)
+(User)-[:WORKS_AT]-&gt;(Company)
+(User)-[:STUDIED_AT]-&gt;(School)
+</code></pre></div>
+
+<p>Neo4j Cypher queries for common operations:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Mutual connections</span>
+<span class="k">MATCH</span><span class="w"> </span><span class="p">(</span><span class="n">a</span><span class="p">:</span><span class="n">User</span><span class="w"> </span><span class="p">{</span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="err">$</span><span class="n">userId1</span><span class="p">})</span><span class="o">-[</span><span class="p">:</span><span class="n">CONNECTED_TO</span><span class="o">]-</span><span class="p">(</span><span class="n">mutual</span><span class="p">)</span><span class="o">-[</span><span class="p">:</span><span class="n">CONNECTED_TO</span><span class="o">]-</span><span class="p">(</span><span class="n">b</span><span class="p">:</span><span class="n">User</span><span class="w"> </span><span class="p">{</span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="err">$</span><span class="n">userId2</span><span class="p">})</span>
+<span class="k">RETURN</span><span class="w"> </span><span class="n">mutual</span><span class="w"> </span><span class="k">LIMIT</span><span class="w"> </span><span class="m">20</span><span class="p">;</span>
+
+<span class="c1">// Shortest path (degree of separation)</span>
+<span class="k">MATCH</span><span class="w"> </span><span class="n">path</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="n">shortestPath</span><span class="p">(</span>
+<span class="w">  </span><span class="p">(</span><span class="n">a</span><span class="p">:</span><span class="n">User</span><span class="w"> </span><span class="p">{</span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="err">$</span><span class="n">userId1</span><span class="p">})</span><span class="o">-[</span><span class="p">:</span><span class="n">CONNECTED_TO</span><span class="p">*..</span><span class="m">3</span><span class="o">]-</span><span class="p">(</span><span class="n">b</span><span class="p">:</span><span class="n">User</span><span class="w"> </span><span class="p">{</span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="err">$</span><span class="n">userId2</span><span class="p">})</span>
+<span class="p">)</span>
+<span class="k">RETURN</span><span class="w"> </span><span class="n">length</span><span class="p">(</span><span class="n">path</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">degree</span><span class="p">,</span><span class="w"> </span><span class="o">[</span><span class="n">n</span><span class="w"> </span><span class="k">IN</span><span class="w"> </span><span class="n">nodes</span><span class="p">(</span><span class="n">path</span><span class="p">)</span><span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="n">n</span><span class="p">.</span><span class="n">id</span><span class="o">]</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">path</span><span class="p">;</span>
+
+<span class="c1">// Friend suggestions (friends of friends, not already connected)</span>
+<span class="k">MATCH</span><span class="w"> </span><span class="p">(</span><span class="n">me</span><span class="p">:</span><span class="n">User</span><span class="w"> </span><span class="p">{</span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="err">$</span><span class="n">userId</span><span class="p">})</span><span class="o">-[</span><span class="p">:</span><span class="n">CONNECTED_TO</span><span class="o">]-</span><span class="p">(</span><span class="n">friend</span><span class="p">)</span><span class="o">-[</span><span class="p">:</span><span class="n">CONNECTED_TO</span><span class="o">]-</span><span class="p">(</span><span class="n">suggestion</span><span class="p">)</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="p">(</span><span class="n">me</span><span class="p">)</span><span class="o">-[</span><span class="p">:</span><span class="n">CONNECTED_TO</span><span class="o">]-</span><span class="p">(</span><span class="n">suggestion</span><span class="p">)</span>
+<span class="w">  </span><span class="n">AND</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="p">(</span><span class="n">me</span><span class="p">)</span><span class="o">-[</span><span class="p">:</span><span class="n">BLOCKED</span><span class="o">]-</span><span class="p">(</span><span class="n">suggestion</span><span class="p">)</span>
+<span class="w">  </span><span class="n">AND</span><span class="w"> </span><span class="n">suggestion</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">&lt;&gt;</span><span class="w"> </span><span class="err">$</span><span class="n">userId</span>
+<span class="k">RETURN</span><span class="w"> </span><span class="n">suggestion</span><span class="p">,</span><span class="w"> </span><span class="n">COUNT</span><span class="p">(</span><span class="n">friend</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">mutual_count</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">mutual_count</span><span class="w"> </span><span class="k">DESC</span>
+<span class="k">LIMIT</span><span class="w"> </span><span class="m">20</span><span class="p">;</span>
+</code></pre></div>
+
+<h2>Core Implementation</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">Redis</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;ioredis&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@prisma/client&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="p">();</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">redis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Redis</span><span class="p">({</span><span class="w"> </span><span class="nx">host</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;redis-cluster&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">port</span><span class="o">:</span><span class="w"> </span><span class="mf">6379</span><span class="w"> </span><span class="p">});</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">GraphService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Get direct connections with caching</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getConnections</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">cursor</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">cacheKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`connections:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">cursor</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;start&#39;</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">limit</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">cached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">cacheKey</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">cached</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">cached</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">user_id</span><span class="o">:</span><span class="w"> </span><span class="nb">BigInt</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">cursor</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">where</span><span class="p">.</span><span class="nx">created_at</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">lt</span><span class="o">:</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">(</span><span class="nx">cursor</span><span class="p">)</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">edges</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">adjacency_list</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">orderBy</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">created_at</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;desc&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">take</span><span class="o">:</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">include</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">friend</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">select</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">display_name</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">company</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">hasMore</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">edges</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">limit</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">connections</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">edges</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">connections</span><span class="o">:</span><span class="w"> </span><span class="nx">connections</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">e</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">friend</span><span class="p">),</span>
+<span class="w">      </span><span class="nx">next_cursor</span><span class="o">:</span><span class="w"> </span><span class="nx">hasMore</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">connections</span><span class="p">[</span><span class="nx">limit</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">].</span><span class="nx">created_at</span><span class="p">.</span><span class="nx">toISOString</span><span class="p">()</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">total_count</span><span class="o">:</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">adjacency_list</span><span class="p">.</span><span class="nx">count</span><span class="p">({</span><span class="w"> </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">user_id</span><span class="o">:</span><span class="w"> </span><span class="nb">BigInt</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">setex</span><span class="p">(</span><span class="nx">cacheKey</span><span class="p">,</span><span class="w"> </span><span class="mf">300</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">result</span><span class="p">));</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Mutual connections using set intersection</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getMutualConnections</span><span class="p">(</span><span class="nx">userId1</span><span class="p">,</span><span class="w"> </span><span class="nx">userId2</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Use Redis sorted sets for fast intersection</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">key1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`friends:</span><span class="si">${</span><span class="nx">userId1</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">key2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`friends:</span><span class="si">${</span><span class="nx">userId2</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// Ensure friend sets are loaded</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_ensureFriendSet</span><span class="p">(</span><span class="nx">userId1</span><span class="p">);</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_ensureFriendSet</span><span class="p">(</span><span class="nx">userId2</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// ZINTERSTORE computes intersection in Redis</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">tempKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`mutual:</span><span class="si">${</span><span class="nx">userId1</span><span class="si">}</span><span class="sb">:</span><span class="si">${</span><span class="nx">userId2</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">zinterstore</span><span class="p">(</span><span class="nx">tempKey</span><span class="p">,</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span><span class="w"> </span><span class="nx">key1</span><span class="p">,</span><span class="w"> </span><span class="nx">key2</span><span class="p">);</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">expire</span><span class="p">(</span><span class="nx">tempKey</span><span class="p">,</span><span class="w"> </span><span class="mf">60</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">mutualIds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">zrange</span><span class="p">(</span><span class="nx">tempKey</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">mutualUsers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="ow">in</span><span class="o">:</span><span class="w"> </span><span class="nx">mutualIds</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">id</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nb">BigInt</span><span class="p">(</span><span class="nx">id</span><span class="p">))</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">select</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">display_name</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">company</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">mutual_connections</span><span class="o">:</span><span class="w"> </span><span class="nx">mutualUsers</span><span class="p">,</span><span class="w"> </span><span class="nx">count</span><span class="o">:</span><span class="w"> </span><span class="nx">mutualIds</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Load user&#39;s friend list into Redis sorted set</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">_ensureFriendSet</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`friends:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">exists</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">exists</span><span class="p">(</span><span class="nx">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">exists</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">edges</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">adjacency_list</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">user_id</span><span class="o">:</span><span class="w"> </span><span class="nb">BigInt</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">select</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">friend_id</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">created_at</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">edges</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">pipeline</span><span class="p">();</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">edge</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">edges</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">zadd</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">edge</span><span class="p">.</span><span class="nx">created_at</span><span class="p">.</span><span class="nx">getTime</span><span class="p">(),</span><span class="w"> </span><span class="nx">edge</span><span class="p">.</span><span class="nx">friend_id</span><span class="p">.</span><span class="nx">toString</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">expire</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="mf">3600</span><span class="p">);</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">pipeline</span><span class="p">.</span><span class="nx">exec</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">class</span><span class="w"> </span><span class="nx">SuggestionService</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Friends-of-friends scored by mutual connection count</span>
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">getSuggestions</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">cacheKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`suggestions:</span><span class="si">${</span><span class="nx">userId</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">cached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">cacheKey</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">cached</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">cached</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// SQL approach: friends of friends not already connected</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">suggestions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`</span>
+<span class="sb">      SELECT</span>
+<span class="sb">        u.id, u.display_name, u.company,</span>
+<span class="sb">        COUNT(DISTINCT f2.user_id) AS mutual_count</span>
+<span class="sb">      FROM adjacency_list f1</span>
+<span class="sb">      JOIN adjacency_list f2 ON f1.friend_id = f2.user_id</span>
+<span class="sb">      JOIN users u ON f2.friend_id = u.id</span>
+<span class="sb">      WHERE f1.user_id = </span><span class="si">${</span><span class="nb">BigInt</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="si">}</span>
+<span class="sb">        AND f2.friend_id != </span><span class="si">${</span><span class="nb">BigInt</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="si">}</span>
+<span class="sb">        AND f2.friend_id NOT IN (</span>
+<span class="sb">          SELECT friend_id FROM adjacency_list WHERE user_id = </span><span class="si">${</span><span class="nb">BigInt</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="si">}</span>
+<span class="sb">        )</span>
+<span class="sb">        AND f2.friend_id NOT IN (</span>
+<span class="sb">          SELECT blocked_id FROM blocks WHERE blocker_id = </span><span class="si">${</span><span class="nb">BigInt</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="si">}</span>
+<span class="sb">        )</span>
+<span class="sb">      GROUP BY u.id, u.display_name, u.company</span>
+<span class="sb">      ORDER BY mutual_count DESC</span>
+<span class="sb">      LIMIT </span><span class="si">${</span><span class="nx">limit</span><span class="si">}</span>
+<span class="sb">    `</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">suggestions</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="k">await</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">setex</span><span class="p">(</span><span class="nx">cacheKey</span><span class="p">,</span><span class="w"> </span><span class="mf">1800</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">result</span><span class="p">));</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2>Scaling Strategies</h2>
+<h3>1. Graph Partitioning (Sharding)</h3>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────┐
+│           Graph Partition Strategy             │
+│                                               │
+│  Shard by user_id hash:                       │
+│    Shard 0: users 0-99M   (edges within)     │
+│    Shard 1: users 100-199M                    │
+│    Shard 2: users 200-299M                    │
+│    ...                                        │
+│                                               │
+│  Cross-shard edges stored on BOTH shards     │
+│  (duplicate for fast local reads)             │
+│                                               │
+│  User 50M ──connected──&gt; User 250M           │
+│    Stored on Shard 0 AND Shard 2             │
+└──────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>2. Caching Layers</h3>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────┐
+│  L1: In-process LRU (node-lru-cache)         │
+│      - Hot user profiles, 10K entries         │
+│      - TTL: 60 seconds                        │
+│                                               │
+│  L2: Redis Cluster                            │
+│      - Friend lists as sorted sets            │
+│      - Mutual connection results              │
+│      - Suggestion lists (pre-computed)        │
+│      - TTL: 5-30 minutes                      │
+│                                               │
+│  L3: Database (PostgreSQL / Neo4j)            │
+│      - Source of truth                        │
+└──────────────────────────────────────────────┘
+</code></pre></div>
+
+<h3>3. Pre-computation for Suggestions</h3>
+<p>Friend suggestions are expensive to compute in real-time. Use a batch pipeline:</p>
+<div class="highlight"><pre><span></span><code>┌─────────────┐     ┌───────────────────┐     ┌──────────────┐
+│ Scheduled   │────&gt;│ Spark / Worker    │────&gt;│ Redis / DB   │
+│ Cron Job    │     │ Compute FoF for   │     │ Store top    │
+│ (hourly)    │     │ each active user  │     │ 50 suggest.  │
+└─────────────┘     └───────────────────┘     └──────────────┘
+</code></pre></div>
+
+<h3>4. Bidirectional BFS for Degree of Separation</h3>
+<p>Instead of a single BFS from user A, run BFS from both A and B simultaneously:</p>
+<div class="highlight"><pre><span></span><code>User A ──&gt; BFS layer 1 ──&gt; BFS layer 2
+                                  ↕  (meet in the middle)
+User B ──&gt; BFS layer 1 ──&gt; BFS layer 2
+
+This reduces traversal from O(b^d) to O(b^(d/2)) where b = branching factor
+For b=500, d=3: single BFS = 125M nodes, bidirectional = ~35K nodes
+</code></pre></div>
+
+<h2>Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Option A</th>
+<th>Option B</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Storage</strong></td>
+<td>PostgreSQL adjacency table</td>
+<td>Neo4j graph DB</td>
+</tr>
+<tr>
+<td></td>
+<td>Familiar, mature, SQL joins</td>
+<td>Native graph traversal, Cypher</td>
+</tr>
+<tr>
+<td></td>
+<td>Struggles with 3+ degree queries</td>
+<td>Purpose-built for path queries</td>
+</tr>
+<tr>
+<td><strong>Friend list</strong></td>
+<td>Store both directions</td>
+<td>Store canonical (user1 &lt; user2)</td>
+</tr>
+<tr>
+<td></td>
+<td>2x storage, O(1) lookup per user</td>
+<td>1x storage, needs UNION query</td>
+</tr>
+<tr>
+<td><strong>Suggestions</strong></td>
+<td>Real-time computation</td>
+<td>Pre-computed batch</td>
+</tr>
+<tr>
+<td></td>
+<td>Always fresh, high latency</td>
+<td>Stale up to 1hr, fast reads</td>
+</tr>
+<tr>
+<td><strong>Sharding</strong></td>
+<td>Hash-based (user_id)</td>
+<td>Social-cluster-based</td>
+</tr>
+<tr>
+<td></td>
+<td>Even distribution, cross-shard edges</td>
+<td>Fewer cross-shard edges, uneven</td>
+</tr>
+<tr>
+<td><strong>Mutual friends</strong></td>
+<td>SQL JOIN at query time</td>
+<td>Redis ZINTERSTORE</td>
+</tr>
+<tr>
+<td></td>
+<td>No extra storage, slower</td>
+<td>Redis memory cost, sub-ms</td>
+</tr>
+</tbody>
+</table>
+<h2>Summary</h2>
+<p>A social graph system at scale requires a hybrid approach: PostgreSQL for the source of truth edge storage with a denormalized adjacency list for fast single-hop queries, Redis sorted sets for mutual connection computation and caching, and optionally a graph database like Neo4j for complex multi-hop traversals. Friend suggestions should be pre-computed in batch. Sharding by user_id with cross-shard edge replication keeps reads local. Bidirectional BFS dramatically reduces the cost of degree-of-separation queries.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build an Adjacency List Service</div>
+                    <div class="exercise-desc"><p>Implement a Node.js service with Prisma that stores a social graph as an adjacency list in PostgreSQL. Support adding connections, removing connections, and listing a user's friends with cursor-based pagination.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Store edges in both directions (user_id, friend_id) for O(1) lookup. Use a transaction to insert both rows atomically.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Redis Mutual Friends</div>
+                    <div class="exercise-desc"><p>Load each user's friend list into a Redis sorted set (ZADD). Implement a mutual friends endpoint using ZINTERSTORE. Benchmark it against a pure SQL JOIN approach for users with 500+ connections.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use ioredis pipeline to batch-load friend sets. Compare execution time with console.time for both approaches.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Bidirectional BFS</div>
+                    <div class="exercise-desc"><p>Implement a bidirectional BFS algorithm in JavaScript that finds the shortest path between two users in an in-memory graph of 10,000 nodes. Compare its performance against a standard BFS.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Maintain two visited sets expanding from each end. At each step, expand the smaller frontier. When frontiers overlap, you have found the shortest path.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Friend Suggestion Pipeline</div>
+                    <div class="exercise-desc"><p>Build a BullMQ worker that pre-computes friend-of-friend suggestions for each user. Store the top 50 suggestions in Redis. Expose an API that reads from this cache with a fallback to live computation.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Process users in batches of 1000. Use the SQL friends-of-friends query with COUNT and GROUP BY to rank suggestions.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Mutual friends query takes 5+ seconds for users with many connections</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> SQL JOIN between two large adjacency lists is O(n*m) without proper indexing, and popular users (influencers) can have millions of connections.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use Redis sorted sets with ZINTERSTORE for sub-millisecond set intersection. For extremely popular users, pre-compute and cache mutual friend lists for the most common pairs. Add a composite index on (user_id, friend_id) for the SQL fallback path.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Friend suggestion computation overloads the database during peak hours</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Computing friends-of-friends in real-time requires multiple JOINs across millions of rows, creating heavy read load on the primary database.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Move suggestion computation to an offline batch pipeline that runs during off-peak hours. Use read replicas for the computation. Store results in Redis with a 1-hour TTL. Serve suggestions from cache with a fallback to a simpler algorithm (e.g., same company/school) when cache is cold.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Adding a connection is slow because it requires updating multiple stores</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> A single connection add must write to the connections table, adjacency list (both directions), invalidate caches for both users, update suggestion caches, and update Elasticsearch.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Make the critical path synchronous (adjacency list insert + cache invalidation) and push secondary updates (suggestions, search index) to a message queue (BullMQ). Return 201 immediately after the database write. Process secondary effects asynchronously.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://www.usenix.org/conference/atc13/technical-sessions/presentation/bronson" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag paper">paper</div>
+                    <div class="resource-title">TAO: Facebook's Distributed Data Store for the Social Graph</div>
+                    
+                    <div class="resource-note">The paper behind Facebook's social graph storage system handling billions of reads/sec</div>
+                    
+                </a>
+                
+                <a href="https://neo4j.com/docs/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Neo4j Graph Database Documentation</div>
+                    
+                    <div class="resource-note">Getting started with graph databases and the Cypher query language</div>
+                    
+                </a>
+                
+                <a href="https://engineering.linkedin.com/blog/2020/the-evolution-of-linkedin-s-data-infrastructure" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">LinkedIn's Social Graph Infrastructure</div>
+                    
+                    <div class="resource-note">How LinkedIn evolved its graph infrastructure to serve 900M+ members</div>
+                    
+                </a>
+                
+                <a href="https://www.designgurus.io/course-play/grokking-the-system-design-interview" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag course">course</div>
+                    <div class="resource-title">System Design Interview — Social Graph</div>
+                    
+                    <div class="resource-note">Structured walkthrough of the social graph design problem</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <span></span>
+            
+            
+            <a href="/backend-learning/lesson/9.5.2-js.html" class="btn">Design a Ride-Sharing Service (Uber) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

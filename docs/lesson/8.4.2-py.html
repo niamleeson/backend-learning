@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Upload Security and Content Validation - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-py.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-py.html">Security & Reliability</a> &rsaquo;
+            Input Validation & Security
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.4.2</span>
+                <span>~2h</span>
+            </div>
+            <h1>File Upload Security and Content Validation</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of file upload validation like airport security screening. You do not just check the label on a suitcase (the file extension) — you X-ray the contents (magic bytes), run it through chemical detection (antivirus), and verify the passenger's identity (access control). Any single check can be fooled, but layering them together makes smuggling contraband through the system far more difficult.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>File Upload Security and Content Validation</h1>
+<p>File uploads are one of the most dangerous features you can add to a web application. Every uploaded file is essentially untrusted user input delivered as a binary payload, and the consequences of mishandling it range from data breaches to full server compromise. In this lesson, we will systematically explore the attack surface of file uploads, learn how to validate file content at multiple layers, and build secure upload implementations in both Flask and FastAPI.</p>
+<h2>The Attack Surface: Why File Uploads Are Dangerous</h2>
+<p>When a user uploads a file, your server must answer several critical questions: What type of file is it? Is the content safe? Where should it be stored? How will it be served back? A mistake in any of these areas can be catastrophic.</p>
+<p>Consider what happens when your application accepts a file and places it on disk. If an attacker can control the filename, they might write to arbitrary locations. If the file is served back without proper headers, a browser might execute it as code. If the file content is processed by a vulnerable library, the server itself could be compromised.</p>
+<h2>Attack Vector 1: Path Traversal</h2>
+<p>Path traversal attacks exploit insufficient filename sanitization. When a user uploads a file named <code>../../../etc/cron.d/backdoor</code>, a naive implementation that concatenates the upload directory with the user-supplied filename could write outside the intended directory.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># VULNERABLE: Never do this</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">save_upload_vulnerable</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">upload_dir</span><span class="o">=</span><span class="s1">&#39;/var/uploads&#39;</span><span class="p">):</span>
+    <span class="n">filepath</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">upload_dir</span><span class="p">,</span> <span class="n">filename</span><span class="p">)</span>
+    <span class="c1"># If filename is &quot;../../etc/cron.d/malicious&quot;, filepath becomes</span>
+    <span class="c1"># /var/uploads/../../etc/cron.d/malicious =&gt; /etc/cron.d/malicious</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">filepath</span><span class="p">,</span> <span class="s1">&#39;wb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+</code></pre></div>
+
+<p>The fix involves stripping directory components and generating safe filenames:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">uuid</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">werkzeug.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">secure_filename</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">save_upload_safe</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">upload_dir</span><span class="o">=</span><span class="s1">&#39;/var/uploads&#39;</span><span class="p">):</span>
+    <span class="c1"># secure_filename strips path separators and dangerous characters</span>
+    <span class="n">safe_name</span> <span class="o">=</span> <span class="n">secure_filename</span><span class="p">(</span><span class="n">filename</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">safe_name</span><span class="p">:</span>
+        <span class="n">safe_name</span> <span class="o">=</span> <span class="s1">&#39;unnamed&#39;</span>
+
+    <span class="c1"># Even better: generate a random name and store the original separately</span>
+    <span class="n">ext</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">splitext</span><span class="p">(</span><span class="n">safe_name</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="n">stored_name</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">uuid</span><span class="o">.</span><span class="n">uuid4</span><span class="p">()</span><span class="o">.</span><span class="n">hex</span><span class="si">}{</span><span class="n">ext</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="n">filepath</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">upload_dir</span><span class="p">,</span> <span class="n">stored_name</span><span class="p">)</span>
+
+    <span class="c1"># Final safety check: ensure the resolved path is within upload_dir</span>
+    <span class="n">real_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">realpath</span><span class="p">(</span><span class="n">filepath</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">real_path</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">realpath</span><span class="p">(</span><span class="n">upload_dir</span><span class="p">)):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;Path traversal detected&quot;</span><span class="p">)</span>
+
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">filepath</span><span class="p">,</span> <span class="s1">&#39;wb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">stored_name</span>
+</code></pre></div>
+
+<h2>Attack Vector 2: File Type Confusion</h2>
+<p>Attackers frequently disguise malicious files by changing extensions or crafting polyglot files that are simultaneously valid in multiple formats. A file can be a valid JPEG and also contain embedded PHP code. If your server determines the file type solely by extension, it will miss these attacks entirely.</p>
+<p>There are three layers of file type identification, and each alone is insufficient:</p>
+<p><strong>1. File Extension:</strong> Trivially spoofed. A <code>.jpg</code> file can contain anything.</p>
+<p><strong>2. MIME Type (Content-Type header):</strong> Supplied by the client and equally trivial to forge.</p>
+<p><strong>3. Magic Bytes (File Signatures):</strong> The first bytes of a file that identify its format. JPEG files start with <code>FF D8 FF</code>, PNG files with <code>89 50 4E 47</code>. This is the most reliable method but can still be defeated by polyglot files.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">magic</span>  <span class="c1"># python-magic library</span>
+
+<span class="n">FILE_SIGNATURES</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s1">&#39;image/jpeg&#39;</span><span class="p">:</span> <span class="p">[</span><span class="sa">b</span><span class="s1">&#39;</span><span class="se">\xff\xd8\xff</span><span class="s1">&#39;</span><span class="p">],</span>
+    <span class="s1">&#39;image/png&#39;</span><span class="p">:</span> <span class="p">[</span><span class="sa">b</span><span class="s1">&#39;</span><span class="se">\x89</span><span class="s1">PNG</span><span class="se">\r\n\x1a\n</span><span class="s1">&#39;</span><span class="p">],</span>
+    <span class="s1">&#39;image/gif&#39;</span><span class="p">:</span> <span class="p">[</span><span class="sa">b</span><span class="s1">&#39;GIF87a&#39;</span><span class="p">,</span> <span class="sa">b</span><span class="s1">&#39;GIF89a&#39;</span><span class="p">],</span>
+    <span class="s1">&#39;application/pdf&#39;</span><span class="p">:</span> <span class="p">[</span><span class="sa">b</span><span class="s1">&#39;%PDF&#39;</span><span class="p">],</span>
+<span class="p">}</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_file_type</span><span class="p">(</span><span class="n">file_data</span><span class="p">:</span> <span class="nb">bytes</span><span class="p">,</span> <span class="n">claimed_extension</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> 
+                        <span class="n">allowed_types</span><span class="p">:</span> <span class="nb">set</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Multi-layer file type validation.&quot;&quot;&quot;</span>
+
+    <span class="c1"># Layer 1: Check extension against allowlist</span>
+    <span class="n">ext_to_mime</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s1">&#39;.jpg&#39;</span><span class="p">:</span> <span class="s1">&#39;image/jpeg&#39;</span><span class="p">,</span> <span class="s1">&#39;.jpeg&#39;</span><span class="p">:</span> <span class="s1">&#39;image/jpeg&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;.png&#39;</span><span class="p">:</span> <span class="s1">&#39;image/png&#39;</span><span class="p">,</span> <span class="s1">&#39;.gif&#39;</span><span class="p">:</span> <span class="s1">&#39;image/gif&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;.pdf&#39;</span><span class="p">:</span> <span class="s1">&#39;application/pdf&#39;</span><span class="p">,</span>
+    <span class="p">}</span>
+    <span class="n">ext</span> <span class="o">=</span> <span class="n">claimed_extension</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">ext</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">ext_to_mime</span> <span class="ow">or</span> <span class="n">ext_to_mime</span><span class="p">[</span><span class="n">ext</span><span class="p">]</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">allowed_types</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+
+    <span class="c1"># Layer 2: Check magic bytes using libmagic</span>
+    <span class="n">detected_mime</span> <span class="o">=</span> <span class="n">magic</span><span class="o">.</span><span class="n">from_buffer</span><span class="p">(</span><span class="n">file_data</span><span class="p">[:</span><span class="mi">2048</span><span class="p">],</span> <span class="n">mime</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">detected_mime</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">allowed_types</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+
+    <span class="c1"># Layer 3: Verify magic bytes match the claimed extension</span>
+    <span class="k">if</span> <span class="n">ext_to_mime</span><span class="p">[</span><span class="n">ext</span><span class="p">]</span> <span class="o">!=</span> <span class="n">detected_mime</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>  <span class="c1"># Extension says JPEG but content is PNG</span>
+
+    <span class="c1"># Layer 4: Check file signatures manually as a second opinion</span>
+    <span class="n">expected_mime</span> <span class="o">=</span> <span class="n">ext_to_mime</span><span class="p">[</span><span class="n">ext</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">expected_mime</span> <span class="ow">in</span> <span class="n">FILE_SIGNATURES</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">any</span><span class="p">(</span><span class="n">file_data</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="n">sig</span><span class="p">)</span> 
+                   <span class="k">for</span> <span class="n">sig</span> <span class="ow">in</span> <span class="n">FILE_SIGNATURES</span><span class="p">[</span><span class="n">expected_mime</span><span class="p">]):</span>
+            <span class="k">return</span> <span class="kc">False</span>
+
+    <span class="k">return</span> <span class="kc">True</span>
+</code></pre></div>
+
+<h2>Attack Vector 3: Zip Bombs and Decompression Attacks</h2>
+<p>A zip bomb is a small compressed file that expands to enormous size when decompressed. The classic <code>42.zip</code> is 42 kilobytes but expands to 4.5 petabytes through nested layers of compression. If your application unzips uploaded files, you must guard against this.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">zipfile</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">io</span>
+
+<span class="n">MAX_TOTAL_SIZE</span> <span class="o">=</span> <span class="mi">100</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span>  <span class="c1"># 100 MB</span>
+<span class="n">MAX_FILES</span> <span class="o">=</span> <span class="mi">1000</span>
+<span class="n">MAX_COMPRESSION_RATIO</span> <span class="o">=</span> <span class="mi">50</span>  <span class="c1"># Flag if compressed size * 50 &lt; decompressed</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">safe_extract_zip</span><span class="p">(</span><span class="n">zip_data</span><span class="p">:</span> <span class="nb">bytes</span><span class="p">,</span> <span class="n">extract_dir</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Safely extract a zip file with size and ratio limits.&quot;&quot;&quot;</span>
+    <span class="n">extracted_files</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">total_size</span> <span class="o">=</span> <span class="mi">0</span>
+
+    <span class="k">with</span> <span class="n">zipfile</span><span class="o">.</span><span class="n">ZipFile</span><span class="p">(</span><span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">(</span><span class="n">zip_data</span><span class="p">))</span> <span class="k">as</span> <span class="n">zf</span><span class="p">:</span>
+        <span class="n">file_list</span> <span class="o">=</span> <span class="n">zf</span><span class="o">.</span><span class="n">infolist</span><span class="p">()</span>
+
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">file_list</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">MAX_FILES</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Too many files in archive: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">file_list</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+        <span class="k">for</span> <span class="n">info</span> <span class="ow">in</span> <span class="n">file_list</span><span class="p">:</span>
+            <span class="c1"># Check for path traversal in zip entries</span>
+            <span class="k">if</span> <span class="n">info</span><span class="o">.</span><span class="n">filename</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="s1">&#39;..&#39;</span> <span class="ow">in</span> <span class="n">info</span><span class="o">.</span><span class="n">filename</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Dangerous path in zip: </span><span class="si">{</span><span class="n">info</span><span class="o">.</span><span class="n">filename</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+            <span class="c1"># Check compression ratio (zip bomb detection)</span>
+            <span class="k">if</span> <span class="n">info</span><span class="o">.</span><span class="n">compress_size</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="n">ratio</span> <span class="o">=</span> <span class="n">info</span><span class="o">.</span><span class="n">file_size</span> <span class="o">/</span> <span class="n">info</span><span class="o">.</span><span class="n">compress_size</span>
+                <span class="k">if</span> <span class="n">ratio</span> <span class="o">&gt;</span> <span class="n">MAX_COMPRESSION_RATIO</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">&quot;Suspicious compression ratio </span><span class="si">{</span><span class="n">ratio</span><span class="si">:</span><span class="s2">.1f</span><span class="si">}</span><span class="s2"> &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;for </span><span class="si">{</span><span class="n">info</span><span class="o">.</span><span class="n">filename</span><span class="si">}</span><span class="s2">&quot;</span>
+                    <span class="p">)</span>
+
+            <span class="n">total_size</span> <span class="o">+=</span> <span class="n">info</span><span class="o">.</span><span class="n">file_size</span>
+            <span class="k">if</span> <span class="n">total_size</span> <span class="o">&gt;</span> <span class="n">MAX_TOTAL_SIZE</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;Total extracted size exceeds limit&quot;</span><span class="p">)</span>
+
+            <span class="n">zf</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">info</span><span class="p">,</span> <span class="n">extract_dir</span><span class="p">)</span>
+            <span class="n">extracted_files</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">info</span><span class="o">.</span><span class="n">filename</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">extracted_files</span>
+</code></pre></div>
+
+<h2>Attack Vector 4: XXE in Uploaded XML and SVG</h2>
+<p>XML External Entity (XXE) attacks exploit XML parsers that process external entity declarations. SVG files are XML-based, so an uploaded SVG can contain XXE payloads that read server files or make outbound requests:</p>
+<div class="highlight"><pre><span></span><code><span class="cp">&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&gt;</span>
+<span class="cp">&lt;!DOCTYPE svg [</span>
+<span class="cp">  &lt;!ENTITY xxe SYSTEM &quot;file:///etc/passwd&quot;&gt;</span>
+]&gt;
+<span class="nt">&lt;svg</span><span class="w"> </span><span class="na">xmlns=</span><span class="s">&quot;http://www.w3.org/2000/svg&quot;</span><span class="nt">&gt;</span>
+<span class="w">  </span><span class="nt">&lt;text&gt;</span><span class="ni">&amp;xxe;</span><span class="nt">&lt;/text&gt;</span>
+<span class="nt">&lt;/svg&gt;</span>
+</code></pre></div>
+
+<p>Always use a safe XML parser when processing uploaded XML or SVG:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">defusedxml.ElementTree</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">ET</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">safe_parse_svg</span><span class="p">(</span><span class="n">svg_data</span><span class="p">:</span> <span class="nb">bytes</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Parse SVG safely, rejecting XXE attempts.&quot;&quot;&quot;</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="c1"># defusedxml blocks external entities by default</span>
+        <span class="n">tree</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">fromstring</span><span class="p">(</span><span class="n">svg_data</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">True</span>
+    <span class="k">except</span> <span class="n">ET</span><span class="o">.</span><span class="n">ParseError</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>  <span class="c1"># Catches DTD/entity errors from defusedxml</span>
+        <span class="k">return</span> <span class="kc">False</span>
+</code></pre></div>
+
+<h2>Attack Vector 5: Malicious Image Metadata and ImageTragick</h2>
+<p>Images can carry malicious payloads in EXIF metadata, IPTC data, or XMP data. More critically, the ImageMagick library (widely used for image processing) had a devastating vulnerability known as ImageTragick (CVE-2016-3714) that allowed remote code execution through crafted image files:</p>
+<div class="highlight"><pre><span></span><code># A malicious MVG file that exploits ImageTragick
+push graphic-context
+viewbox 0 0 640 480
+fill &#39;url(https://example.com/image.jpg&quot;|ls &quot;-la)&#39;
+pop graphic-context
+</code></pre></div>
+
+<p>Defenses include stripping metadata, using safe processing libraries, and applying a security policy:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">PIL</span><span class="w"> </span><span class="kn">import</span> <span class="n">Image</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">io</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">sanitize_image</span><span class="p">(</span><span class="n">image_data</span><span class="p">:</span> <span class="nb">bytes</span><span class="p">,</span> <span class="n">max_dimensions</span><span class="o">=</span><span class="p">(</span><span class="mi">4096</span><span class="p">,</span> <span class="mi">4096</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="nb">bytes</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Re-encode image to strip metadata and validate content.&quot;&quot;&quot;</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">img</span> <span class="o">=</span> <span class="n">Image</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">(</span><span class="n">image_data</span><span class="p">))</span>
+
+        <span class="c1"># Validate dimensions to prevent decompression bombs</span>
+        <span class="c1"># PIL has a built-in check, but we add explicit limits</span>
+        <span class="k">if</span> <span class="n">img</span><span class="o">.</span><span class="n">size</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&gt;</span> <span class="n">max_dimensions</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="ow">or</span> <span class="n">img</span><span class="o">.</span><span class="n">size</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;</span> <span class="n">max_dimensions</span><span class="p">[</span><span class="mi">1</span><span class="p">]:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Image too large: </span><span class="si">{</span><span class="n">img</span><span class="o">.</span><span class="n">size</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+        <span class="c1"># Check pixel count (decompression bomb protection)</span>
+        <span class="n">pixel_count</span> <span class="o">=</span> <span class="n">img</span><span class="o">.</span><span class="n">size</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="n">img</span><span class="o">.</span><span class="n">size</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">pixel_count</span> <span class="o">&gt;</span> <span class="mi">89_000_000</span><span class="p">:</span>  <span class="c1"># ~89 megapixels</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;Image pixel count too high&quot;</span><span class="p">)</span>
+
+        <span class="c1"># Re-encode to strip all metadata</span>
+        <span class="n">output</span> <span class="o">=</span> <span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">()</span>
+        <span class="c1"># Convert to RGB if necessary (strips alpha for JPEG)</span>
+        <span class="k">if</span> <span class="n">img</span><span class="o">.</span><span class="n">mode</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;RGB&#39;</span><span class="p">,</span> <span class="s1">&#39;L&#39;</span><span class="p">):</span>
+            <span class="n">img</span> <span class="o">=</span> <span class="n">img</span><span class="o">.</span><span class="n">convert</span><span class="p">(</span><span class="s1">&#39;RGB&#39;</span><span class="p">)</span>
+        <span class="n">img</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">output</span><span class="p">,</span> <span class="nb">format</span><span class="o">=</span><span class="s1">&#39;JPEG&#39;</span><span class="p">,</span> <span class="n">quality</span><span class="o">=</span><span class="mi">85</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">output</span><span class="o">.</span><span class="n">getvalue</span><span class="p">()</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Invalid image: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2>File Size Limits: Defense in Depth</h2>
+<p>File size limits must be enforced at multiple layers:</p>
+<ol>
+<li><strong>Web server level:</strong> Configure Nginx or Apache to reject oversized requests before they reach your application.</li>
+<li><strong>Application framework level:</strong> Set maximum content length in your framework.</li>
+<li><strong>Application logic level:</strong> Check size before processing.</li>
+<li><strong>Storage level:</strong> Set quotas per user.</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="c1"># Nginx: limit upload size</span>
+<span class="k">client_max_body_size</span><span class="w"> </span><span class="mi">10m</span><span class="p">;</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1"># Flask: limit upload size</span>
+<span class="n">app</span><span class="o">.</span><span class="n">config</span><span class="p">[</span><span class="s1">&#39;MAX_CONTENT_LENGTH&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="mi">10</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span>  <span class="c1"># 10 MB</span>
+</code></pre></div>
+
+<h2>Secure Storage Patterns</h2>
+<h3>Pattern 1: Local Storage Outside Webroot</h3>
+<p>Never store uploaded files in a directory served directly by your web server. Store them outside the webroot and serve them through your application:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">flask</span><span class="w"> </span><span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">send_file</span><span class="p">,</span> <span class="n">abort</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="n">UPLOAD_DIR</span> <span class="o">=</span> <span class="s1">&#39;/var/app-data/uploads&#39;</span>  <span class="c1"># Outside webroot</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s1">&#39;/files/&lt;file_id&gt;&#39;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">serve_file</span><span class="p">(</span><span class="n">file_id</span><span class="p">):</span>
+    <span class="c1"># Look up file metadata from database</span>
+    <span class="n">file_record</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">get_file</span><span class="p">(</span><span class="n">file_id</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">file_record</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">file_record</span><span class="o">.</span><span class="n">is_accessible_by</span><span class="p">(</span><span class="n">current_user</span><span class="p">):</span>
+        <span class="n">abort</span><span class="p">(</span><span class="mi">404</span><span class="p">)</span>
+
+    <span class="n">filepath</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">UPLOAD_DIR</span><span class="p">,</span> <span class="n">file_record</span><span class="o">.</span><span class="n">stored_name</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">send_file</span><span class="p">(</span>
+        <span class="n">filepath</span><span class="p">,</span>
+        <span class="n">mimetype</span><span class="o">=</span><span class="n">file_record</span><span class="o">.</span><span class="n">content_type</span><span class="p">,</span>
+        <span class="n">as_attachment</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>  <span class="c1"># Forces download, prevents inline execution</span>
+        <span class="n">download_name</span><span class="o">=</span><span class="n">file_record</span><span class="o">.</span><span class="n">original_name</span>  <span class="c1"># Safe original name</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<h3>Pattern 2: S3 with Signed URLs</h3>
+<p>Cloud storage with pre-signed URLs is the gold standard for file upload security. The file never touches your application server, and access is controlled through time-limited signed URLs:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">boto3</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">botocore.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">Config</span>
+
+<span class="n">s3_client</span> <span class="o">=</span> <span class="n">boto3</span><span class="o">.</span><span class="n">client</span><span class="p">(</span>
+    <span class="s1">&#39;s3&#39;</span><span class="p">,</span>
+    <span class="n">config</span><span class="o">=</span><span class="n">Config</span><span class="p">(</span><span class="n">signature_version</span><span class="o">=</span><span class="s1">&#39;s3v4&#39;</span><span class="p">),</span>
+    <span class="n">region_name</span><span class="o">=</span><span class="s1">&#39;us-east-1&#39;</span>
+<span class="p">)</span>
+
+<span class="n">BUCKET_NAME</span> <span class="o">=</span> <span class="s1">&#39;myapp-uploads&#39;</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">generate_upload_url</span><span class="p">(</span><span class="n">file_key</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content_type</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> 
+                         <span class="n">max_size</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">10_485_760</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Generate a pre-signed URL for direct-to-S3 upload.&quot;&quot;&quot;</span>
+    <span class="n">presigned_post</span> <span class="o">=</span> <span class="n">s3_client</span><span class="o">.</span><span class="n">generate_presigned_post</span><span class="p">(</span>
+        <span class="n">Bucket</span><span class="o">=</span><span class="n">BUCKET_NAME</span><span class="p">,</span>
+        <span class="n">Key</span><span class="o">=</span><span class="n">file_key</span><span class="p">,</span>
+        <span class="n">Fields</span><span class="o">=</span><span class="p">{</span>
+            <span class="s1">&#39;Content-Type&#39;</span><span class="p">:</span> <span class="n">content_type</span><span class="p">,</span>
+        <span class="p">},</span>
+        <span class="n">Conditions</span><span class="o">=</span><span class="p">[</span>
+            <span class="p">[</span><span class="s1">&#39;content-length-range&#39;</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">max_size</span><span class="p">],</span>
+            <span class="p">[</span><span class="s1">&#39;eq&#39;</span><span class="p">,</span> <span class="s1">&#39;$Content-Type&#39;</span><span class="p">,</span> <span class="n">content_type</span><span class="p">],</span>
+        <span class="p">],</span>
+        <span class="n">ExpiresIn</span><span class="o">=</span><span class="mi">300</span>  <span class="c1"># URL valid for 5 minutes</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">presigned_post</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">generate_download_url</span><span class="p">(</span><span class="n">file_key</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">original_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Generate a pre-signed download URL with safe headers.&quot;&quot;&quot;</span>
+    <span class="n">url</span> <span class="o">=</span> <span class="n">s3_client</span><span class="o">.</span><span class="n">generate_presigned_url</span><span class="p">(</span>
+        <span class="s1">&#39;get_object&#39;</span><span class="p">,</span>
+        <span class="n">Params</span><span class="o">=</span><span class="p">{</span>
+            <span class="s1">&#39;Bucket&#39;</span><span class="p">:</span> <span class="n">BUCKET_NAME</span><span class="p">,</span>
+            <span class="s1">&#39;Key&#39;</span><span class="p">:</span> <span class="n">file_key</span><span class="p">,</span>
+            <span class="s1">&#39;ResponseContentDisposition&#39;</span><span class="p">:</span> 
+                <span class="sa">f</span><span class="s1">&#39;attachment; filename=&quot;</span><span class="si">{</span><span class="n">original_name</span><span class="si">}</span><span class="s1">&quot;&#39;</span><span class="p">,</span>
+            <span class="s1">&#39;ResponseContentType&#39;</span><span class="p">:</span> <span class="s1">&#39;application/octet-stream&#39;</span><span class="p">,</span>
+        <span class="p">},</span>
+        <span class="n">ExpiresIn</span><span class="o">=</span><span class="mi">3600</span>  <span class="c1"># 1 hour</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">url</span>
+</code></pre></div>
+
+<h2>Content-Disposition Headers</h2>
+<p>The <code>Content-Disposition</code> header controls whether the browser displays a file inline or forces a download. For user-uploaded content, always use <code>attachment</code> to prevent the browser from rendering potentially malicious content:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># DANGEROUS: allows browser to render uploaded HTML/SVG as a page</span>
+<span class="n">response</span><span class="o">.</span><span class="n">headers</span><span class="p">[</span><span class="s1">&#39;Content-Disposition&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="s1">&#39;inline&#39;</span>
+
+<span class="c1"># SAFE: forces download</span>
+<span class="n">response</span><span class="o">.</span><span class="n">headers</span><span class="p">[</span><span class="s1">&#39;Content-Disposition&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="s1">&#39;attachment; filename=&quot;report.pdf&quot;&#39;</span>
+
+<span class="c1"># Also set Content-Type explicitly to prevent sniffing</span>
+<span class="n">response</span><span class="o">.</span><span class="n">headers</span><span class="p">[</span><span class="s1">&#39;Content-Type&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="s1">&#39;application/octet-stream&#39;</span>
+<span class="n">response</span><span class="o">.</span><span class="n">headers</span><span class="p">[</span><span class="s1">&#39;X-Content-Type-Options&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="s1">&#39;nosniff&#39;</span>
+</code></pre></div>
+
+<h2>Antivirus Scanning</h2>
+<p>For production systems, integrate antivirus scanning using ClamAV:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">clamd</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">scan_file</span><span class="p">(</span><span class="n">file_data</span><span class="p">:</span> <span class="nb">bytes</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Scan file data with ClamAV. Returns True if clean.&quot;&quot;&quot;</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">cd</span> <span class="o">=</span> <span class="n">clamd</span><span class="o">.</span><span class="n">ClamdUnixSocket</span><span class="p">()</span>  <span class="c1"># Or ClamdNetworkSocket</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">cd</span><span class="o">.</span><span class="n">instream</span><span class="p">(</span><span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">(</span><span class="n">file_data</span><span class="p">))</span>
+        <span class="c1"># result looks like: {&#39;stream&#39;: (&#39;OK&#39;, None)} or </span>
+        <span class="c1"># {&#39;stream&#39;: (&#39;FOUND&#39;, &#39;Win.Trojan.Agent&#39;)}</span>
+        <span class="n">status</span> <span class="o">=</span> <span class="n">result</span><span class="p">[</span><span class="s1">&#39;stream&#39;</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">return</span> <span class="n">status</span> <span class="o">==</span> <span class="s1">&#39;OK&#39;</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="c1"># Fail closed: if scanning fails, reject the file</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;AV scan failed: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">False</span>
+</code></pre></div>
+
+<h2>Complete Secure Upload: Flask Implementation</h2>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">uuid</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">magic</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">hashlib</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">flask</span><span class="w"> </span><span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">jsonify</span><span class="p">,</span> <span class="n">send_file</span><span class="p">,</span> <span class="n">abort</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">werkzeug.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">secure_filename</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">PIL</span><span class="w"> </span><span class="kn">import</span> <span class="n">Image</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">io</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="n">app</span><span class="o">.</span><span class="n">config</span><span class="p">[</span><span class="s1">&#39;MAX_CONTENT_LENGTH&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="mi">10</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span>  <span class="c1"># 10 MB</span>
+
+<span class="n">UPLOAD_DIR</span> <span class="o">=</span> <span class="s1">&#39;/var/app-data/uploads&#39;</span>
+<span class="n">ALLOWED_TYPES</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;image/jpeg&#39;</span><span class="p">,</span> <span class="s1">&#39;image/png&#39;</span><span class="p">,</span> <span class="s1">&#39;image/gif&#39;</span><span class="p">}</span>
+<span class="n">ALLOWED_EXTENSIONS</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;.jpg&#39;</span><span class="p">,</span> <span class="s1">&#39;.jpeg&#39;</span><span class="p">,</span> <span class="s1">&#39;.png&#39;</span><span class="p">,</span> <span class="s1">&#39;.gif&#39;</span><span class="p">}</span>
+
+<span class="n">os</span><span class="o">.</span><span class="n">makedirs</span><span class="p">(</span><span class="n">UPLOAD_DIR</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s1">&#39;/upload&#39;</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;POST&#39;</span><span class="p">])</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">upload_file</span><span class="p">():</span>
+    <span class="k">if</span> <span class="s1">&#39;file&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">request</span><span class="o">.</span><span class="n">files</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s1">&#39;error&#39;</span><span class="p">:</span> <span class="s1">&#39;No file provided&#39;</span><span class="p">}),</span> <span class="mi">400</span>
+
+    <span class="n">file</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">files</span><span class="p">[</span><span class="s1">&#39;file&#39;</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">file</span><span class="o">.</span><span class="n">filename</span> <span class="o">==</span> <span class="s1">&#39;&#39;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s1">&#39;error&#39;</span><span class="p">:</span> <span class="s1">&#39;No filename&#39;</span><span class="p">}),</span> <span class="mi">400</span>
+
+    <span class="c1"># Step 1: Validate extension</span>
+    <span class="n">original_name</span> <span class="o">=</span> <span class="n">secure_filename</span><span class="p">(</span><span class="n">file</span><span class="o">.</span><span class="n">filename</span><span class="p">)</span>
+    <span class="n">ext</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">splitext</span><span class="p">(</span><span class="n">original_name</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">ext</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">ALLOWED_EXTENSIONS</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s1">&#39;error&#39;</span><span class="p">:</span> <span class="sa">f</span><span class="s1">&#39;Extension </span><span class="si">{</span><span class="n">ext</span><span class="si">}</span><span class="s1"> not allowed&#39;</span><span class="p">}),</span> <span class="mi">400</span>
+
+    <span class="c1"># Step 2: Read file data with size check</span>
+    <span class="n">file_data</span> <span class="o">=</span> <span class="n">file</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">file_data</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s1">&#39;error&#39;</span><span class="p">:</span> <span class="s1">&#39;Empty file&#39;</span><span class="p">}),</span> <span class="mi">400</span>
+
+    <span class="c1"># Step 3: Validate magic bytes</span>
+    <span class="n">detected_type</span> <span class="o">=</span> <span class="n">magic</span><span class="o">.</span><span class="n">from_buffer</span><span class="p">(</span><span class="n">file_data</span><span class="p">[:</span><span class="mi">2048</span><span class="p">],</span> <span class="n">mime</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">detected_type</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">ALLOWED_TYPES</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s1">&#39;error&#39;</span><span class="p">:</span> <span class="sa">f</span><span class="s1">&#39;File type </span><span class="si">{</span><span class="n">detected_type</span><span class="si">}</span><span class="s1"> not allowed&#39;</span><span class="p">}),</span> <span class="mi">400</span>
+
+    <span class="c1"># Step 4: Re-process image to strip metadata and validate content</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">img</span> <span class="o">=</span> <span class="n">Image</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">(</span><span class="n">file_data</span><span class="p">))</span>
+        <span class="n">img</span><span class="o">.</span><span class="n">verify</span><span class="p">()</span>  <span class="c1"># Verify it is a valid image</span>
+
+        <span class="c1"># Re-open after verify (verify can only be called once)</span>
+        <span class="n">img</span> <span class="o">=</span> <span class="n">Image</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">(</span><span class="n">file_data</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">img</span><span class="o">.</span><span class="n">size</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&gt;</span> <span class="mi">4096</span> <span class="ow">or</span> <span class="n">img</span><span class="o">.</span><span class="n">size</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;</span> <span class="mi">4096</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s1">&#39;error&#39;</span><span class="p">:</span> <span class="s1">&#39;Image dimensions too large&#39;</span><span class="p">}),</span> <span class="mi">400</span>
+
+        <span class="c1"># Re-encode to strip metadata</span>
+        <span class="n">clean_buffer</span> <span class="o">=</span> <span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">()</span>
+        <span class="n">output_format</span> <span class="o">=</span> <span class="s1">&#39;PNG&#39;</span> <span class="k">if</span> <span class="n">ext</span> <span class="o">==</span> <span class="s1">&#39;.png&#39;</span> <span class="k">else</span> <span class="s1">&#39;JPEG&#39;</span>
+        <span class="k">if</span> <span class="n">output_format</span> <span class="o">==</span> <span class="s1">&#39;JPEG&#39;</span> <span class="ow">and</span> <span class="n">img</span><span class="o">.</span><span class="n">mode</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;RGBA&#39;</span><span class="p">,</span> <span class="s1">&#39;P&#39;</span><span class="p">):</span>
+            <span class="n">img</span> <span class="o">=</span> <span class="n">img</span><span class="o">.</span><span class="n">convert</span><span class="p">(</span><span class="s1">&#39;RGB&#39;</span><span class="p">)</span>
+        <span class="n">img</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">clean_buffer</span><span class="p">,</span> <span class="nb">format</span><span class="o">=</span><span class="n">output_format</span><span class="p">,</span> <span class="n">quality</span><span class="o">=</span><span class="mi">85</span><span class="p">)</span>
+        <span class="n">clean_data</span> <span class="o">=</span> <span class="n">clean_buffer</span><span class="o">.</span><span class="n">getvalue</span><span class="p">()</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s1">&#39;error&#39;</span><span class="p">:</span> <span class="s1">&#39;Invalid image file&#39;</span><span class="p">}),</span> <span class="mi">400</span>
+
+    <span class="c1"># Step 5: Generate safe storage path</span>
+    <span class="n">file_hash</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">(</span><span class="n">clean_data</span><span class="p">)</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()[:</span><span class="mi">16</span><span class="p">]</span>
+    <span class="n">stored_name</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">uuid</span><span class="o">.</span><span class="n">uuid4</span><span class="p">()</span><span class="o">.</span><span class="n">hex</span><span class="si">}</span><span class="s2">_</span><span class="si">{</span><span class="n">file_hash</span><span class="si">}{</span><span class="n">ext</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="n">filepath</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">UPLOAD_DIR</span><span class="p">,</span> <span class="n">stored_name</span><span class="p">)</span>
+
+    <span class="c1"># Step 6: Final path traversal check</span>
+    <span class="n">real_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">realpath</span><span class="p">(</span><span class="n">filepath</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">real_path</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">realpath</span><span class="p">(</span><span class="n">UPLOAD_DIR</span><span class="p">)):</span>
+        <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s1">&#39;error&#39;</span><span class="p">:</span> <span class="s1">&#39;Invalid path&#39;</span><span class="p">}),</span> <span class="mi">400</span>
+
+    <span class="c1"># Step 7: Save file</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">filepath</span><span class="p">,</span> <span class="s1">&#39;wb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">clean_data</span><span class="p">)</span>
+
+    <span class="c1"># Step 8: Store metadata in database (pseudocode)</span>
+    <span class="c1"># db.save_file_record(stored_name, original_name, detected_type, len(clean_data))</span>
+
+    <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span>
+        <span class="s1">&#39;message&#39;</span><span class="p">:</span> <span class="s1">&#39;Upload successful&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;file_id&#39;</span><span class="p">:</span> <span class="n">stored_name</span><span class="p">,</span>
+        <span class="s1">&#39;size&#39;</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">clean_data</span><span class="p">)</span>
+    <span class="p">}),</span> <span class="mi">201</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">route</span><span class="p">(</span><span class="s1">&#39;/files/&lt;file_id&gt;&#39;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">download_file</span><span class="p">(</span><span class="n">file_id</span><span class="p">):</span>
+    <span class="n">safe_id</span> <span class="o">=</span> <span class="n">secure_filename</span><span class="p">(</span><span class="n">file_id</span><span class="p">)</span>
+    <span class="n">filepath</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">UPLOAD_DIR</span><span class="p">,</span> <span class="n">safe_id</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">filepath</span><span class="p">):</span>
+        <span class="n">abort</span><span class="p">(</span><span class="mi">404</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">send_file</span><span class="p">(</span>
+        <span class="n">filepath</span><span class="p">,</span>
+        <span class="n">as_attachment</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+        <span class="n">download_name</span><span class="o">=</span><span class="n">safe_id</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<h2>Complete Secure Upload: FastAPI Implementation</h2>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">uuid</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">magic</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">hashlib</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">fastapi</span><span class="w"> </span><span class="kn">import</span> <span class="n">FastAPI</span><span class="p">,</span> <span class="n">UploadFile</span><span class="p">,</span> <span class="n">HTTPException</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">fastapi.responses</span><span class="w"> </span><span class="kn">import</span> <span class="n">FileResponse</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">PIL</span><span class="w"> </span><span class="kn">import</span> <span class="n">Image</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">io</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">FastAPI</span><span class="p">()</span>
+
+<span class="n">UPLOAD_DIR</span> <span class="o">=</span> <span class="s1">&#39;/var/app-data/uploads&#39;</span>
+<span class="n">MAX_FILE_SIZE</span> <span class="o">=</span> <span class="mi">10</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span>
+<span class="n">ALLOWED_TYPES</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;image/jpeg&#39;</span><span class="p">,</span> <span class="s1">&#39;image/png&#39;</span><span class="p">,</span> <span class="s1">&#39;image/gif&#39;</span><span class="p">}</span>
+
+<span class="n">os</span><span class="o">.</span><span class="n">makedirs</span><span class="p">(</span><span class="n">UPLOAD_DIR</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s1">&#39;/upload&#39;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">upload_file</span><span class="p">(</span><span class="n">file</span><span class="p">:</span> <span class="n">UploadFile</span><span class="p">):</span>
+    <span class="c1"># Step 1: Read with size limit</span>
+    <span class="n">contents</span> <span class="o">=</span> <span class="k">await</span> <span class="n">file</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">contents</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">MAX_FILE_SIZE</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="mi">413</span><span class="p">,</span> <span class="s1">&#39;File too large&#39;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">contents</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="mi">400</span><span class="p">,</span> <span class="s1">&#39;Empty file&#39;</span><span class="p">)</span>
+
+    <span class="c1"># Step 2: Validate extension</span>
+    <span class="n">original</span> <span class="o">=</span> <span class="n">file</span><span class="o">.</span><span class="n">filename</span> <span class="ow">or</span> <span class="s1">&#39;unnamed&#39;</span>
+    <span class="n">ext</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">splitext</span><span class="p">(</span><span class="n">original</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">ext</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">{</span><span class="s1">&#39;.jpg&#39;</span><span class="p">,</span> <span class="s1">&#39;.jpeg&#39;</span><span class="p">,</span> <span class="s1">&#39;.png&#39;</span><span class="p">,</span> <span class="s1">&#39;.gif&#39;</span><span class="p">}:</span>
+        <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="mi">400</span><span class="p">,</span> <span class="sa">f</span><span class="s1">&#39;Extension </span><span class="si">{</span><span class="n">ext</span><span class="si">}</span><span class="s1"> not allowed&#39;</span><span class="p">)</span>
+
+    <span class="c1"># Step 3: Validate magic bytes</span>
+    <span class="n">detected</span> <span class="o">=</span> <span class="n">magic</span><span class="o">.</span><span class="n">from_buffer</span><span class="p">(</span><span class="n">contents</span><span class="p">[:</span><span class="mi">2048</span><span class="p">],</span> <span class="n">mime</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">detected</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">ALLOWED_TYPES</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="mi">400</span><span class="p">,</span> <span class="sa">f</span><span class="s1">&#39;Detected type </span><span class="si">{</span><span class="n">detected</span><span class="si">}</span><span class="s1"> not allowed&#39;</span><span class="p">)</span>
+
+    <span class="c1"># Step 4: Re-encode image</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">img</span> <span class="o">=</span> <span class="n">Image</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">(</span><span class="n">contents</span><span class="p">))</span>
+        <span class="n">img</span><span class="o">.</span><span class="n">verify</span><span class="p">()</span>
+        <span class="n">img</span> <span class="o">=</span> <span class="n">Image</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">(</span><span class="n">contents</span><span class="p">))</span>
+
+        <span class="k">if</span> <span class="n">img</span><span class="o">.</span><span class="n">size</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&gt;</span> <span class="mi">4096</span> <span class="ow">or</span> <span class="n">img</span><span class="o">.</span><span class="n">size</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;</span> <span class="mi">4096</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="mi">400</span><span class="p">,</span> <span class="s1">&#39;Image dimensions too large&#39;</span><span class="p">)</span>
+
+        <span class="n">buf</span> <span class="o">=</span> <span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">()</span>
+        <span class="n">fmt</span> <span class="o">=</span> <span class="s1">&#39;PNG&#39;</span> <span class="k">if</span> <span class="n">ext</span> <span class="o">==</span> <span class="s1">&#39;.png&#39;</span> <span class="k">else</span> <span class="s1">&#39;JPEG&#39;</span>
+        <span class="k">if</span> <span class="n">fmt</span> <span class="o">==</span> <span class="s1">&#39;JPEG&#39;</span> <span class="ow">and</span> <span class="n">img</span><span class="o">.</span><span class="n">mode</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;RGBA&#39;</span><span class="p">,</span> <span class="s1">&#39;P&#39;</span><span class="p">):</span>
+            <span class="n">img</span> <span class="o">=</span> <span class="n">img</span><span class="o">.</span><span class="n">convert</span><span class="p">(</span><span class="s1">&#39;RGB&#39;</span><span class="p">)</span>
+        <span class="n">img</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span> <span class="nb">format</span><span class="o">=</span><span class="n">fmt</span><span class="p">,</span> <span class="n">quality</span><span class="o">=</span><span class="mi">85</span><span class="p">)</span>
+        <span class="n">clean</span> <span class="o">=</span> <span class="n">buf</span><span class="o">.</span><span class="n">getvalue</span><span class="p">()</span>
+    <span class="k">except</span> <span class="n">HTTPException</span><span class="p">:</span>
+        <span class="k">raise</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="mi">400</span><span class="p">,</span> <span class="s1">&#39;Invalid image&#39;</span><span class="p">)</span>
+
+    <span class="c1"># Step 5: Store securely</span>
+    <span class="n">file_hash</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">(</span><span class="n">clean</span><span class="p">)</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()[:</span><span class="mi">16</span><span class="p">]</span>
+    <span class="n">stored</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">uuid</span><span class="o">.</span><span class="n">uuid4</span><span class="p">()</span><span class="o">.</span><span class="n">hex</span><span class="si">}</span><span class="s2">_</span><span class="si">{</span><span class="n">file_hash</span><span class="si">}{</span><span class="n">ext</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="n">path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">UPLOAD_DIR</span><span class="p">,</span> <span class="n">stored</span><span class="p">)</span>
+
+    <span class="n">real</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">realpath</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">real</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">realpath</span><span class="p">(</span><span class="n">UPLOAD_DIR</span><span class="p">)):</span>
+        <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="mi">400</span><span class="p">,</span> <span class="s1">&#39;Invalid path&#39;</span><span class="p">)</span>
+
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="s1">&#39;wb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">clean</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="p">{</span><span class="s1">&#39;file_id&#39;</span><span class="p">:</span> <span class="n">stored</span><span class="p">,</span> <span class="s1">&#39;size&#39;</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">clean</span><span class="p">)}</span>
+
+<span class="nd">@app</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;/files/</span><span class="si">{file_id}</span><span class="s1">&#39;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">download_file</span><span class="p">(</span><span class="n">file_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+    <span class="c1"># Sanitize: only allow alphanumeric, hyphens, underscores, dots</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">re</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="sa">r</span><span class="s1">&#39;^[a-zA-Z0-9_\-\.]+$&#39;</span><span class="p">,</span> <span class="n">file_id</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="mi">400</span><span class="p">,</span> <span class="s1">&#39;Invalid file ID&#39;</span><span class="p">)</span>
+
+    <span class="n">path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">UPLOAD_DIR</span><span class="p">,</span> <span class="n">file_id</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">path</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">HTTPException</span><span class="p">(</span><span class="mi">404</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">FileResponse</span><span class="p">(</span>
+        <span class="n">path</span><span class="p">,</span>
+        <span class="n">media_type</span><span class="o">=</span><span class="s1">&#39;application/octet-stream&#39;</span><span class="p">,</span>
+        <span class="n">headers</span><span class="o">=</span><span class="p">{</span>
+            <span class="s1">&#39;Content-Disposition&#39;</span><span class="p">:</span> <span class="sa">f</span><span class="s1">&#39;attachment; filename=&quot;</span><span class="si">{</span><span class="n">file_id</span><span class="si">}</span><span class="s1">&quot;&#39;</span><span class="p">,</span>
+            <span class="s1">&#39;X-Content-Type-Options&#39;</span><span class="p">:</span> <span class="s1">&#39;nosniff&#39;</span>
+        <span class="p">}</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<h2>Security Checklist for File Uploads</h2>
+<p>Before shipping file upload functionality, verify every item on this list:</p>
+<ol>
+<li><strong>Filename sanitization:</strong> Strip path components, generate random storage names.</li>
+<li><strong>Extension allowlist:</strong> Only permit known-safe extensions; never use a denylist.</li>
+<li><strong>Magic byte validation:</strong> Use libmagic to detect the true file type.</li>
+<li><strong>Cross-check consistency:</strong> Extension, MIME type, and magic bytes should all agree.</li>
+<li><strong>File size limits:</strong> Enforce at web server, framework, and application levels.</li>
+<li><strong>Image re-encoding:</strong> For image uploads, re-encode through Pillow to strip metadata.</li>
+<li><strong>Safe XML parsing:</strong> Use defusedxml for any XML or SVG processing.</li>
+<li><strong>Zip extraction limits:</strong> Check compression ratios, total size, and file count.</li>
+<li><strong>Storage isolation:</strong> Store files outside the webroot or in cloud storage.</li>
+<li><strong>Content-Disposition:</strong> Always serve user uploads as <code>attachment</code>.</li>
+<li><strong>X-Content-Type-Options:</strong> Set <code>nosniff</code> to prevent MIME sniffing.</li>
+<li><strong>Antivirus scanning:</strong> Integrate ClamAV or a cloud scanning service for production.</li>
+<li><strong>Access control:</strong> Verify the requesting user has permission to access each file.</li>
+<li><strong>Rate limiting:</strong> Prevent abuse through upload frequency and storage quota limits.</li>
+</ol>
+<p>File upload security is not a single check but a layered defense. Each validation catches attacks the others might miss. By combining filename sanitization, multi-layer type checking, content re-encoding, safe storage, and proper serving headers, you create a robust defense that can withstand sophisticated attacks.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Multi-Layer File Validator</div>
+                    <div class="exercise-desc"><p>Create a Python function called <code>validate_upload</code> that accepts raw file bytes and a claimed filename. It should: (1) check the extension against an allowlist of image types, (2) use python-magic to detect the true MIME type, (3) verify the extension and detected type are consistent, (4) attempt to open the file with Pillow and verify dimensions are under 4096x4096, and (5) return a dict with keys 'valid' (bool), 'detected_type' (str), and 'reason' (str if invalid). Write unit tests using crafted byte sequences that should pass and fail validation.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Start by defining your allowlists as dicts mapping extensions to MIME types. For test cases, use known magic byte sequences (e.g., b'\xff\xd8\xff' for JPEG) to craft minimal valid headers, and use mismatched combinations to test the cross-check logic.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement Safe Zip Extraction with Bomb Detection</div>
+                    <div class="exercise-desc"><p>Write a function that accepts a zip file as bytes and extracts it to a temporary directory with the following protections: (1) reject archives with more than 100 entries, (2) reject any single file larger than 50 MB uncompressed, (3) reject total extracted size over 200 MB, (4) reject compression ratios above 20:1, (5) reject entries with path traversal in filenames. Test it with a zip containing normal files and one with a nested '../' path.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use zipfile.ZipFile with infolist() to inspect entries before extracting. The ZipInfo object has compress_size and file_size attributes you can use to calculate the compression ratio without actually decompressing.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Secure S3 Upload API with Pre-Signed URLs</div>
+                    <div class="exercise-desc"><p>Build a FastAPI application with two endpoints: POST /upload-request that accepts a desired filename and content type, validates them, and returns a pre-signed S3 POST URL with size and type constraints; and GET /files/{file_id} that generates a pre-signed download URL with Content-Disposition set to attachment. Use localstack or moto for testing without real AWS credentials.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use boto3's generate_presigned_post with Conditions to enforce content-length-range and Content-Type on the S3 side. For testing, moto's mock_s3 decorator lets you create buckets and test pre-signed URL generation without any AWS connectivity.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">SVG Sanitizer with XXE Protection</div>
+                    <div class="exercise-desc"><p>Create an SVG upload endpoint that accepts SVG files, parses them with defusedxml to block XXE attacks, strips any <script> tags and event handler attributes (like onclick, onload), and re-serializes the cleaned SVG. Write tests with an SVG containing an XXE payload (&lt;!ENTITY&gt; declaration referencing file:///etc/passwd) and verify it is rejected.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use defusedxml.ElementTree for parsing — it will raise an exception on DTD and entity declarations by default. For stripping scripts, walk the element tree and remove any element in the SVG namespace with a local name of 'script', and remove any attribute whose name starts with 'on'.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Uploaded images display correctly in tests but fail validation in production with 'file type not detected' errors.</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> magic.MagicException or ImportError in production, or magic.from_buffer returning 'application/octet-stream' for all files.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The python-magic library has two variants: the 'python-magic' package (which wraps libmagic via ctypes) and the 'python-magic-bin' package (which bundles its own libmagic). In production, libmagic may not be installed on the system, or a different version of the python-magic package is installed that has an incompatible API.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Ensure libmagic is installed on your system (apt-get install libmagic1 on Debian, brew install libmagic on macOS). Pin the exact python-magic package version in your requirements. In Docker, add the libmagic system package to your Dockerfile. Alternatively, use the python-magic-bin package which bundles its own library.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Users can upload files successfully but receive 403 Forbidden when trying to download them from S3 pre-signed URLs.</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Pre-signed URLs are generated with a specific signature version and region. If the S3 bucket is in a different region than the client configuration, or if the server clock is skewed beyond the allowed tolerance (typically 15 minutes for SigV4), the signature validation fails. Additionally, bucket policies or CORS settings may block the request.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Ensure the boto3 client is configured with signature_version='s3v4' and the correct region_name matching the bucket's region. Verify server clock synchronization with NTP. Check that the S3 bucket CORS policy allows the requesting origin, and that bucket policies do not restrict access patterns that pre-signed URLs would generate.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>s3_client = boto3.client(
+    's3',
+    config=Config(signature_version='s3v4'),
+    region_name='us-east-1'  # Must match bucket region
+)</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Image re-encoding with Pillow raises errors or produces corrupted output for certain valid images.</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Pillow's verify() method consumes the image data stream, so subsequent operations on the same Image object fail or produce empty output. Additionally, converting RGBA or palette-mode images directly to JPEG without converting to RGB first causes errors because JPEG does not support transparency.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> After calling verify(), re-open the image from the original bytes using Image.open() on a fresh BytesIO. Before saving as JPEG, check the image mode and convert RGBA, P (palette), or LA images to RGB. For PNG output, RGBA is fine and should be preserved.
+                        </div>
+                        
+                        <div class="problem-code">
+                            <p>img = Image.open(io.BytesIO(raw_data))
+img.verify()  # Validates but consumes the stream</p>
+<h1>Must re-open after verify</h1>
+<p>img = Image.open(io.BytesIO(raw_data))
+if img.mode in ('RGBA', 'P', 'LA'):
+    img = img.convert('RGB')
+img.save(output, format='JPEG', quality=85)</p>
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">OWASP File Upload Cheat Sheet</div>
+                    
+                    <div class="resource-note">The definitive reference for file upload security, covering all major attack vectors and mitigations in a framework-agnostic way.</div>
+                    
+                </a>
+                
+                <a href="https://imagetragick.com/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">ImageTragick: Remote Code Execution through Image Uploads</div>
+                    
+                    <div class="resource-note">Detailed writeup of CVE-2016-3714 and related ImageMagick vulnerabilities that affected countless web applications.</div>
+                    
+                </a>
+                
+                <a href="https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">Pillow Security Documentation</div>
+                    
+                    <div class="resource-note">Covers decompression bomb protection, supported formats, and security considerations when processing images with Pillow.</div>
+                    
+                </a>
+                
+                <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag docs">docs</div>
+                    <div class="resource-title">AWS S3 Pre-Signed URLs Documentation</div>
+                    
+                    <div class="resource-note">Official AWS guide to generating and using pre-signed URLs for secure file upload and download without exposing credentials.</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/8.4.1-py.html" class="btn">&larr; Input Sanitization and Schema Validation</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-py.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

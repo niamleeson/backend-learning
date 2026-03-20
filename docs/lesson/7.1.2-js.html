@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SQL Injection: Attack Vectors and Prevention - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-7-js.html">Security & Reliability</a> &rsaquo;
+            Web Security
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">7.1.2</span>
+                <span>~2h</span>
+            </div>
+            <h1>SQL Injection: Attack Vectors and Prevention</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Imagine a bank teller who reads instructions from a slip of paper the customer fills out. SQL injection is like a customer writing 'withdraw $100 from account 123 and also transfer all money from every account to account 999' on the slip, and the teller blindly following every instruction. Parameterized queries are like giving the teller a pre-printed form with fixed instructions and blank fields -- no matter what the customer writes in the blanks, the teller only performs the pre-defined action.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>SQL Injection: Attack Vectors and Prevention</h1>
+<h2>What Is SQL Injection?</h2>
+<p>SQL injection (SQLi) is one of the oldest and most devastating web application vulnerabilities. It occurs when an attacker can insert or manipulate SQL statements through user-controlled input that gets incorporated into database queries. Despite being well-understood for over two decades, SQL injection remains in the OWASP Top 10 and continues to cause real-world breaches.</p>
+<p>The core problem is simple: treating user input as code instead of data.</p>
+<h2>How SQL Injection Works</h2>
+<div class="highlight"><pre><span></span><code>Normal Login Flow:
+
+User Input:  email = &quot;alice@example.com&quot;, password = &quot;secret123&quot;
+Built Query: SELECT * FROM users WHERE email = &#39;alice@example.com&#39; AND password = &#39;...&#39;
+Result:      Returns Alice&#39;s row (or nothing if password is wrong)
+
+
+SQL Injection Attack:
+
+User Input:  email = &quot;&#39; OR &#39;1&#39;=&#39;1&#39; --&quot;, password = &quot;anything&quot;
+Built Query: SELECT * FROM users WHERE email = &#39;&#39; OR &#39;1&#39;=&#39;1&#39; --&#39; AND password = &#39;...&#39;
+                                                   ^^^^^^^^^^  ^^
+                                                   Always true  Comment (ignores rest)
+Result:      Returns ALL users -- attacker bypasses authentication
+</code></pre></div>
+
+<p>The <code>--</code> is a SQL comment that causes the database to ignore the rest of the query, including the password check.</p>
+<h2>Types of SQL Injection</h2>
+<h3>1. Classic (In-Band) SQL Injection</h3>
+<p>The attacker gets results directly in the application response.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// VULNERABLE: String concatenation builds a dynamic query</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/users&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">search</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// If search = &quot;&#39;; DROP TABLE users; --&quot;</span>
+<span class="w">  </span><span class="c1">// The query becomes: SELECT * FROM users WHERE name = &#39;&#39;; DROP TABLE users; --&#39;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`SELECT * FROM users WHERE name = &#39;</span><span class="si">${</span><span class="nx">search</span><span class="si">}</span><span class="sb">&#39;`</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>2. Blind SQL Injection</h3>
+<p>The attacker does not see query results directly but infers information based on application behavior.</p>
+<p><strong>Boolean-based blind injection:</strong></p>
+<div class="highlight"><pre><span></span><code>Request:  /api/users?id=1 AND 1=1    --&gt; Returns user (condition true)
+Request:  /api/users?id=1 AND 1=2    --&gt; Returns nothing (condition false)
+
+The attacker now knows they can inject SQL and extract data one bit at a time:
+/api/users?id=1 AND (SELECT LENGTH(password) FROM users WHERE id=1) &gt; 10
+</code></pre></div>
+
+<p><strong>Time-based blind injection:</strong></p>
+<div class="highlight"><pre><span></span><code>Request:  /api/users?id=1; SELECT CASE WHEN (1=1) THEN pg_sleep(5) ELSE pg_sleep(0) END--
+Result:   Response takes 5 seconds --&gt; condition is true
+
+The attacker extracts data by measuring response times.
+</code></pre></div>
+
+<h3>3. Second-Order SQL Injection</h3>
+<p>The malicious input is stored first and executed later in a different query.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Step 1: Attacker registers with a crafted username</span>
+<span class="c1">// Username: admin&#39;--</span>
+<span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">  </span><span class="sb">`INSERT INTO users (username, email) VALUES ($1, $2)`</span><span class="p">,</span>
+<span class="w">  </span><span class="p">[</span><span class="nx">username</span><span class="p">,</span><span class="w"> </span><span class="nx">email</span><span class="p">]</span><span class="w">  </span><span class="c1">// This insert is safe -- parameterized</span>
+<span class="p">);</span>
+
+<span class="c1">// Step 2: Later, a different part of the app uses the stored username unsafely</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span><span class="s1">&#39;SELECT * FROM users WHERE id = $1&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="nx">userId</span><span class="p">]);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">username</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">user</span><span class="p">.</span><span class="nx">rows</span><span class="p">[</span><span class="mf">0</span><span class="p">].</span><span class="nx">username</span><span class="p">;</span><span class="w"> </span><span class="c1">// &quot;admin&#39;--&quot;</span>
+
+<span class="c1">// VULNERABLE: Using the stored value without parameterization</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">logs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">  </span><span class="sb">`SELECT * FROM audit_log WHERE username = &#39;</span><span class="si">${</span><span class="nx">username</span><span class="si">}</span><span class="sb">&#39;`</span>
+<span class="w">  </span><span class="c1">// Becomes: SELECT * FROM audit_log WHERE username = &#39;admin&#39;--&#39;</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h3>4. UNION-Based SQL Injection</h3>
+<p>The attacker appends a UNION SELECT to extract data from other tables.</p>
+<div class="highlight"><pre><span></span><code>Normal:   SELECT name, email FROM users WHERE id = 1
+Attack:   SELECT name, email FROM users WHERE id = 1 UNION SELECT username, password FROM admin_users--
+
+Result: The response now contains admin credentials
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="c1">// VULNERABLE</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/products&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">category</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// category = &quot;electronics&#39; UNION SELECT username, password FROM users--&quot;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`SELECT name, price FROM products WHERE category = &#39;</span><span class="si">${</span><span class="nx">category</span><span class="si">}</span><span class="sb">&#39;`</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Response contains usernames and passwords!</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Attack Vectors in Node.js Applications</h2>
+<h3>Raw Query String Concatenation</h3>
+<p>This is the most obvious vector:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// VULNERABLE: Every string interpolation in a query is a potential injection point</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">query</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`SELECT * FROM products</span>
+<span class="sb">  WHERE name LIKE &#39;%</span><span class="si">${</span><span class="nx">search</span><span class="si">}</span><span class="sb">%&#39;</span>
+<span class="sb">  AND category = &#39;</span><span class="si">${</span><span class="nx">category</span><span class="si">}</span><span class="sb">&#39;</span>
+<span class="sb">  AND price &lt; </span><span class="si">${</span><span class="nx">maxPrice</span><span class="si">}</span>
+<span class="sb">  ORDER BY </span><span class="si">${</span><span class="nx">sortColumn</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">sortDirection</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+</code></pre></div>
+
+<p>Every single variable in that query is an injection point.</p>
+<h3>Dynamic Table and Column Names</h3>
+<p>Parameterized queries cannot protect table or column names:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// VULNERABLE: Parameterization does NOT work for identifiers</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">  </span><span class="sb">`SELECT * FROM </span><span class="si">${</span><span class="nx">tableName</span><span class="si">}</span><span class="sb"> ORDER BY </span><span class="si">${</span><span class="nx">sortColumn</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="p">);</span>
+<span class="c1">// tableName = &quot;users; DROP TABLE users--&quot;</span>
+
+<span class="c1">// SECURE: Whitelist allowed values</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">ALLOWED_TABLES</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;products&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;categories&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;reviews&#39;</span><span class="p">];</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">ALLOWED_SORT_COLUMNS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;name&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;price&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;created_at&#39;</span><span class="p">];</span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">ALLOWED_TABLES</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="nx">tableName</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid table&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">ALLOWED_SORT_COLUMNS</span><span class="p">.</span><span class="nx">includes</span><span class="p">(</span><span class="nx">sortColumn</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid sort column&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">  </span><span class="sb">`SELECT * FROM </span><span class="si">${</span><span class="nx">tableName</span><span class="si">}</span><span class="sb"> ORDER BY </span><span class="si">${</span><span class="nx">sortColumn</span><span class="si">}</span><span class="sb">`</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h3>NoSQL Injection (MongoDB)</h3>
+<p>SQL injection concepts apply to NoSQL databases too:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// VULNERABLE: MongoDB operator injection</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/login&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">username</span><span class="p">,</span><span class="w"> </span><span class="nx">password</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// If body is: { &quot;username&quot;: {&quot;$gt&quot;: &quot;&quot;}, &quot;password&quot;: {&quot;$gt&quot;: &quot;&quot;} }</span>
+<span class="w">  </span><span class="c1">// This matches any user with a non-empty username and password</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">.</span><span class="nx">collection</span><span class="p">(</span><span class="s1">&#39;users&#39;</span><span class="p">).</span><span class="nx">findOne</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">username</span><span class="o">:</span><span class="w"> </span><span class="nx">username</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">password</span><span class="o">:</span><span class="w"> </span><span class="nx">password</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// SECURE: Validate types before querying</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/login&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">username</span><span class="p">,</span><span class="w"> </span><span class="nx">password</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="ow">typeof</span><span class="w"> </span><span class="nx">username</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;string&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="ow">typeof</span><span class="w"> </span><span class="nx">password</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;string&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid input&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">db</span><span class="p">.</span><span class="nx">collection</span><span class="p">(</span><span class="s1">&#39;users&#39;</span><span class="p">).</span><span class="nx">findOne</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">username</span><span class="o">:</span><span class="w"> </span><span class="nx">username</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">password</span><span class="o">:</span><span class="w"> </span><span class="nx">password</span><span class="p">,</span><span class="w">  </span><span class="c1">// In real code, compare hashed passwords</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Prevention: Defense in Depth</h2>
+<h3>Layer 1: Parameterized Queries (Primary Defense)</h3>
+<p>Parameterized queries (also called prepared statements) separate SQL code from data. The database treats parameters as literal values, never as SQL code.</p>
+<div class="highlight"><pre><span></span><code>Parameterized Query Flow:
+
++------------------+     +-----------------+     +------------------+
+|  Application     |     |  Database       |     |  Query Plan      |
+|                  |     |                 |     |                  |
+|  Query Template: |----&gt;|  Parse + Plan   |----&gt;|  Cached plan     |
+|  SELECT * FROM   |     |  (no user data) |     |  for template    |
+|  users WHERE     |     |                 |     |                  |
+|  email = $1      |     +-----------------+     +------------------+
+|                  |                                     |
+|  Parameter:      |     +-----------------+             |
+|  &quot;alice@test.com&quot;|----&gt;|  Bind + Execute |&lt;------------+
+|                  |     |  (data only)    |
++------------------+     +-----------------+
+
+The user input NEVER becomes part of the SQL syntax.
+Even if input is: &quot;&#39;; DROP TABLE users--&quot;
+It is treated as the literal string: &#39;; DROP TABLE users--
+</code></pre></div>
+
+<h4>With pg (node-postgres)</h4>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Pool</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;pg&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">pool</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Pool</span><span class="p">();</span>
+
+<span class="c1">// Parameterized query with positional parameters ($1, $2, ...)</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">findUser</span><span class="p">(</span><span class="nx">email</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">    </span><span class="s1">&#39;SELECT id, email, name FROM users WHERE email = $1&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">[</span><span class="nx">email</span><span class="p">]</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">[</span><span class="mf">0</span><span class="p">];</span>
+<span class="p">}</span>
+
+<span class="c1">// Multiple parameters</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">findProducts</span><span class="p">(</span><span class="nx">category</span><span class="p">,</span><span class="w"> </span><span class="nx">minPrice</span><span class="p">,</span><span class="w"> </span><span class="nx">maxPrice</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`SELECT * FROM products</span>
+<span class="sb">     WHERE category = $1</span>
+<span class="sb">     AND price BETWEEN $2 AND $3</span>
+<span class="sb">     ORDER BY price ASC`</span><span class="p">,</span>
+<span class="w">    </span><span class="p">[</span><span class="nx">category</span><span class="p">,</span><span class="w"> </span><span class="nx">minPrice</span><span class="p">,</span><span class="w"> </span><span class="nx">maxPrice</span><span class="p">]</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// LIKE queries with parameterization</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">searchUsers</span><span class="p">(</span><span class="nx">searchTerm</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">    </span><span class="s1">&#39;SELECT * FROM users WHERE name ILIKE $1&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">[</span><span class="sb">`%</span><span class="si">${</span><span class="nx">searchTerm</span><span class="si">}</span><span class="sb">%`</span><span class="p">]</span><span class="w">  </span><span class="c1">// The % wildcards go in the parameter, not the query</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// IN clause with parameterization</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">findUsersByIds</span><span class="p">(</span><span class="nx">ids</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Generate $1, $2, $3... for the number of IDs</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">placeholders</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ids</span><span class="p">.</span><span class="nx">map</span><span class="p">((</span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="sb">`$</span><span class="si">${</span><span class="nx">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1</span><span class="si">}</span><span class="sb">`</span><span class="p">).</span><span class="nx">join</span><span class="p">(</span><span class="s1">&#39;, &#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`SELECT * FROM users WHERE id IN (</span><span class="si">${</span><span class="nx">placeholders</span><span class="si">}</span><span class="sb">)`</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">ids</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h4>With Knex.js</h4>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">knex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;knex&#39;</span><span class="p">)(</span><span class="nx">config</span><span class="p">);</span>
+
+<span class="c1">// Knex automatically parameterizes</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">findUser</span><span class="p">(</span><span class="nx">email</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">knex</span><span class="p">(</span><span class="s1">&#39;users&#39;</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">where</span><span class="p">({</span><span class="w"> </span><span class="nx">email</span><span class="w"> </span><span class="p">})</span>
+<span class="w">    </span><span class="p">.</span><span class="nx">first</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="c1">// Complex queries</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">searchProducts</span><span class="p">(</span><span class="nx">filters</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">query</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">knex</span><span class="p">(</span><span class="s1">&#39;products&#39;</span><span class="p">).</span><span class="nx">select</span><span class="p">(</span><span class="s1">&#39;*&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">filters</span><span class="p">.</span><span class="nx">category</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">query</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">query</span><span class="p">.</span><span class="nx">where</span><span class="p">(</span><span class="s1">&#39;category&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">filters</span><span class="p">.</span><span class="nx">category</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">filters</span><span class="p">.</span><span class="nx">minPrice</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">query</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">query</span><span class="p">.</span><span class="nx">where</span><span class="p">(</span><span class="s1">&#39;price&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&gt;=&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">filters</span><span class="p">.</span><span class="nx">minPrice</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">filters</span><span class="p">.</span><span class="nx">search</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">query</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">query</span><span class="p">.</span><span class="nx">where</span><span class="p">(</span><span class="s1">&#39;name&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;ilike&#39;</span><span class="p">,</span><span class="w"> </span><span class="sb">`%</span><span class="si">${</span><span class="nx">filters</span><span class="p">.</span><span class="nx">search</span><span class="si">}</span><span class="sb">%`</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">query</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Raw queries in Knex -- use bindings!</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">customQuery</span><span class="p">(</span><span class="nx">userId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// SECURE: Using ? placeholders with bindings array</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">knex</span><span class="p">.</span><span class="nx">raw</span><span class="p">(</span>
+<span class="w">    </span><span class="s1">&#39;SELECT * FROM users WHERE id = ? AND active = ?&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">[</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">]</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h4>With Prisma</h4>
+<p>Prisma parameterizes all queries by default through its query builder:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;@prisma/client&#39;</span><span class="p">);</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">prisma</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PrismaClient</span><span class="p">();</span>
+
+<span class="c1">// Always safe -- Prisma parameterizes automatically</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">findUser</span><span class="p">(</span><span class="nx">email</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">findUnique</span><span class="p">({</span><span class="w"> </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">email</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">searchProducts</span><span class="p">(</span><span class="nx">search</span><span class="p">,</span><span class="w"> </span><span class="nx">category</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">product</span><span class="p">.</span><span class="nx">findMany</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">where</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">contains</span><span class="o">:</span><span class="w"> </span><span class="nx">search</span><span class="p">,</span><span class="w"> </span><span class="nx">mode</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;insensitive&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">category</span><span class="o">:</span><span class="w"> </span><span class="nx">category</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="c1">// If you must use raw SQL with Prisma, use Prisma.sql or $queryRaw</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">rawSearch</span><span class="p">(</span><span class="nx">term</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// SECURE: Tagged template literal parameterizes automatically</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`</span>
+<span class="sb">    SELECT * FROM users WHERE name ILIKE </span><span class="si">${</span><span class="sb">`%</span><span class="si">${</span><span class="nx">term</span><span class="si">}</span><span class="sb">%`</span><span class="si">}</span>
+<span class="sb">  `</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// VULNERABLE: Using $queryRawUnsafe with string interpolation</span>
+<span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">unsafeSearch</span><span class="p">(</span><span class="nx">term</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// NEVER do this:</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRawUnsafe</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`SELECT * FROM users WHERE name = &#39;</span><span class="si">${</span><span class="nx">term</span><span class="si">}</span><span class="sb">&#39;`</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Layer 2: Input Validation</h3>
+<p>Validation is your second line of defense. Even with parameterized queries, validating input catches malformed data early.</p>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">z</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;zod&#39;</span><span class="p">);</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">ProductSearchSchema</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">z</span><span class="p">.</span><span class="nx">object</span><span class="p">({</span>
+<span class="w">  </span><span class="nx">search</span><span class="o">:</span><span class="w"> </span><span class="nx">z</span><span class="p">.</span><span class="nx">string</span><span class="p">().</span><span class="nx">max</span><span class="p">(</span><span class="mf">100</span><span class="p">).</span><span class="nx">optional</span><span class="p">(),</span>
+<span class="w">  </span><span class="nx">category</span><span class="o">:</span><span class="w"> </span><span class="nx">z</span><span class="p">.</span><span class="kr">enum</span><span class="p">([</span><span class="s1">&#39;electronics&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;clothing&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;books&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;food&#39;</span><span class="p">]).</span><span class="nx">optional</span><span class="p">(),</span>
+<span class="w">  </span><span class="nx">minPrice</span><span class="o">:</span><span class="w"> </span><span class="nx">z</span><span class="p">.</span><span class="nx">coerce</span><span class="p">.</span><span class="nx">number</span><span class="p">().</span><span class="nx">min</span><span class="p">(</span><span class="mf">0</span><span class="p">).</span><span class="nx">max</span><span class="p">(</span><span class="mf">1000000</span><span class="p">).</span><span class="nx">optional</span><span class="p">(),</span>
+<span class="w">  </span><span class="nx">maxPrice</span><span class="o">:</span><span class="w"> </span><span class="nx">z</span><span class="p">.</span><span class="nx">coerce</span><span class="p">.</span><span class="nx">number</span><span class="p">().</span><span class="nx">min</span><span class="p">(</span><span class="mf">0</span><span class="p">).</span><span class="nx">max</span><span class="p">(</span><span class="mf">1000000</span><span class="p">).</span><span class="nx">optional</span><span class="p">(),</span>
+<span class="w">  </span><span class="nx">sortBy</span><span class="o">:</span><span class="w"> </span><span class="nx">z</span><span class="p">.</span><span class="kr">enum</span><span class="p">([</span><span class="s1">&#39;name&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;price&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;created_at&#39;</span><span class="p">]).</span><span class="nx">optional</span><span class="p">().</span><span class="k">default</span><span class="p">(</span><span class="s1">&#39;name&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">order</span><span class="o">:</span><span class="w"> </span><span class="nx">z</span><span class="p">.</span><span class="kr">enum</span><span class="p">([</span><span class="s1">&#39;asc&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;desc&#39;</span><span class="p">]).</span><span class="nx">optional</span><span class="p">().</span><span class="k">default</span><span class="p">(</span><span class="s1">&#39;asc&#39;</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">page</span><span class="o">:</span><span class="w"> </span><span class="nx">z</span><span class="p">.</span><span class="nx">coerce</span><span class="p">.</span><span class="nx">number</span><span class="p">().</span><span class="kr">int</span><span class="p">().</span><span class="nx">min</span><span class="p">(</span><span class="mf">1</span><span class="p">).</span><span class="nx">optional</span><span class="p">().</span><span class="k">default</span><span class="p">(</span><span class="mf">1</span><span class="p">),</span>
+<span class="w">  </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="nx">z</span><span class="p">.</span><span class="nx">coerce</span><span class="p">.</span><span class="nx">number</span><span class="p">().</span><span class="kr">int</span><span class="p">().</span><span class="nx">min</span><span class="p">(</span><span class="mf">1</span><span class="p">).</span><span class="nx">max</span><span class="p">(</span><span class="mf">100</span><span class="p">).</span><span class="nx">optional</span><span class="p">().</span><span class="k">default</span><span class="p">(</span><span class="mf">20</span><span class="p">),</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/products&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">parsed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ProductSearchSchema</span><span class="p">.</span><span class="nx">safeParse</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">parsed</span><span class="p">.</span><span class="nx">success</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">errors</span><span class="o">:</span><span class="w"> </span><span class="nx">parsed</span><span class="p">.</span><span class="nx">error</span><span class="p">.</span><span class="nx">issues</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">search</span><span class="p">,</span><span class="w"> </span><span class="nx">category</span><span class="p">,</span><span class="w"> </span><span class="nx">minPrice</span><span class="p">,</span><span class="w"> </span><span class="nx">maxPrice</span><span class="p">,</span><span class="w"> </span><span class="nx">sortBy</span><span class="p">,</span><span class="w"> </span><span class="nx">order</span><span class="p">,</span><span class="w"> </span><span class="nx">page</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">parsed</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">page</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">limit</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// All values are now validated and safe to use</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span>
+<span class="w">    </span><span class="sb">`SELECT * FROM products</span>
+<span class="sb">     WHERE ($1::text IS NULL OR name ILIKE $1)</span>
+<span class="sb">     AND ($2::text IS NULL OR category = $2)</span>
+<span class="sb">     AND ($3::numeric IS NULL OR price &gt;= $3)</span>
+<span class="sb">     AND ($4::numeric IS NULL OR price &lt;= $4)</span>
+<span class="sb">     ORDER BY </span><span class="si">${</span><span class="nx">sortBy</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">order</span><span class="si">}</span>
+<span class="sb">     LIMIT $5 OFFSET $6`</span><span class="p">,</span>
+<span class="w">    </span><span class="p">[</span>
+<span class="w">      </span><span class="nx">search</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="sb">`%</span><span class="si">${</span><span class="nx">search</span><span class="si">}</span><span class="sb">%`</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">category</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">minPrice</span><span class="w"> </span><span class="o">??</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">maxPrice</span><span class="w"> </span><span class="o">??</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">offset</span><span class="p">,</span>
+<span class="w">    </span><span class="p">]</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Layer 3: Principle of Least Privilege</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Create a restricted database user for the application</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">USER</span><span class="w"> </span><span class="n">app_user</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="n">PASSWORD</span><span class="w"> </span><span class="s1">&#39;strong_random_password&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Grant only what is needed</span>
+<span class="k">GRANT</span><span class="w"> </span><span class="k">SELECT</span><span class="p">,</span><span class="w"> </span><span class="k">INSERT</span><span class="p">,</span><span class="w"> </span><span class="k">UPDATE</span><span class="p">,</span><span class="w"> </span><span class="k">DELETE</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">ALL</span><span class="w"> </span><span class="n">TABLES</span><span class="w"> </span><span class="k">IN</span><span class="w"> </span><span class="k">SCHEMA</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">app_user</span><span class="p">;</span>
+
+<span class="c1">-- NEVER grant these to the application user:</span>
+<span class="c1">-- DROP, CREATE, ALTER, GRANT, TRUNCATE</span>
+<span class="c1">-- The app should never need to modify schema</span>
+
+<span class="c1">-- For read-only endpoints, use a read-only user</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">USER</span><span class="w"> </span><span class="n">readonly_user</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="n">PASSWORD</span><span class="w"> </span><span class="s1">&#39;another_strong_password&#39;</span><span class="p">;</span>
+<span class="k">GRANT</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">ALL</span><span class="w"> </span><span class="n">TABLES</span><span class="w"> </span><span class="k">IN</span><span class="w"> </span><span class="k">SCHEMA</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">readonly_user</span><span class="p">;</span>
+</code></pre></div>
+
+<h3>Layer 4: Web Application Firewall (WAF)</h3>
+<p>A WAF can catch common injection patterns before they reach your application:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Simple SQLi detection middleware (complement to parameterized queries)</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">sqlInjectionDetector</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">suspiciousPatterns</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="sr">/(&#39;|\&quot;)(\s)*(OR|AND)(\s)*(&#39;|\&quot;|\d)/i</span><span class="p">,</span>
+<span class="w">    </span><span class="sr">/UNION(\s)+SELECT/i</span><span class="p">,</span>
+<span class="w">    </span><span class="sr">/;\s*(DROP|DELETE|UPDATE|INSERT)/i</span><span class="p">,</span>
+<span class="w">    </span><span class="sr">/\/\*.*\*\//</span><span class="p">,</span><span class="w">             </span><span class="c1">// SQL comments</span>
+<span class="w">    </span><span class="sr">/--\s/</span><span class="p">,</span><span class="w">                   </span><span class="c1">// SQL line comments</span>
+<span class="w">    </span><span class="sr">/xp_cmdshell/i</span><span class="p">,</span>
+<span class="w">  </span><span class="p">];</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">inputsToCheck</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">...</span><span class="nb">Object</span><span class="p">.</span><span class="nx">values</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">),</span>
+<span class="w">    </span><span class="p">...</span><span class="nb">Object</span><span class="p">.</span><span class="nx">values</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">),</span>
+<span class="w">  </span><span class="p">];</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="ow">typeof</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;object&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">inputsToCheck</span><span class="p">.</span><span class="nx">push</span><span class="p">(...</span><span class="nb">Object</span><span class="p">.</span><span class="nx">values</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">).</span><span class="nx">filter</span><span class="p">(</span><span class="nx">v</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ow">typeof</span><span class="w"> </span><span class="nx">v</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;string&#39;</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">input</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">inputsToCheck</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="ow">typeof</span><span class="w"> </span><span class="nx">input</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;string&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">pattern</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">suspiciousPatterns</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">pattern</span><span class="p">.</span><span class="nx">test</span><span class="p">(</span><span class="nx">input</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">warn</span><span class="p">(</span><span class="s1">&#39;Potential SQLi detected:&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">input</span><span class="p">,</span><span class="w"> </span><span class="nx">pattern</span><span class="o">:</span><span class="w"> </span><span class="nx">pattern</span><span class="p">.</span><span class="nx">source</span><span class="p">,</span><span class="w"> </span><span class="nx">ip</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">ip</span><span class="w"> </span><span class="p">});</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Invalid input detected&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">next</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Note: a WAF or pattern detection is a supplementary defense, not a replacement for parameterized queries. Attackers can bypass pattern matching with encoding tricks, case variations, and other evasion techniques.</p>
+<h2>Testing for SQL Injection</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">// Integration test to verify injection resistance</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">request</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;supertest&#39;</span><span class="p">);</span>
+
+<span class="nx">describe</span><span class="p">(</span><span class="s1">&#39;SQL Injection Prevention&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">injectionPayloads</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="s2">&quot;&#39; OR &#39;1&#39;=&#39;1&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s2">&quot;&#39;; DROP TABLE users;--&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s2">&quot;&#39; UNION SELECT username, password FROM users--&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s2">&quot;1; DELETE FROM products&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s2">&quot;&#39; AND 1=1--&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s2">&quot;admin&#39;--&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s2">&quot;1 OR 1=1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="p">];</span>
+
+<span class="w">  </span><span class="nx">test</span><span class="p">.</span><span class="nx">each</span><span class="p">(</span><span class="nx">injectionPayloads</span><span class="p">)(</span>
+<span class="w">    </span><span class="s1">&#39;should safely handle payload: %s&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">payload</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">request</span><span class="p">(</span><span class="nx">app</span><span class="p">)</span>
+<span class="w">        </span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/products&#39;</span><span class="p">)</span>
+<span class="w">        </span><span class="p">.</span><span class="nx">query</span><span class="p">({</span><span class="w"> </span><span class="nx">search</span><span class="o">:</span><span class="w"> </span><span class="nx">payload</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">      </span><span class="c1">// Should return 200 with 0 results or 400 for invalid input</span>
+<span class="w">      </span><span class="c1">// Should NEVER return all records or cause a 500</span>
+<span class="w">      </span><span class="nx">expect</span><span class="p">([</span><span class="mf">200</span><span class="p">,</span><span class="w"> </span><span class="mf">400</span><span class="p">]).</span><span class="nx">toContain</span><span class="p">(</span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">200</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Verify it treated the payload as a literal search string</span>
+<span class="w">        </span><span class="nx">expect</span><span class="p">(</span><span class="nx">res</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">length</span><span class="p">).</span><span class="nx">toBe</span><span class="p">(</span><span class="mf">0</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">test</span><span class="p">(</span><span class="s1">&#39;should not expose database errors&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">request</span><span class="p">(</span><span class="nx">app</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/products&#39;</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="nx">query</span><span class="p">({</span><span class="w"> </span><span class="nx">search</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;&#39; OR pg_sleep(5)--&quot;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">).</span><span class="nx">not</span><span class="p">.</span><span class="nx">toBe</span><span class="p">(</span><span class="mf">500</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="nx">res</span><span class="p">.</span><span class="nx">text</span><span class="p">).</span><span class="nx">not</span><span class="p">.</span><span class="nx">toContain</span><span class="p">(</span><span class="s1">&#39;syntax error&#39;</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">expect</span><span class="p">(</span><span class="nx">res</span><span class="p">.</span><span class="nx">text</span><span class="p">).</span><span class="nx">not</span><span class="p">.</span><span class="nx">toContain</span><span class="p">(</span><span class="s1">&#39;pg_catalog&#39;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Summary of Defenses</h2>
+<div class="highlight"><pre><span></span><code>+-----+------------------------------+-------------------------------+
+| #   | Defense                      | Protects Against              |
++-----+------------------------------+-------------------------------+
+| 1   | Parameterized queries        | All SQL injection types       |
+| 2   | ORM (Prisma, Knex)           | Most injection by default     |
+| 3   | Input validation (Zod/Joi)   | Malformed data, type coercion |
+| 4   | Least privilege DB user      | Limits damage if injected     |
+| 5   | WAF / pattern detection      | Common automated attacks      |
+| 6   | Whitelist for identifiers    | Table/column name injection   |
+| 7   | Error message sanitization   | Information disclosure        |
++-----+------------------------------+-------------------------------+
+</code></pre></div>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Identify the Injection Points</div>
+                    <div class="exercise-desc"><p>Review the following Express route and identify every SQL injection vulnerability. Then rewrite the entire handler using parameterized queries with node-postgres:</p>
+<div class="highlight"><pre><span></span><code><span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/reports&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">startDate</span><span class="p">,</span><span class="w"> </span><span class="nx">endDate</span><span class="p">,</span><span class="w"> </span><span class="nx">department</span><span class="p">,</span><span class="w"> </span><span class="nx">sortBy</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">query</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sb">`</span>
+<span class="sb">    SELECT * FROM reports</span>
+<span class="sb">    WHERE created_at BETWEEN &#39;</span><span class="si">${</span><span class="nx">startDate</span><span class="si">}</span><span class="sb">&#39; AND &#39;</span><span class="si">${</span><span class="nx">endDate</span><span class="si">}</span><span class="sb">&#39;</span>
+<span class="sb">    AND department = &#39;</span><span class="si">${</span><span class="nx">department</span><span class="si">}</span><span class="sb">&#39;</span>
+<span class="sb">    ORDER BY </span><span class="si">${</span><span class="nx">sortBy</span><span class="si">}</span>
+<span class="sb">    LIMIT </span><span class="si">${</span><span class="nx">limit</span><span class="si">}</span>
+<span class="sb">  `</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">pool</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span><span class="nx">query</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">rows</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>There are 5 injection points: startDate, endDate, department (use $1, $2, $3), sortBy (must be whitelisted since column names cannot be parameterized), and limit (parameterize as integer). Add Zod validation for all inputs.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build a Safe Dynamic Query Builder</div>
+                    <div class="exercise-desc"><p>Write a function <code>buildProductQuery(filters)</code> that accepts an object with optional fields (search, category, minPrice, maxPrice, inStock, sortBy, order) and returns a { text, values } object for use with pool.query(). The function must: (1) use parameterized queries for all data values, (2) whitelist sortBy and order, (3) dynamically build the WHERE clause only for provided filters, and (4) handle the LIKE operator safely.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Track a parameter counter (let paramIndex = 1) and push to a values array as you build conditions. Increment paramIndex each time you add a parameter. For LIKE, put the % in the value, not the query: <code>name ILIKE $${paramIndex}</code> with value <code>%${search}%</code>.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">NoSQL Injection Prevention</div>
+                    <div class="exercise-desc"><p>Create a login endpoint for a MongoDB-based Express app that is resistant to NoSQL injection. The endpoint should: (1) validate that username and password are strings (not objects), (2) use bcrypt for password comparison (not database-level comparison), (3) return consistent error messages to prevent user enumeration, and (4) include a test suite with injection payloads like <code>{"$gt": ""}</code> and <code>{"$ne": null}</code>.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Never pass user input directly to MongoDB's find() without type checking. Fetch the user by username (validated as string), then compare the password in application code with bcrypt.compare().</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">ORM raw query methods bypass built-in parameterization</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Developers use ORM escape hatches like Prisma's $queryRawUnsafe, Knex's knex.raw() with string interpolation, or Sequelize's sequelize.query() with template literals instead of parameter bindings. These raw methods do not auto-parameterize.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> For Prisma, always use `$queryRaw` with tagged template literals (not `$queryRawUnsafe`). For Knex, always pass a bindings array as the second argument to `knex.raw('SELECT * FROM users WHERE id = ?', [id])`. For Sequelize, use replacements: `sequelize.query('SELECT * FROM users WHERE id = :id', { replacements: { id } })`. Audit your codebase with grep for `queryRawUnsafe`, `knex.raw` without bindings, and template literals inside `.query()` calls.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Parameterized queries do not work for ORDER BY, table names, or column names</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> SQL parameter placeholders ($1, ?) can only be used for data values, not SQL identifiers (table names, column names) or keywords (ASC/DESC). Databases interpret parameters as literal strings in those positions, causing syntax errors.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Maintain a strict whitelist of allowed column names and sort directions. Validate user input against the whitelist before inserting into the query string. Example: `const ALLOWED = ['name','price','created_at']; if (!ALLOWED.includes(sortBy)) throw new Error('Invalid sort');`. Never use user input directly for identifiers, even if you think you have escaped it.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">LIKE queries with user input return unexpected results or are slow</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> User input containing SQL wildcard characters (% and _) causes unexpected pattern matching. Input like '%' matches everything, and complex patterns can cause slow sequential scans.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Escape wildcard characters in user input before using them in LIKE parameters: `const escaped = input.replace(/%/g, '\\%').replace(/_/g, '\\_');`. Then use: `WHERE name LIKE $1` with value `%${escaped}%`. For performance, consider PostgreSQL full-text search (`tsvector`/`tsquery`) or a dedicated search engine (Elasticsearch) instead of LIKE for user-facing search.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">OWASP SQL Injection Prevention Cheat Sheet</div>
+                    
+                    <div class="resource-note">Comprehensive prevention guide covering parameterized queries, stored procedures, whitelist validation, and escaping across all languages</div>
+                    
+                </a>
+                
+                <a href="https://portswigger.net/web-security/sql-injection" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag tutorial">tutorial</div>
+                    <div class="resource-title">PortSwigger SQL Injection Tutorial</div>
+                    
+                    <div class="resource-note">Interactive labs and detailed explanations of all SQL injection types including blind, UNION, and second-order injection</div>
+                    
+                </a>
+                
+                <a href="https://node-postgres.com/features/queries#parameterized-query" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">node-postgres Parameterized Queries Documentation</div>
+                    
+                    <div class="resource-note">Official documentation for parameterized queries in node-postgres (pg), the most popular PostgreSQL client for Node.js</div>
+                    
+                </a>
+                
+                <a href="https://www.prisma.io/docs/orm/prisma-client/using-raw-sql/raw-queries" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Prisma Security Best Practices</div>
+                    
+                    <div class="resource-note">Prisma's guide on using raw SQL safely, explaining the difference between $queryRaw (safe) and $queryRawUnsafe (dangerous)</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/7.1.1-js.html" class="btn">&larr; OWASP Top 10 for Node.js Developers</a>
+            
+            
+            <a href="/backend-learning/lesson/7.1.3-js.html" class="btn">XSS, CSRF, and SSRF: Understanding and Mitigating &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-7-js.html">&larr; Back to Security & Reliability</a>
+        </div>
+    </div>
+</body>
+</html>

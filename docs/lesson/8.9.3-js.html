@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alerting Strategies and On-Call Best Practices - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-8-js.html">System Design & Scalability</a> &rsaquo;
+            Observability
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type lesson">lesson</span>
+                <span class="lesson-id-tag">8.9.3</span>
+                <span>~2h</span>
+            </div>
+            <h1>Alerting Strategies and On-Call Best Practices</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Alerting is like a home security system. Bad alerting is a system that beeps every time a leaf blows past the window (alert fatigue). Good alerting only sounds when someone is actually trying to break in (user impact). The burn rate approach is like tracking how many suspicious events happened in the last hour — one leaf is fine, but a pattern of increasing activity triggers an alert.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Alerting Strategies and On-Call Best Practices</h1>
+<h2>Introduction</h2>
+<p>Monitoring without alerting is just data collection. Alerting without strategy is noise. Effective alerting wakes you up when users are impacted and stays quiet when they are not. This lesson covers alerting strategies based on SLOs, on-call best practices, and building a sustainable incident response culture.</p>
+<h2>Alert Hierarchy</h2>
+<div class="highlight"><pre><span></span><code>Severity Levels:
+┌───────────────────────────────────────────────────────────┐
+│ Level    │ Response      │ Example                        │
+├──────────┼───────────────┼────────────────────────────────┤
+│ P1/SEV1  │ Immediate     │ Service down, data loss         │
+│ Critical │ (wake up)     │ Payment processing failed       │
+├──────────┼───────────────┼────────────────────────────────┤
+│ P2/SEV2  │ Within 1 hour │ High error rate (&gt; 5%)          │
+│ High     │ (business hrs)│ Latency &gt; 2x normal             │
+├──────────┼───────────────┼────────────────────────────────┤
+│ P3/SEV3  │ Within 1 day  │ Elevated error rate (&gt; 1%)      │
+│ Medium   │               │ Disk usage &gt; 80%                │
+├──────────┼───────────────┼────────────────────────────────┤
+│ P4/SEV4  │ Best effort   │ Non-critical service degraded   │
+│ Low      │ (ticket)      │ Cache hit rate dropped           │
+└──────────┴───────────────┴────────────────────────────────┘
+</code></pre></div>
+
+<h2>SLO-Based Alerting (Burn Rate)</h2>
+<p>Instead of alerting on individual metric thresholds, alert when the error budget is being consumed too quickly:</p>
+<div class="highlight"><pre><span></span><code>Error Budget Burn Rate:
+  If SLO = 99.9% over 30 days
+  Error budget = 0.1% = 43.2 minutes
+
+  Burn rate 1x: Using budget at normal rate (sustainable)
+  Burn rate 2x: Would exhaust budget in 15 days (warning)
+  Burn rate 10x: Would exhaust budget in 3 days (critical)
+  Burn rate 100x: Would exhaust budget in 7.2 hours (PAGE!)
+</code></pre></div>
+
+<h3>Multi-Window Burn Rate Alerts</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// Prometheus alerting rules (alertmanager)</span>
+<span class="c1">// Save as alerting-rules.yml</span>
+
+<span class="cm">/*</span>
+<span class="cm">groups:</span>
+<span class="cm">  - name: slo-burn-rate</span>
+<span class="cm">    rules:</span>
+<span class="cm">      # Fast burn: 14.4x burn rate over 1 hour (pages)</span>
+<span class="cm">      - alert: HighErrorBurnRate</span>
+<span class="cm">        expr: |</span>
+<span class="cm">          (</span>
+<span class="cm">            sum(rate(http_errors_total[1h]))</span>
+<span class="cm">            / sum(rate(http_requests_total[1h]))</span>
+<span class="cm">          ) &gt; (14.4 * 0.001)</span>
+<span class="cm">        for: 2m</span>
+<span class="cm">        labels:</span>
+<span class="cm">          severity: critical</span>
+<span class="cm">        annotations:</span>
+<span class="cm">          summary: &quot;Error budget burning 14.4x normal rate&quot;</span>
+<span class="cm">          description: &quot;At this rate, 30-day error budget exhausts in ~2 days&quot;</span>
+
+<span class="cm">      # Slow burn: 3x burn rate over 6 hours (ticket)</span>
+<span class="cm">      - alert: ElevatedErrorBurnRate</span>
+<span class="cm">        expr: |</span>
+<span class="cm">          (</span>
+<span class="cm">            sum(rate(http_errors_total[6h]))</span>
+<span class="cm">            / sum(rate(http_requests_total[6h]))</span>
+<span class="cm">          ) &gt; (3 * 0.001)</span>
+<span class="cm">        for: 10m</span>
+<span class="cm">        labels:</span>
+<span class="cm">          severity: warning</span>
+<span class="cm">        annotations:</span>
+<span class="cm">          summary: &quot;Error budget burning 3x normal rate&quot;</span>
+<span class="cm">          description: &quot;At this rate, 30-day error budget exhausts in ~10 days&quot;</span>
+
+<span class="cm">      # Latency SLO: p99 &gt; 500ms for 5+ minutes</span>
+<span class="cm">      - alert: HighLatency</span>
+<span class="cm">        expr: |</span>
+<span class="cm">          histogram_quantile(0.99,</span>
+<span class="cm">            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)</span>
+<span class="cm">          ) &gt; 0.5</span>
+<span class="cm">        for: 5m</span>
+<span class="cm">        labels:</span>
+<span class="cm">          severity: warning</span>
+<span class="cm">        annotations:</span>
+<span class="cm">          summary: &quot;P99 latency exceeds 500ms SLO&quot;</span>
+<span class="cm">*/</span>
+</code></pre></div>
+
+<h2>Implementing Alerts in Node.js</h2>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">client</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;prom-client&#39;</span><span class="p">;</span>
+
+<span class="c1">// Health check with detailed status</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">HealthChecker</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">checks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Map</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="nx">register</span><span class="p">(</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">checkFn</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">critical</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nx">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5000</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">checks</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">checkFn</span><span class="p">,</span><span class="w"> </span><span class="nx">critical</span><span class="p">,</span><span class="w"> </span><span class="nx">timeout</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">runAll</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{};</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">healthy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">checkFn</span><span class="p">,</span><span class="w"> </span><span class="nx">critical</span><span class="p">,</span><span class="w"> </span><span class="nx">timeout</span><span class="w"> </span><span class="p">}]</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">checks</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">        </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">race</span><span class="p">([</span>
+<span class="w">          </span><span class="nx">checkFn</span><span class="p">(),</span>
+<span class="w">          </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">reject</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span>
+<span class="w">            </span><span class="nx">setTimeout</span><span class="p">(()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">reject</span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Timeout&#39;</span><span class="p">)),</span><span class="w"> </span><span class="nx">timeout</span><span class="p">)</span>
+<span class="w">          </span><span class="p">),</span>
+<span class="w">        </span><span class="p">]);</span>
+<span class="w">        </span><span class="nx">results</span><span class="p">[</span><span class="nx">name</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;healthy&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">duration</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">start</span><span class="p">,</span>
+<span class="w">        </span><span class="p">};</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">results</span><span class="p">[</span><span class="nx">name</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;unhealthy&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">,</span>
+<span class="w">          </span><span class="nx">critical</span><span class="p">,</span>
+<span class="w">        </span><span class="p">};</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">critical</span><span class="p">)</span><span class="w"> </span><span class="nx">healthy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">healthy</span><span class="p">,</span><span class="w"> </span><span class="nx">checks</span><span class="o">:</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">health</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">HealthChecker</span><span class="p">();</span>
+<span class="nx">health</span><span class="p">.</span><span class="nx">register</span><span class="p">(</span><span class="s1">&#39;database&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`SELECT 1`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">critical</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="nx">health</span><span class="p">.</span><span class="nx">register</span><span class="p">(</span><span class="s1">&#39;redis&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">ping</span><span class="p">(),</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">critical</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+<span class="nx">health</span><span class="p">.</span><span class="nx">register</span><span class="p">(</span><span class="s1">&#39;kafka&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">producer</span><span class="p">.</span><span class="nx">send</span><span class="p">({</span><span class="w"> </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;__healthcheck&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">messages</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">}));</span>
+
+<span class="c1">// Health endpoint</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/health&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">health</span><span class="p">.</span><span class="nx">runAll</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">healthy</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mf">200</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mf">503</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="c1">// Liveness probe (is the process alive?)</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/health/live&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;alive&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">uptime</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">uptime</span><span class="p">()</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// Readiness probe (is the service ready to accept traffic?)</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/health/ready&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">health</span><span class="p">.</span><span class="nx">runAll</span><span class="p">();</span>
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">healthy</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mf">200</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mf">503</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Alerting Anti-Patterns</h2>
+<div class="highlight"><pre><span></span><code>BAD Alerts (cause alert fatigue):
+  ❌ CPU &gt; 80% (may be normal during peak hours)
+  ❌ Memory &gt; 70% (applications use memory, that&#39;s fine)
+  ❌ Any 5xx error (one error is not an outage)
+  ❌ Latency &gt; 200ms (one slow request is not an issue)
+
+GOOD Alerts (actionable, user-impacting):
+  ✓ Error budget burn rate &gt; 14.4x for 2 minutes
+  ✓ P99 latency &gt; 500ms for 5 minutes
+  ✓ Health check failing for 30 seconds
+  ✓ Database replication lag &gt; 30 seconds
+  ✓ Disk usage &gt; 90% (will cause outage if not addressed)
+  ✓ Certificate expiring in &lt; 7 days
+</code></pre></div>
+
+<h2>On-Call Best Practices</h2>
+<h3>Rotation Structure</h3>
+<div class="highlight"><pre><span></span><code>Primary on-call: First responder
+Secondary on-call: Backup if primary doesn&#39;t respond
+
+Weekly rotation:
+  Week 1: Alice (primary), Bob (secondary)
+  Week 2: Bob (primary), Charlie (secondary)
+  Week 3: Charlie (primary), Alice (secondary)
+
+Rules:
+  - Max 1 week on-call per 3-4 weeks
+  - Handoff meeting at rotation change
+  - On-call compensation (time off or pay)
+  - Escalation policy if no response in 15 min
+</code></pre></div>
+
+<h3>Incident Response</h3>
+<div class="highlight"><pre><span></span><code>Incident Timeline:
+  T+0min: Alert fires
+  T+5min: On-call acknowledges
+  T+10min: Initial assessment, severity assigned
+  T+15min: Communication posted in incident channel
+  T+30min: Mitigation attempted
+  T+60min: Escalate if not mitigated
+  T+?: Incident resolved
+  T+1-3 days: Blameless post-mortem
+</code></pre></div>
+
+<h3>Runbooks</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// Automated runbook execution</span>
+<span class="kd">class</span><span class="w"> </span><span class="nx">RunbookExecutor</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kr">constructor</span><span class="p">(</span><span class="nx">runbooks</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="p">.</span><span class="nx">runbooks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">runbooks</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="nx">execute</span><span class="p">(</span><span class="nx">alertName</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">runbook</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">runbooks</span><span class="p">[</span><span class="nx">alertName</span><span class="p">];</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">runbook</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;no-runbook&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;No automated runbook available&#39;</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">step</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">runbook</span><span class="p">.</span><span class="nx">steps</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">step</span><span class="p">.</span><span class="nx">action</span><span class="p">();</span>
+<span class="w">        </span><span class="nx">results</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span><span class="w"> </span><span class="nx">step</span><span class="o">:</span><span class="w"> </span><span class="nx">step</span><span class="p">.</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;success&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="p">});</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">step</span><span class="p">.</span><span class="nx">resolves</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">resolved</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;auto-resolved&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">steps</span><span class="o">:</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="p">};</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">results</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span><span class="w"> </span><span class="nx">step</span><span class="o">:</span><span class="w"> </span><span class="nx">step</span><span class="p">.</span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;failed&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="w"> </span><span class="p">});</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;needs-human&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">steps</span><span class="o">:</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">runbooks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="s1">&#39;HighDatabaseConnections&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">steps</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Check active queries&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="kd">const</span><span class="w"> </span><span class="nx">queries</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`</span>
+<span class="sb">            SELECT pid, now() - pg_stat_activity.query_start AS duration, query</span>
+<span class="sb">            FROM pg_stat_activity</span>
+<span class="sb">            WHERE state = &#39;active&#39; AND query_start &lt; now() - interval &#39;1 minute&#39;</span>
+<span class="sb">          `</span><span class="p">;</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">longRunningQueries</span><span class="o">:</span><span class="w"> </span><span class="nx">queries</span><span class="w"> </span><span class="p">};</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Kill long-running queries&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="kd">const</span><span class="w"> </span><span class="nx">killed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">prisma</span><span class="p">.</span><span class="nx">$queryRaw</span><span class="sb">`</span>
+<span class="sb">            SELECT pg_terminate_backend(pid)</span>
+<span class="sb">            FROM pg_stat_activity</span>
+<span class="sb">            WHERE state = &#39;active&#39; AND query_start &lt; now() - interval &#39;5 minutes&#39;</span>
+<span class="sb">            AND pid &lt;&gt; pg_backend_pid()</span>
+<span class="sb">          `</span><span class="p">;</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">resolved</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">queriesKilled</span><span class="o">:</span><span class="w"> </span><span class="nx">killed</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="p">};</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nx">resolves</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">};</span>
+</code></pre></div>
+
+<h2>Post-Mortem Template</h2>
+<div class="highlight"><pre><span></span><code>## Incident Post-Mortem: [Title]
+Date: [Date]
+Duration: [Start] - [End] ([Total])
+Severity: [P1/P2/P3]
+Author: [Name]
+
+### Summary
+One paragraph describing what happened and the impact.
+
+### Impact
+- Users affected: [Number/Percentage]
+- Revenue impact: [Estimated]
+- Data loss: [Yes/No]
+
+### Timeline
+- HH:MM - Alert fired
+- HH:MM - On-call acknowledged
+- HH:MM - Root cause identified
+- HH:MM - Mitigation applied
+- HH:MM - Incident resolved
+
+### Root Cause
+What actually caused the incident.
+
+### What Went Well
+- Alert fired promptly
+- Team responded quickly
+
+### What Went Wrong
+- Runbook was outdated
+- Took 30 min to identify root cause
+
+### Action Items
+| Action | Owner | Due Date | Status |
+|--------|-------|----------|--------|
+| Add monitoring for X | Alice | 2025-01-15 | TODO |
+| Update runbook for Y | Bob | 2025-01-10 | DONE |
+| Add circuit breaker | Charlie | 2025-01-20 | TODO |
+</code></pre></div>
+
+<h2>Common Pitfalls</h2>
+<ol>
+<li><strong>Too many alerts</strong>: If the on-call person gets &gt; 2 pages per week, alert quality is too low. Reduce alerts.</li>
+<li><strong>Alerts without runbooks</strong>: Every alert should link to a runbook explaining what to check and how to mitigate.</li>
+<li><strong>No post-mortems</strong>: Without learning from incidents, the same issues recur. Blameless post-mortems are essential.</li>
+<li><strong>On-call without support</strong>: On-call should always have a secondary, an escalation path, and authority to make changes.</li>
+</ol>
+<h2>Summary</h2>
+<p>Effective alerting is based on SLOs and error budget burn rates, not arbitrary thresholds. Good alerts are actionable, user-impacting, and rare enough to avoid fatigue. On-call rotations should be sustainable with proper compensation, runbooks, and escalation paths. Post-mortems focus on systemic improvements, not blame. The goal is a system that wakes you up only when users are meaningfully impacted.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Burn Rate Alert Configuration</div>
+                    <div class="exercise-desc"><p>Configure Prometheus alert rules for a 99.9% availability SLO using multi-window burn rate alerting. Set up fast burn (pages) and slow burn (tickets) alerts.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Fast burn: 14.4x rate over 1h window. Slow burn: 3x rate over 6h window. Use the error_rate / (1 - SLO) formula.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Health Check System</div>
+                    <div class="exercise-desc"><p>Build a comprehensive health check system that checks database, Redis, and external API dependencies. Expose separate liveness and readiness endpoints for Kubernetes.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Liveness: always 200 if process is running. Readiness: 200 only if all critical dependencies are healthy.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Automated Runbook</div>
+                    <div class="exercise-desc"><p>Create an automated runbook system that executes diagnostic and remediation steps when specific alerts fire. Log all actions taken for post-mortem review.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Map alert names to step arrays. Each step has a check and an action. Stop at first failed step and alert human.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">On-call person paged 10+ times per week</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Alerts are too sensitive (low thresholds), too many non-actionable alerts, or flapping alerts that trigger repeatedly.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Review and tune alert thresholds. Remove alerts that are never acted upon. Add appropriate 'for' duration (e.g., 5m) to prevent flapping. Use burn rate alerting instead of threshold alerts.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Incidents keep recurring without improvement</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> No post-mortem process, or post-mortems happen but action items are not tracked.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Mandate blameless post-mortems for all P1/P2 incidents. Track action items in a project management tool. Review completion in weekly team meetings.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://sre.google/sre-book/monitoring-distributed-systems/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Google SRE Book - Alerting</div>
+                    
+                </a>
+                
+                <a href="https://sre.google/workbook/alerting-on-slos/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Alerting on SLOs - Google SRE Workbook</div>
+                    
+                    <div class="resource-note">Multi-window burn rate alerting explained</div>
+                    
+                </a>
+                
+                <a href="https://response.pagerduty.com/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">PagerDuty Incident Response</div>
+                    
+                    <div class="resource-note">Open-source incident response guide</div>
+                    
+                </a>
+                
+                <a href="https://prometheus.io/docs/alerting/latest/alertmanager/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Prometheus Alertmanager</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/8.9.2-js.html" class="btn">&larr; SLIs, SLOs, SLAs: Defining Reliability Targets</a>
+            
+            
+            <span></span>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-8-js.html">&larr; Back to System Design & Scalability</a>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Recommendation Engine - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Data & Analytics
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.6.4</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design a Recommendation Engine</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Imagine a personal shopper in a massive department store with 50 million products. They cannot look at every item for each customer. Instead, they quickly grab items from sections the customer usually shops in (candidate generation), evaluate each item based on the customer's preferences and what similar customers bought (scoring), then curate a small selection that is diverse and appropriate (filtering). The magic is doing all of this in under 100 milliseconds.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Recommendation Engine</h1>
+<h2>Introduction</h2>
+<p>Recommendation engines power the core experience of platforms like YouTube, Netflix, Spotify, Amazon, and TikTok. They analyze user behavior, item characteristics, and interaction patterns to suggest content that users are most likely to engage with. Designing a recommendation system at scale involves real-time data pipelines, machine learning model serving, feature stores, A/B testing infrastructure, and careful handling of cold-start problems.</p>
+<h2>Requirements</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li>Generate personalized recommendations for each user ("Recommended for You")</li>
+<li>Support multiple recommendation types: home feed, "similar items", "users also liked", "trending"</li>
+<li>Update recommendations in near real-time as users interact with content</li>
+<li>Support <strong>content-based filtering</strong> (recommend items similar to what user liked)</li>
+<li>Support <strong>collaborative filtering</strong> (recommend items that similar users liked)</li>
+<li>Handle the <strong>cold-start problem</strong> for new users and new items</li>
+<li>Support A/B testing of different recommendation algorithms</li>
+<li>Provide explainability ("Because you watched X")</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li>500 million daily active users</li>
+<li>Recommendation API latency: p99 &lt; 100 ms</li>
+<li>Generate candidate pool of 10,000 items, rank to top 100, serve top 20</li>
+<li>Update user profile with new interactions within 5 minutes</li>
+<li>Support 100,000 recommendation requests/second</li>
+</ul>
+<h2>Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>DAU:                     500 million
+Recommendation requests: 500M * 10 sessions * 5 pages = 25 billion/day
+Requests/second:         25B / 86,400 = ~290,000 req/s (peak 2-3x)
+Peak requests/second:    ~600,000-900,000 req/s
+
+User profiles:           500 million * 5 KB avg = ~2.5 TB
+Item catalog:            50 million items * 2 KB = ~100 GB
+Interaction events/day:  500M * 200 interactions = 100 billion events/day
+Interaction storage/day: 100B * 100 bytes = ~10 TB/day
+
+Model serving:
+  Candidate generation:  ~5 ms per request
+  Ranking model:         ~20 ms per request (batch of 1000)
+  Feature lookup:        ~5 ms per request
+  Total pipeline:        ~50 ms budget
+</code></pre></div>
+
+<h2>High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────────────┐
+│                     Client Applications                          │
+│  ┌────────┐  ┌────────┐  ┌────────┐                             │
+│  │  Web   │  │ Mobile │  │  TV    │                             │
+│  └───┬────┘  └───┬────┘  └───┬────┘                             │
+└──────┼───────────┼───────────┼──────────────────────────────────┘
+       │           │           │
+       ▼           ▼           ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    API Gateway + CDN                              │
+│                 (cached popular recommendations)                 │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                 Recommendation Service                            │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │               Recommendation Pipeline                     │    │
+│  │                                                          │    │
+│  │  1. Candidate    2. Scoring/     3. Ranking    4. Filter │    │
+│  │     Generation      Features        Model       &amp; Serve  │    │
+│  │                                                          │    │
+│  │  ┌───────────┐  ┌───────────┐  ┌──────────┐  ┌────────┐ │    │
+│  │  │Collaborative│ │ Feature   │  │  ML      │  │Business│ │    │
+│  │  │Filtering   │ │ Store     │  │  Ranker  │  │Rules   │ │    │
+│  │  ├───────────┤  │ (Redis)   │  │(TF Serve)│  │Filter  │ │    │
+│  │  │Content     │  │           │  │          │  │        │ │    │
+│  │  │Based      │  │ User feats│  │ Score    │  │Dedup   │ │    │
+│  │  ├───────────┤  │ Item feats│  │ each     │  │Age     │ │    │
+│  │  │Trending   │  │ Context   │  │ candidate│  │Diversify│ │    │
+│  │  ├───────────┤  │           │  │          │  │        │ │    │
+│  │  │Popular    │  │           │  │          │  │        │ │    │
+│  │  └───────────┘  └───────────┘  └──────────┘  └────────┘ │    │
+│  └──────────────────────────────────────────────────────────┘    │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+      ┌────────────────────┼────────────────────┐
+      ▼                    ▼                    ▼
+┌───────────┐    ┌──────────────┐    ┌──────────────────┐
+│User Profile│    │ Item Catalog │    │ Feature Store    │
+│  Store     │    │   Store      │    │  (Online +       │
+│(Cassandra) │    │(Elasticsearch│    │   Offline)       │
+│            │    │ + Postgres)  │    │  (Redis + S3)    │
+└───────────┘    └──────────────┘    └──────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│                  Offline / Batch Pipeline                         │
+│                                                                  │
+│  ┌──────────┐    ┌──────────────┐    ┌──────────────────┐        │
+│  │ Event    │───&gt;│ Feature      │───&gt;│ Model Training   │        │
+│  │ Stream   │    │ Engineering  │    │ (Spark/PyTorch)  │        │
+│  │ (Kafka)  │    │ (Spark)      │    │                  │        │
+│  └──────────┘    └──────────────┘    └──────────────────┘        │
+│                                              │                   │
+│                         ┌────────────────────┘                   │
+│                         ▼                                        │
+│                  ┌──────────────┐    ┌──────────────────┐        │
+│                  │ Model Store  │───&gt;│ A/B Test Config  │        │
+│                  │ (MLflow/S3)  │    │                  │        │
+│                  └──────────────┘    └──────────────────┘        │
+└──────────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>API Design</h2>
+<h3>Recommendation API</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+
+<span class="c1">// GET /api/v1/recommendations/feed</span>
+<span class="c1">// Personalized home feed</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/recommendations/feed&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">limit</span><span class="p">,</span><span class="w"> </span><span class="nx">cursor</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// context: &#39;homepage&#39;, &#39;after_purchase&#39;, &#39;search_empty&#39;</span>
+
+<span class="w">  </span><span class="c1">// 1. Determine which experiment variant this user is in</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">experiment</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">abTestService</span><span class="p">.</span><span class="nx">getVariant</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;rec-algo-v3&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 2. Get user features from feature store</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">userFeatures</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">featureStore</span><span class="p">.</span><span class="nx">getUserFeatures</span><span class="p">(</span><span class="nx">userId</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 3. Generate candidates from multiple sources</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">[</span><span class="nx">cfCandidates</span><span class="p">,</span><span class="w"> </span><span class="nx">cbCandidates</span><span class="p">,</span><span class="w"> </span><span class="nx">trending</span><span class="p">,</span><span class="w"> </span><span class="nx">popular</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">([</span>
+<span class="w">    </span><span class="nx">collaborativeFilter</span><span class="p">.</span><span class="nx">getCandidates</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">userFeatures</span><span class="p">,</span><span class="w"> </span><span class="mf">5000</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">contentBasedFilter</span><span class="p">.</span><span class="nx">getCandidates</span><span class="p">(</span><span class="nx">userId</span><span class="p">,</span><span class="w"> </span><span class="nx">userFeatures</span><span class="p">,</span><span class="w"> </span><span class="mf">3000</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">trendingService</span><span class="p">.</span><span class="nx">getCandidates</span><span class="p">(</span><span class="nx">userFeatures</span><span class="p">.</span><span class="nx">region</span><span class="p">,</span><span class="w"> </span><span class="mf">1000</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">popularService</span><span class="p">.</span><span class="nx">getCandidates</span><span class="p">(</span><span class="nx">userFeatures</span><span class="p">.</span><span class="nx">region</span><span class="p">,</span><span class="w"> </span><span class="mf">1000</span><span class="p">),</span>
+<span class="w">  </span><span class="p">]);</span>
+
+<span class="w">  </span><span class="c1">// 4. Merge and deduplicate candidates</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">allCandidates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">deduplicateCandidates</span><span class="p">([</span>
+<span class="w">    </span><span class="p">...</span><span class="nx">cfCandidates</span><span class="p">,</span>
+<span class="w">    </span><span class="p">...</span><span class="nx">cbCandidates</span><span class="p">,</span>
+<span class="w">    </span><span class="p">...</span><span class="nx">trending</span><span class="p">,</span>
+<span class="w">    </span><span class="p">...</span><span class="nx">popular</span><span class="p">,</span>
+<span class="w">  </span><span class="p">]);</span>
+
+<span class="w">  </span><span class="c1">// 5. Fetch item features for all candidates</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">itemFeatures</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">featureStore</span><span class="p">.</span><span class="nx">getItemFeaturesBatch</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">allCandidates</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">c</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">itemId</span><span class="p">)</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 6. Score with ranking model</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">scored</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">rankingModel</span><span class="p">.</span><span class="nx">predict</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">experiment</span><span class="p">.</span><span class="nx">modelVersion</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">allCandidates</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">c</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">itemId</span><span class="o">:</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">itemId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">userFeatures</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">itemFeatures</span><span class="o">:</span><span class="w"> </span><span class="nx">itemFeatures</span><span class="p">[</span><span class="nx">c</span><span class="p">.</span><span class="nx">itemId</span><span class="p">],</span>
+<span class="w">      </span><span class="nx">candidateSource</span><span class="o">:</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">source</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="nx">context</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;homepage&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}))</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 7. Apply business rules (filter seen items, enforce diversity)</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">filtered</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">applyBusinessRules</span><span class="p">(</span><span class="nx">scored</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">excludeSeen</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">maxPerCategory</span><span class="o">:</span><span class="w"> </span><span class="mf">3</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">minDiversity</span><span class="o">:</span><span class="w"> </span><span class="mf">0.4</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// 8. Paginate</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pageSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">20</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">filtered</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">pageSize</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 9. Log impression for training data</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">eventLogger</span><span class="p">.</span><span class="nx">logImpression</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">userId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">items</span><span class="o">:</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">itemId</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">experiment</span><span class="o">:</span><span class="w"> </span><span class="nx">experiment</span><span class="p">.</span><span class="nx">variant</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">modelVersion</span><span class="o">:</span><span class="w"> </span><span class="nx">experiment</span><span class="p">.</span><span class="nx">modelVersion</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">recommendations</span><span class="o">:</span><span class="w"> </span><span class="nx">results</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">itemId</span><span class="o">:</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">itemId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">score</span><span class="o">:</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">score</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">reason</span><span class="o">:</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">explanation</span><span class="p">,</span><span class="w"> </span><span class="c1">// &quot;Because you liked X&quot;</span>
+<span class="w">      </span><span class="nx">source</span><span class="o">:</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">candidateSource</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">metadata</span><span class="o">:</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">itemMetadata</span><span class="p">,</span>
+<span class="w">    </span><span class="p">})),</span>
+<span class="w">    </span><span class="nx">experiment</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">experiment</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">variant</span><span class="o">:</span><span class="w"> </span><span class="nx">experiment</span><span class="p">.</span><span class="nx">variant</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">nextCursor</span><span class="o">:</span><span class="w"> </span><span class="nx">results</span><span class="p">[</span><span class="nx">results</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">]</span><span class="o">?</span><span class="p">.</span><span class="nx">itemId</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// GET /api/v1/recommendations/similar/:itemId</span>
+<span class="c1">// Similar items (&quot;More like this&quot;)</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">&#39;/api/v1/recommendations/similar/:itemId&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">itemId</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Use pre-computed item-to-item similarity from embedding space</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">similar</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">similarityIndex</span><span class="p">.</span><span class="nx">getNearest</span><span class="p">(</span><span class="nx">itemId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="nb">parseInt</span><span class="p">(</span><span class="nx">limit</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">20</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">minScore</span><span class="o">:</span><span class="w"> </span><span class="mf">0.5</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">sourceItem</span><span class="o">:</span><span class="w"> </span><span class="nx">itemId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">recommendations</span><span class="o">:</span><span class="w"> </span><span class="nx">similar</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">s</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">itemId</span><span class="o">:</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">itemId</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">similarityScore</span><span class="o">:</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">score</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">metadata</span><span class="o">:</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">itemMetadata</span><span class="p">,</span>
+<span class="w">    </span><span class="p">})),</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>User Interaction Tracking</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/v1/interactions</span>
+<span class="c1">// Track user interactions for recommendation feedback</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/interactions&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">itemId</span><span class="p">,</span><span class="w"> </span><span class="nx">type</span><span class="p">,</span><span class="w"> </span><span class="nx">duration</span><span class="p">,</span><span class="w"> </span><span class="nx">context</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// type: &#39;view&#39;, &#39;click&#39;, &#39;like&#39;, &#39;dislike&#39;, &#39;purchase&#39;, &#39;share&#39;, &#39;skip&#39;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">interaction</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">userId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">itemId</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">type</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">duration</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">context</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span>
+<span class="w">    </span><span class="nx">sessionId</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">headers</span><span class="p">[</span><span class="s1">&#39;x-session-id&#39;</span><span class="p">],</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="c1">// Fire and forget to Kafka for async processing</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">eventProducer</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="s1">&#39;user-interactions&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nx">interaction</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="c1">// Update real-time user profile (for near real-time recs)</span>
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">userProfileUpdater</span><span class="p">.</span><span class="nx">addInteraction</span><span class="p">(</span><span class="nx">interaction</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">202</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;accepted&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- User profiles (features for recommendation)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">user_profiles</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">          </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">  </span><span class="n">embedding</span><span class="w">        </span><span class="n">VECTOR</span><span class="p">(</span><span class="mi">128</span><span class="p">),</span><span class="w">           </span><span class="c1">-- User embedding from CF model</span>
+<span class="w">  </span><span class="n">preferred_categories</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">[]</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">avg_interaction_duration</span><span class="w"> </span><span class="nb">FLOAT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">interaction_count</span><span class="w"> </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">last_active_at</span><span class="w">   </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">       </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">       </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Item catalog</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">items</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">               </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">title</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">512</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">description</span><span class="w">      </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">category</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">tags</span><span class="w">             </span><span class="nb">TEXT</span><span class="p">[]</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;{}&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">embedding</span><span class="w">        </span><span class="n">VECTOR</span><span class="p">(</span><span class="mi">128</span><span class="p">),</span><span class="w">           </span><span class="c1">-- Item embedding</span>
+<span class="w">  </span><span class="n">popularity_score</span><span class="w"> </span><span class="nb">FLOAT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">quality_score</span><span class="w">    </span><span class="nb">FLOAT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">       </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">       </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_items_category</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">items</span><span class="p">(</span><span class="n">category</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_items_embedding</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">items</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">ivfflat</span><span class="w"> </span><span class="p">(</span><span class="n">embedding</span><span class="w"> </span><span class="n">vector_cosine_ops</span><span class="p">);</span>
+
+<span class="c1">-- User interactions (append-only event log)</span>
+<span class="c1">-- In production, use Cassandra or a time-series database</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">user_interactions</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">               </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">          </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">item_id</span><span class="w">          </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">interaction_type</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">duration_seconds</span><span class="w"> </span><span class="nb">FLOAT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">context</span><span class="w">          </span><span class="n">JSONB</span><span class="p">,</span>
+<span class="w">  </span><span class="n">session_id</span><span class="w">       </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">       </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_interactions_user</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">user_interactions</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_interactions_item</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">user_interactions</span><span class="p">(</span><span class="n">item_id</span><span class="p">,</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+
+<span class="c1">-- Pre-computed recommendations (materialized)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">precomputed_recommendations</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">          </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">rec_type</span><span class="w">         </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w"> </span><span class="c1">-- &#39;feed&#39;, &#39;trending&#39;, etc.</span>
+<span class="w">  </span><span class="n">item_ids</span><span class="w">         </span><span class="n">UUID</span><span class="p">[]</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">scores</span><span class="w">           </span><span class="nb">FLOAT</span><span class="p">[]</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">model_version</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">computed_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">expires_at</span><span class="w">       </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="n">rec_type</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="c1">-- A/B test experiments</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">experiments</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">               </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">name</span><span class="w">             </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">variants</span><span class="w">         </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">  </span><span class="c1">-- [{name, modelVersion, trafficPct}]</span>
+<span class="w">  </span><span class="n">status</span><span class="w">           </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;draft&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">start_date</span><span class="w">       </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">end_date</span><span class="w">         </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">       </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Experiment assignments</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">experiment_assignments</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">experiment_id</span><span class="w">    </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">experiments</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">user_id</span><span class="w">          </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">variant</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">assigned_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">experiment_id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span><span class="p">)</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Deep Dive: The Recommendation Funnel</h2>
+<div class="highlight"><pre><span></span><code>     Full item catalog: 50,000,000 items
+                │
+        ┌───────┴───────┐
+        │  Candidate    │
+        │  Generation   │  Multiple strategies in parallel
+        │  (~10,000)    │  Collaborative + Content + Trending
+        └───────┬───────┘
+                │
+        ┌───────┴───────┐
+        │   Feature     │
+        │   Assembly    │  Merge user, item, and context features
+        │               │  from Feature Store
+        └───────┬───────┘
+                │
+        ┌───────┴───────┐
+        │   Ranking     │
+        │   Model       │  Deep learning model scores each
+        │  (~1,000)     │  candidate. Heavy computation.
+        └───────┬───────┘
+                │
+        ┌───────┴───────┐
+        │   Business    │
+        │   Rules       │  Remove seen items, age-gate,
+        │  (~100)       │  enforce diversity, apply boosts
+        └───────┬───────┘
+                │
+        ┌───────┴───────┐
+        │   Serve       │
+        │   Top 20      │  Return to client with explanations
+        └───────────────┘
+</code></pre></div>
+
+<h2>Scaling Strategies</h2>
+<ul>
+<li><strong>Pre-compute</strong>: For most users, generate recommendations offline every few hours. Serve from cache. Only compute in real-time for active users.</li>
+<li><strong>Approximate Nearest Neighbors (ANN)</strong>: Use libraries like FAISS or Annoy for embedding similarity search in sub-millisecond time.</li>
+<li><strong>Feature Store (Redis)</strong>: Pre-compute and cache user and item features. Eliminates expensive feature computation at request time.</li>
+<li><strong>Model serving</strong>: Use TensorFlow Serving or ONNX Runtime with GPU batching for efficient model inference.</li>
+<li><strong>Caching</strong>: Cache popular item recommendations (trending, popular in your region) at the CDN/API Gateway level.</li>
+<li><strong>Sharding by user</strong>: Each recommendation server handles a subset of users, keeping relevant data in memory.</li>
+</ul>
+<h2>Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Pros</th>
+<th>Cons</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pre-computed recs</td>
+<td>Very fast serving (cache hit)</td>
+<td>Stale recommendations, storage cost</td>
+</tr>
+<tr>
+<td>Real-time ranking</td>
+<td>Fresh, context-aware</td>
+<td>Higher latency, compute cost</td>
+</tr>
+<tr>
+<td>Collaborative filtering</td>
+<td>Captures taste patterns</td>
+<td>Cold-start problem for new users</td>
+</tr>
+<tr>
+<td>Content-based filtering</td>
+<td>No cold-start for items</td>
+<td>Filter bubble, limited serendipity</td>
+</tr>
+<tr>
+<td>Hybrid approach</td>
+<td>Best of both worlds</td>
+<td>Complex to implement and tune</td>
+</tr>
+<tr>
+<td>Embedding similarity (ANN)</td>
+<td>Fast, scalable</td>
+<td>Approximate — may miss some relevant items</td>
+</tr>
+</tbody>
+</table>
+<h2>Cold-Start Strategies</h2>
+<div class="highlight"><pre><span></span><code>New User (no interaction history):
+  1. Serve popular/trending items
+  2. Ask preferences during onboarding
+  3. Use demographic features (age, location)
+  4. Quickly incorporate first few interactions
+
+New Item (no interaction data):
+  1. Use content features (title, description, category)
+  2. Boost new items in &quot;explore&quot; slots
+  3. Show to a random sample of users to gather initial signals
+  4. Use the item&#39;s creator/brand&#39;s historical performance
+</code></pre></div>
+
+<h2>Summary</h2>
+<p>A recommendation engine at scale is a multi-stage pipeline: candidate generation narrows millions of items to thousands, a ranking model scores each candidate, business rules filter and diversify, and the top results are served. The offline pipeline trains models and pre-computes features, while the online pipeline assembles features and scores candidates in real-time. The key challenges are handling cold-start, maintaining freshness, ensuring diversity, and serving recommendations within a strict latency budget.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Collaborative Filter</div>
+                    <div class="exercise-desc"><p>Implement a simple user-based collaborative filtering algorithm in Node.js. Given a matrix of user-item ratings, find the K most similar users to a target user (using cosine similarity), then recommend items those similar users liked that the target user has not seen.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Represent ratings as a sparse matrix (Map of Maps). Compute cosine similarity between user vectors. For each candidate item, compute a weighted average of similar users' ratings.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Content-Based Recommender with TF-IDF</div>
+                    <div class="exercise-desc"><p>Build a content-based recommender that uses TF-IDF vectors of item descriptions to find similar items. Given an item, return the 10 most similar items based on cosine similarity of their TF-IDF vectors.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Tokenize descriptions, compute term frequency and inverse document frequency, represent each item as a vector. Use dot product / (magnitude * magnitude) for cosine similarity.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">A/B Test Framework</div>
+                    <div class="exercise-desc"><p>Build a simple A/B testing framework that deterministically assigns users to experiment variants based on a hash of their user ID. Support multiple concurrent experiments with configurable traffic splits. Track impression and click metrics per variant.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Hash the userId + experimentId with crypto.createHash('md5'). Map the hash to a value 0-99 and use traffic percentage ranges to determine the variant. Store metrics in a Map keyed by experimentId + variant.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Real-Time User Profile Updater</div>
+                    <div class="exercise-desc"><p>Build a service that consumes user interaction events from a queue (simulate with an EventEmitter) and updates a user profile in Redis. The profile should include: last 50 interactions, preferred categories (top 5), interaction count, and a running average session duration.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use Redis sorted sets for recent interactions (ZADD with timestamp as score, ZREMRANGEBYRANK to keep last 50). Use a Redis hash for aggregated features. Compute preferred categories from the last 200 interactions.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Recommendations become stale and repetitive for active users</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Users complain about seeing the same recommendations. Engagement metrics (CTR) decline over the course of a session.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Pre-computed recommendations are regenerated on a batch schedule (every 6 hours), but active users exhaust the recommendation set within minutes and keep seeing the same items.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement a hybrid approach: serve pre-computed recommendations as the base, but layer in a real-time re-ranking step that incorporates the user's latest interactions. Maintain a 'seen' set per user session and filter out already-seen items. Add a diversity penalty to reduce repetition.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">New items never get recommended because they have no interaction data</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> New items have zero impressions days after being added. Item catalog coverage (% of items ever recommended) is below 10%.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The collaborative filtering model requires interaction data to generate item embeddings. New items have no interactions and are never recommended, creating a chicken-and-egg problem.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Reserve 5-10% of recommendation slots as 'explore' positions filled with new/under-explored items. Use content-based features to generate initial embeddings for new items. Implement a multi-armed bandit (epsilon-greedy or Thompson sampling) to balance exploitation of known-good items with exploration of new ones.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Ranking model inference takes too long (>200ms) causing recommendation API timeouts</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The ranking model scores each candidate individually. With 10,000 candidates, the total inference time exceeds the latency budget. The model is also too large to fit in GPU memory for batch inference.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Use a two-stage ranking approach: a lightweight model (logistic regression or small neural net) quickly scores all 10,000 candidates and selects the top 500, then a heavy model (deep neural network) precisely scores only those 500. Batch inference requests. Use ONNX Runtime for optimized CPU inference.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://research.google/pubs/pub45530/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag paper">paper</div>
+                    <div class="resource-title">YouTube's Recommendation System - Deep Neural Networks</div>
+                    
+                    <div class="resource-note">Seminal paper on YouTube's two-stage candidate generation and ranking architecture</div>
+                    
+                </a>
+                
+                <a href="https://www.oreilly.com/library/view/designing-machine-learning/9781098107956/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Designing Machine Learning Systems (Chip Huyen)</div>
+                    
+                    <div class="resource-note">Practical guide covering feature stores, model serving, and ML pipelines in production</div>
+                    
+                </a>
+                
+                <a href="https://github.com/facebookresearch/faiss" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">FAISS - Facebook AI Similarity Search</div>
+                    
+                    <div class="resource-note">Library for efficient similarity search with billion-scale vector datasets</div>
+                    
+                </a>
+                
+                <a href="https://netflixtechblog.com/netflix-recommendations-beyond-the-5-stars-part-1-55838468f429" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Netflix Recommendations: Beyond the 5 Stars</div>
+                    
+                    <div class="resource-note">Netflix's deep dive into their recommendation system evolution</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.6.3-js.html" class="btn">&larr; Design a Logging/Analytics Pipeline</a>
+            
+            
+            <a href="/backend-learning/lesson/9.6.5-js.html" class="btn">Design a CI/CD Pipeline (GitHub Actions) &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>

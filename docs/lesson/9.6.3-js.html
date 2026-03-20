@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design a Logging/Analytics Pipeline - Backend Developer Path</title>
+    <link rel="stylesheet" href="/backend-learning/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/backend-learning/index-js.html">Backend Developer Path</a> &rsaquo;
+            <a href="/backend-learning/phase/phase-9-js.html">System Design Interview Prep</a> &rsaquo;
+            Data & Analytics
+        </div>
+
+        <div class="lesson-detail-header">
+            <div class="lesson-detail-meta">
+                <span class="lesson-type project">project</span>
+                <span class="lesson-id-tag">9.6.3</span>
+                <span>~4h</span>
+            </div>
+            <h1>Design a Logging/Analytics Pipeline</h1>
+        </div>
+
+        
+        <section class="content-section intuition-section">
+            <h2>Intuition</h2>
+            <div class="intuition-body">
+                <p>Think of a logging pipeline as a river system. Thousands of tributaries (services) feed into a main river (Kafka). The river flows through treatment plants (processors) that filter and enrich the water. Some water goes to a fast-access reservoir (Elasticsearch for real-time queries), some to a large lake (ClickHouse for analytics), and some to long-term underground storage (S3 for archival). Sensors along the way trigger alarms (alerts) when pollution levels spike.</p>
+            </div>
+        </section>
+        
+
+        
+        <article class="lesson-article">
+            <h1>Design a Logging/Analytics Pipeline</h1>
+<h2>Introduction</h2>
+<p>Every production system generates massive volumes of logs, metrics, and events. A logging and analytics pipeline collects, transports, processes, stores, and queries this data to power real-time dashboards, alerting, debugging, and business intelligence. Think of systems like the ELK stack (Elasticsearch, Logstash, Kibana), Datadog, Splunk, or a custom analytics platform. This design problem is at the heart of observability engineering.</p>
+<h2>Requirements</h2>
+<h3>Functional Requirements</h3>
+<ul>
+<li>Ingest structured and unstructured logs from thousands of services</li>
+<li>Ingest application <strong>metrics</strong> (counters, gauges, histograms)</li>
+<li>Ingest user <strong>events</strong> (page views, clicks, purchases) for business analytics</li>
+<li>Real-time <strong>streaming</strong> queries (last 5 minutes of errors)</li>
+<li>Historical <strong>batch</strong> queries (aggregate events over the last 30 days)</li>
+<li><strong>Alerting</strong> based on thresholds (error rate &gt; 5%, latency p99 &gt; 2s)</li>
+<li><strong>Dashboards</strong> with real-time and historical visualizations</li>
+<li>Log <strong>retention</strong> policies (hot: 7 days, warm: 30 days, cold: 1 year)</li>
+</ul>
+<h3>Non-Functional Requirements</h3>
+<ul>
+<li>Ingest 10 million events/second at peak</li>
+<li>Query latency: &lt; 1s for real-time, &lt; 30s for historical aggregations</li>
+<li>Storage: handle 50 TB/day of raw data</li>
+<li>Data loss tolerance: &lt; 0.01% (best-effort for metrics, durable for business events)</li>
+<li>99.9% availability for ingestion (never drop data silently)</li>
+</ul>
+<h2>Capacity Estimation</h2>
+<div class="highlight"><pre><span></span><code>Events/second:          10,000,000 (peak)
+Average event size:     500 bytes
+Ingestion bandwidth:    10M * 500B = 5 GB/s
+Daily raw storage:      5 GB/s * 86,400 = ~430 TB/day
+With compression (10x): ~43 TB/day
+Monthly storage:        43 TB * 30 = ~1.3 PB/month
+
+Query load:
+  Real-time queries:    1000 queries/second
+  Historical queries:   100 queries/second
+  Dashboard refreshes:  500 queries/second (cached)
+
+Index size (Elasticsearch):
+  Assuming 1:1 index-to-data ratio: ~43 TB/day of indices
+  7-day hot tier: ~300 TB of indices
+</code></pre></div>
+
+<h2>High-Level Architecture</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────────────────────────────────────────────────────────┐
+│                      Data Sources                                │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌──────────┐  │
+│  │ App Logs│ │ Metrics │ │  User   │ │ System  │ │ External │  │
+│  │ (JSON)  │ │(StatsD) │ │ Events  │ │  Logs   │ │   APIs   │  │
+│  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬─────┘  │
+└───────┼───────────┼───────────┼───────────┼───────────┼─────────┘
+        │           │           │           │           │
+        ▼           ▼           ▼           ▼           ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                   Collection Layer                                │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │  Agents (Fluentd / Fluent Bit / Vector / Custom Agent)   │    │
+│  │  - Buffer locally on disk                                │    │
+│  │  - Batch + compress before sending                       │    │
+│  │  - Retry on failure                                      │    │
+│  └────────────────────────┬─────────────────────────────────┘    │
+└───────────────────────────┼──────────────────────────────────────┘
+                            │
+                            ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                   Ingestion Layer                                 │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │        API Gateway / Load Balancer (L7)                   │    │
+│  └────────────────────────┬─────────────────────────────────┘    │
+│                           │                                      │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │     Ingestion Service (Node.js, horizontally scaled)      │    │
+│  │  - Validate schema     - Enrich (add geo, user agent)     │    │
+│  │  - Rate limit          - Route to correct topic           │    │
+│  └────────────────────────┬─────────────────────────────────┘    │
+└───────────────────────────┼──────────────────────────────────────┘
+                            │
+                            ▼
+┌──────────────────────────────────────────────────────────────────┐
+│               Message Bus (Kafka)                                │
+│  Topics:  logs-raw  metrics-raw  events-raw  alerts-trigger      │
+│  Partitions per topic: 128-256                                   │
+│  Retention: 72 hours (buffer for reprocessing)                   │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+         ┌─────────────────┼─────────────────┐
+         ▼                 ▼                 ▼
+┌─────────────────┐ ┌─────────────┐ ┌─────────────────┐
+│ Stream Processor│ │   Batch     │ │  Alert          │
+│ (Flink/Custom)  │ │ Processor   │ │  Engine         │
+│                 │ │ (Spark/ETL) │ │                 │
+│ - Real-time     │ │ - Hourly/   │ │ - Evaluate      │
+│   aggregation   │ │   daily     │ │   rules         │
+│ - Sessionize    │ │   rollups   │ │ - Fire alerts   │
+│ - Filter/route  │ │ - Compact   │ │ - Deduplicate   │
+└────────┬────────┘ └──────┬──────┘ └────────┬────────┘
+         │                 │                 │
+         ▼                 ▼                 ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                      Storage Layer                                │
+│                                                                  │
+│  ┌──────────────┐  ┌────────────────┐  ┌───────────────────┐     │
+│  │  Hot Store   │  │  Warm Store    │  │   Cold Store       │     │
+│  │ Elasticsearch│  │  ClickHouse /  │  │   S3 + Parquet     │     │
+│  │ (7 days)     │  │  TimescaleDB   │  │   (1 year+)        │     │
+│  │              │  │  (30 days)     │  │                    │     │
+│  └──────────────┘  └────────────────┘  └───────────────────┘     │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │   Metrics Store (Prometheus / InfluxDB / TimescaleDB)     │    │
+│  └──────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     Query / API Layer                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
+│  │ Query API    │  │ Dashboard    │  │ Alert API    │           │
+│  │ (GraphQL)    │  │ (Grafana/    │  │              │           │
+│  │              │  │  Kibana)     │  │              │           │
+│  └──────────────┘  └──────────────┘  └──────────────┘           │
+└──────────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2>API Design</h2>
+<h3>Event Ingestion API</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="nx">express</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;express&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Kafka</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;kafkajs&#39;</span><span class="p">;</span>
+<span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">v4</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="nx">uuidv4</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;uuid&#39;</span><span class="p">;</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">express</span><span class="p">();</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">express</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;5mb&#39;</span><span class="w"> </span><span class="p">}));</span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">kafka</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Kafka</span><span class="p">({</span><span class="w"> </span><span class="nx">brokers</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;kafka-1:9092&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;kafka-2:9092&#39;</span><span class="p">]</span><span class="w"> </span><span class="p">});</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">producer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">kafka</span><span class="p">.</span><span class="nx">producer</span><span class="p">({</span><span class="w"> </span><span class="nx">allowAutoTopicCreation</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">});</span>
+
+<span class="c1">// POST /api/v1/ingest/events</span>
+<span class="c1">// Batch event ingestion endpoint</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/ingest/events&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">events</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nb">Array</span><span class="p">.</span><span class="nx">isArray</span><span class="p">(</span><span class="nx">events</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">events</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;events array required&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">events</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">1000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">400</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Max 1000 events per batch&#39;</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">enrichedEvents</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">events</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">event</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">    </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">id</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">uuidv4</span><span class="p">(),</span>
+<span class="w">    </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">type</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">source</span><span class="o">:</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">source</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">timestamp</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span>
+<span class="w">    </span><span class="nx">data</span><span class="o">:</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">data</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">metadata</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="p">...</span><span class="nx">event</span><span class="p">.</span><span class="nx">metadata</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">ingestTimestamp</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span>
+<span class="w">      </span><span class="nx">ingestServer</span><span class="o">:</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">env</span><span class="p">.</span><span class="nx">HOSTNAME</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">ip</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">ip</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">userAgent</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">headers</span><span class="p">[</span><span class="s1">&#39;user-agent&#39;</span><span class="p">],</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">}));</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">messages</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">enrichedEvents</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">event</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">    </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">source</span><span class="p">,</span><span class="w">  </span><span class="c1">// partition by source for ordering</span>
+<span class="w">    </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">event</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">eventType</span><span class="o">:</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">type</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">source</span><span class="o">:</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">source</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">}));</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">producer</span><span class="p">.</span><span class="nx">send</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="sb">`events-</span><span class="si">${</span><span class="nx">categorizeEventType</span><span class="p">(</span><span class="nx">events</span><span class="p">[</span><span class="mf">0</span><span class="p">].</span><span class="nx">type</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">messages</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">acks</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w">  </span><span class="c1">// leader ack only for low latency</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">202</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">accepted</span><span class="o">:</span><span class="w"> </span><span class="nx">enrichedEvents</span><span class="p">.</span><span class="nx">length</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">ids</span><span class="o">:</span><span class="w"> </span><span class="nx">enrichedEvents</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">e</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">id</span><span class="p">),</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// POST /api/v1/ingest/logs</span>
+<span class="c1">// Structured log ingestion</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/ingest/logs&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">logs</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">messages</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">logs</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">log</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">    </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="nx">log</span><span class="p">.</span><span class="nx">service</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">      </span><span class="p">...</span><span class="nx">log</span><span class="p">,</span>
+<span class="w">      </span><span class="s1">&#39;@timestamp&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">log</span><span class="p">.</span><span class="nx">timestamp</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">toISOString</span><span class="p">(),</span>
+<span class="w">      </span><span class="nx">ingestTimestamp</span><span class="o">:</span><span class="w"> </span><span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">(),</span>
+<span class="w">    </span><span class="p">}),</span>
+<span class="w">  </span><span class="p">}));</span>
+
+<span class="w">  </span><span class="k">await</span><span class="w"> </span><span class="nx">producer</span><span class="p">.</span><span class="nx">send</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">topic</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;logs-raw&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">messages</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">acks</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">202</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="w"> </span><span class="nx">accepted</span><span class="o">:</span><span class="w"> </span><span class="nx">logs</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Query API</h3>
+<div class="highlight"><pre><span></span><code><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">Client</span><span class="w"> </span><span class="kr">as</span><span class="w"> </span><span class="nx">ElasticsearchClient</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">&#39;@elastic/elasticsearch&#39;</span><span class="p">;</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">es</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">ElasticsearchClient</span><span class="p">({</span><span class="w"> </span><span class="nx">node</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;http://elasticsearch:9200&#39;</span><span class="w"> </span><span class="p">});</span>
+
+<span class="c1">// POST /api/v1/query/logs</span>
+<span class="c1">// Search logs with filters</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/query/logs&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">query</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">service</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">level</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">startTime</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">endTime</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">limit</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">offset</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">sort</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">must</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">query</span><span class="p">)</span><span class="w"> </span><span class="nx">must</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span><span class="w"> </span><span class="nx">query_string</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">query</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">service</span><span class="p">)</span><span class="w"> </span><span class="nx">must</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span><span class="w"> </span><span class="nx">term</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;service.keyword&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">service</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">level</span><span class="p">)</span><span class="w"> </span><span class="nx">must</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span><span class="w"> </span><span class="nx">term</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;level.keyword&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">level</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">startTime</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">endTime</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">must</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">range</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="s1">&#39;@timestamp&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="p">...(</span><span class="nx">startTime</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">gte</span><span class="o">:</span><span class="w"> </span><span class="nx">startTime</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">          </span><span class="p">...(</span><span class="nx">endTime</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">lte</span><span class="o">:</span><span class="w"> </span><span class="nx">endTime</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">es</span><span class="p">.</span><span class="nx">search</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">index</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;logs-*&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">query</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">bool</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">must</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">sort</span><span class="o">:</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="s1">&#39;@timestamp&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">order</span><span class="o">:</span><span class="w"> </span><span class="nx">sort</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;desc&#39;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}],</span>
+<span class="w">      </span><span class="kr">from</span><span class="o">:</span><span class="w"> </span><span class="nx">offset</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">size</span><span class="o">:</span><span class="w"> </span><span class="nx">limit</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="mf">100</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">highlight</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">fields</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="p">{}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">total</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">hits</span><span class="p">.</span><span class="nx">total</span><span class="p">.</span><span class="nx">value</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">logs</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">hits</span><span class="p">.</span><span class="nx">hits</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">hit</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="p">...</span><span class="nx">hit</span><span class="p">.</span><span class="nx">_source</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">_highlight</span><span class="o">:</span><span class="w"> </span><span class="nx">hit</span><span class="p">.</span><span class="nx">highlight</span><span class="p">,</span>
+<span class="w">    </span><span class="p">})),</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">// POST /api/v1/query/analytics</span>
+<span class="c1">// Aggregation query for analytics</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/query/analytics&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">eventType</span><span class="p">,</span><span class="w"> </span><span class="nx">groupBy</span><span class="p">,</span><span class="w"> </span><span class="nx">metric</span><span class="p">,</span><span class="w"> </span><span class="nx">interval</span><span class="p">,</span><span class="w"> </span><span class="nx">startTime</span><span class="p">,</span><span class="w"> </span><span class="nx">endTime</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">es</span><span class="p">.</span><span class="nx">search</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">index</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;events-*&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">query</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">bool</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">must</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">            </span><span class="p">{</span><span class="w"> </span><span class="nx">term</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;type.keyword&#39;</span><span class="o">:</span><span class="w"> </span><span class="nx">eventType</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">            </span><span class="p">{</span><span class="w"> </span><span class="nx">range</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">gte</span><span class="o">:</span><span class="w"> </span><span class="nx">startTime</span><span class="p">,</span><span class="w"> </span><span class="nx">lte</span><span class="o">:</span><span class="w"> </span><span class="nx">endTime</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">          </span><span class="p">],</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">aggs</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">over_time</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">date_histogram</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">field</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;timestamp&#39;</span><span class="p">,</span>
+<span class="w">            </span><span class="nx">fixed_interval</span><span class="o">:</span><span class="w"> </span><span class="nx">interval</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;1h&#39;</span><span class="p">,</span>
+<span class="w">          </span><span class="p">},</span>
+<span class="w">          </span><span class="nx">aggs</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nx">metric_value</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">              </span><span class="p">[</span><span class="nx">metric</span><span class="p">.</span><span class="nx">type</span><span class="p">]</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">field</span><span class="o">:</span><span class="w"> </span><span class="nx">metric</span><span class="p">.</span><span class="nx">field</span><span class="w"> </span><span class="p">},</span>
+<span class="w">            </span><span class="p">},</span>
+<span class="w">            </span><span class="p">...(</span><span class="nx">groupBy</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">              </span><span class="nx">grouped</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="nx">terms</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">field</span><span class="o">:</span><span class="w"> </span><span class="sb">`</span><span class="si">${</span><span class="nx">groupBy</span><span class="si">}</span><span class="sb">.keyword`</span><span class="p">,</span><span class="w"> </span><span class="nx">size</span><span class="o">:</span><span class="w"> </span><span class="mf">20</span><span class="w"> </span><span class="p">},</span>
+<span class="w">              </span><span class="p">},</span>
+<span class="w">            </span><span class="p">}),</span>
+<span class="w">          </span><span class="p">},</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">size</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">buckets</span><span class="o">:</span><span class="w"> </span><span class="nx">result</span><span class="p">.</span><span class="nx">aggregations</span><span class="p">.</span><span class="nx">over_time</span><span class="p">.</span><span class="nx">buckets</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">b</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">({</span>
+<span class="w">      </span><span class="nx">timestamp</span><span class="o">:</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">key_as_string</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">count</span><span class="o">:</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">doc_count</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">metric_value</span><span class="p">.</span><span class="nx">value</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">groups</span><span class="o">:</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">grouped</span><span class="o">?</span><span class="p">.</span><span class="nx">buckets</span><span class="p">,</span>
+<span class="w">    </span><span class="p">})),</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h3>Alerting Configuration API</h3>
+<div class="highlight"><pre><span></span><code><span class="c1">// POST /api/v1/alerts/rules</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">&#39;/api/v1/alerts/rules&#39;</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">query</span><span class="p">,</span><span class="w"> </span><span class="nx">condition</span><span class="p">,</span><span class="w"> </span><span class="nb">window</span><span class="p">,</span><span class="w"> </span><span class="nx">channels</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// condition: { operator: &#39;&gt;&#39;, threshold: 5, metric: &#39;count&#39; }</span>
+<span class="w">  </span><span class="c1">// window: &#39;5m&#39;</span>
+<span class="w">  </span><span class="c1">// channels: [&#39;slack:#ops&#39;, &#39;pagerduty:team-backend&#39;]</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">rule</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">alertService</span><span class="p">.</span><span class="nx">createRule</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">name</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">query</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">condition</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">windowSeconds</span><span class="o">:</span><span class="w"> </span><span class="nx">parseDuration</span><span class="p">(</span><span class="nb">window</span><span class="p">),</span>
+<span class="w">    </span><span class="nx">channels</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">createdBy</span><span class="o">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">user</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span>
+<span class="w">  </span><span class="p">});</span>
+
+<span class="w">  </span><span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mf">201</span><span class="p">).</span><span class="nx">json</span><span class="p">(</span><span class="nx">rule</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div>
+
+<h2>Database Schema</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">-- Alert rules</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">alert_rules</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">query</span><span class="w">           </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">       </span><span class="c1">-- Log search query</span>
+<span class="w">  </span><span class="n">condition_op</span><span class="w">    </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w"> </span><span class="c1">-- &#39;&gt;&#39;, &#39;&lt;&#39;, &#39;&gt;=&#39;, &#39;&lt;=&#39;, &#39;==&#39;</span>
+<span class="w">  </span><span class="n">condition_val</span><span class="w">   </span><span class="nb">FLOAT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">      </span><span class="c1">-- Threshold value</span>
+<span class="w">  </span><span class="n">condition_metric</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w"> </span><span class="c1">-- &#39;count&#39;, &#39;avg&#39;, &#39;p99&#39;</span>
+<span class="w">  </span><span class="n">window_seconds</span><span class="w">  </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">        </span><span class="c1">-- Evaluation window</span>
+<span class="w">  </span><span class="n">cooldown_seconds</span><span class="w"> </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">300</span><span class="p">,</span>
+<span class="w">  </span><span class="n">channels</span><span class="w">        </span><span class="nb">TEXT</span><span class="p">[]</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">     </span><span class="c1">-- Notification channels</span>
+<span class="w">  </span><span class="n">is_active</span><span class="w">       </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">TRUE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_by</span><span class="w">      </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Alert incidents</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">alert_incidents</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">rule_id</span><span class="w">         </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">REFERENCES</span><span class="w"> </span><span class="n">alert_rules</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
+<span class="w">  </span><span class="n">status</span><span class="w">          </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;firing&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">triggered_value</span><span class="w"> </span><span class="nb">FLOAT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">threshold_value</span><span class="w"> </span><span class="nb">FLOAT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">triggered_at</span><span class="w">    </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">resolved_at</span><span class="w">     </span><span class="n">TIMESTAMPTZ</span><span class="p">,</span>
+<span class="w">  </span><span class="n">acknowledged_by</span><span class="w"> </span><span class="n">UUID</span><span class="p">,</span>
+<span class="w">  </span><span class="n">acknowledged_at</span><span class="w"> </span><span class="n">TIMESTAMPTZ</span>
+<span class="p">);</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_alert_incidents_rule</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">alert_incidents</span><span class="p">(</span><span class="n">rule_id</span><span class="p">,</span><span class="w"> </span><span class="n">triggered_at</span><span class="w"> </span><span class="k">DESC</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_alert_incidents_status</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">alert_incidents</span><span class="p">(</span><span class="n">status</span><span class="p">)</span>
+<span class="w">  </span><span class="k">WHERE</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;firing&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Dashboard configurations</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">dashboards</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">description</span><span class="w">     </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">  </span><span class="n">panels</span><span class="w">          </span><span class="n">JSONB</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">&#39;[]&#39;</span><span class="p">,</span>
+<span class="w">  </span><span class="n">owner_id</span><span class="w">        </span><span class="n">UUID</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">is_public</span><span class="w">       </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">FALSE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">updated_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Data source connections</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">data_sources</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">name</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="k">type</span><span class="w">            </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w"> </span><span class="c1">-- &#39;elasticsearch&#39;, &#39;prometheus&#39;, &#39;clickhouse&#39;</span>
+<span class="w">  </span><span class="n">connection_url</span><span class="w">  </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">1024</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">  </span><span class="n">credentials</span><span class="w">     </span><span class="n">JSONB</span><span class="p">,</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+
+<span class="c1">-- Retention policies</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">retention_policies</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="n">id</span><span class="w">              </span><span class="n">UUID</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">gen_random_uuid</span><span class="p">(),</span>
+<span class="w">  </span><span class="n">index_pattern</span><span class="w">   </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w"> </span><span class="c1">-- &#39;logs-*&#39;, &#39;events-*&#39;</span>
+<span class="w">  </span><span class="n">hot_days</span><span class="w">        </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">7</span><span class="p">,</span>
+<span class="w">  </span><span class="n">warm_days</span><span class="w">       </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">30</span><span class="p">,</span>
+<span class="w">  </span><span class="n">cold_days</span><span class="w">       </span><span class="nb">INT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">365</span><span class="p">,</span>
+<span class="w">  </span><span class="n">delete_after</span><span class="w">    </span><span class="nb">INT</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">   </span><span class="c1">-- NULL = keep forever</span>
+<span class="w">  </span><span class="n">created_at</span><span class="w">      </span><span class="n">TIMESTAMPTZ</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="n">NOW</span><span class="p">()</span>
+<span class="p">);</span>
+</code></pre></div>
+
+<h2>Deep Dive: Log Processing Pipeline</h2>
+<div class="highlight"><pre><span></span><code>Raw log (unstructured):
+&quot;2026-03-18T10:23:45.123Z [ERROR] UserService - Failed to create user: duplicate email jay@example.com (req_id=abc-123)&quot;
+
+                    │
+                    ▼
+            ┌──────────────┐
+            │   Parser     │
+            │  (grok/regex)│
+            └──────┬───────┘
+                   │
+                   ▼
+Structured log (JSON):
+{
+  &quot;@timestamp&quot;: &quot;2026-03-18T10:23:45.123Z&quot;,
+  &quot;level&quot;: &quot;ERROR&quot;,
+  &quot;service&quot;: &quot;UserService&quot;,
+  &quot;message&quot;: &quot;Failed to create user: duplicate email&quot;,
+  &quot;email&quot;: &quot;jay@example.com&quot;,
+  &quot;requestId&quot;: &quot;abc-123&quot;,
+  &quot;host&quot;: &quot;web-server-12&quot;,
+  &quot;environment&quot;: &quot;production&quot;
+}
+
+                    │
+                    ▼
+            ┌──────────────┐
+            │  Enrichment  │
+            │  - Geo IP    │
+            │  - Service   │
+            │    metadata  │
+            └──────┬───────┘
+                   │
+          ┌────────┼────────┐
+          ▼        ▼        ▼
+     Hot Store  Metrics   Alerts
+  (Elasticsearch) (Prom) (Rules Engine)
+</code></pre></div>
+
+<h2>Scaling Strategies</h2>
+<ul>
+<li><strong>Horizontal ingestion</strong>: Stateless ingestion servers behind a load balancer; scale by adding instances.</li>
+<li><strong>Kafka as the buffer</strong>: Absorbs burst traffic. If processors slow down, Kafka retains data for reprocessing.</li>
+<li><strong>Index lifecycle management (ILM)</strong>: Automatically roll indices daily, shrink, force-merge, then move to warm/cold nodes.</li>
+<li><strong>Sampling</strong>: For extreme volumes, sample logs at 10% for indexing but keep 100% in cold storage (S3). Preserve 100% of ERROR and above.</li>
+<li><strong>Column-oriented storage</strong>: Use ClickHouse or Parquet files for analytical queries on historical data — 10-100x faster than Elasticsearch for aggregations.</li>
+</ul>
+<h2>Trade-offs</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Pros</th>
+<th>Cons</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Kafka as central bus</td>
+<td>Decoupling, replay, buffering</td>
+<td>Operational complexity, cost</td>
+</tr>
+<tr>
+<td>Elasticsearch for hot logs</td>
+<td>Fast full-text search, Kibana</td>
+<td>Expensive at scale, GC issues</td>
+</tr>
+<tr>
+<td>ClickHouse for analytics</td>
+<td>Blazing aggregation speed</td>
+<td>Limited full-text search</td>
+</tr>
+<tr>
+<td>Agent-based collection</td>
+<td>Reliable, buffered, compressed</td>
+<td>Must deploy/manage agents on every host</td>
+</tr>
+<tr>
+<td>Sampling high-volume logs</td>
+<td>Dramatically reduces cost</td>
+<td>May miss rare but important events</td>
+</tr>
+<tr>
+<td>Tiered storage</td>
+<td>Cost-effective retention</td>
+<td>Query across tiers is complex</td>
+</tr>
+</tbody>
+</table>
+<h2>Summary</h2>
+<p>A logging and analytics pipeline is a multi-stage system: collection (agents), ingestion (API + validation), transport (Kafka), processing (stream + batch), storage (hot/warm/cold tiers), and query (search + aggregation + alerting). The key design principles are: never lose data at ingestion (buffer aggressively), use tiered storage to manage costs, separate real-time from batch workloads, and make the ingestion path as simple and fast as possible while deferring complex processing to downstream consumers.</p>
+        </article>
+        
+
+        
+        <section class="content-section">
+            <h2>Exercises</h2>
+            <ol class="exercise-list">
+                
+                <li>
+                    <div class="exercise-title">Build a Log Ingestion Service</div>
+                    <div class="exercise-desc"><p>Create a Node.js Express service that accepts JSON log entries via HTTP POST, validates the schema, enriches them with a server timestamp and request metadata, and writes them to a local file in JSONL format (one JSON object per line). Implement batching — accumulate up to 100 logs or 1 second before flushing to disk.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a buffer array and setInterval for time-based flushing. Use fs.appendFile in write mode. Implement a flush function that JSON-stringifies each log on a separate line and writes the batch atomically.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Implement a Real-Time Log Tail</div>
+                    <div class="exercise-desc"><p>Build a WebSocket endpoint that streams new log entries to connected clients in real time. Clients should be able to subscribe with filters (e.g., service=UserService AND level=ERROR). Only matching logs should be sent to each client.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use the 'ws' npm package. Store connected clients with their filter criteria. When a new log is ingested, evaluate it against all client filters and send to matching clients. Parse filter expressions into a function.</p>
+                    </details>
+                    
+                </li>
+                
+                <li>
+                    <div class="exercise-title">Build a Simple Alert Engine</div>
+                    <div class="exercise-desc"><p>Create an alerting system that evaluates rules against a sliding window of logs. Support rules like 'if ERROR count &gt; 10 in 5 minutes, alert'. Implement cooldown so the same alert does not fire repeatedly. Send alerts to a console output or a webhook.</p></div>
+                    
+                    <details class="exercise-hint">
+                        <summary>Hint</summary>
+                        <p>Use a circular buffer or array of timestamped events per rule. Every 30 seconds, evaluate each rule against the window. Track last alert time per rule for cooldown. Use node-fetch to call webhooks.</p>
+                    </details>
+                    
+                </li>
+                
+            </ol>
+        </section>
+        
+
+        
+        <section class="content-section problems-section">
+            <h2>Common Problems & Solutions</h2>
+            <div class="problems-list">
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">1</span>
+                        <span class="problem-title">Log ingestion service becomes a bottleneck during traffic spikes, causing log loss</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> HTTP 503 errors from the ingestion API during traffic spikes. Missing log entries for peak traffic periods. Agent retry queues growing.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> The ingestion service writes synchronously to downstream systems (Elasticsearch directly) and cannot absorb sudden traffic increases. Backpressure from slow consumers causes the ingestion API to timeout.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Always put a message queue (Kafka) between ingestion and storage. The ingestion service should only validate and enqueue — never write directly to the storage layer. Implement local disk buffering in agents as a fallback. Use acks=1 on Kafka for speed.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">2</span>
+                        <span class="problem-title">Elasticsearch cluster runs out of disk space and becomes read-only</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Symptoms:</strong> Elasticsearch returns 403 Forbidden with 'cluster_block_exception' on write requests. No new logs appear in Kibana.
+                        </div>
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Index lifecycle management is not configured. Old indices are not deleted or moved to cheaper storage. The cluster hits the low-watermark (85% disk) and stops accepting writes.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Implement ILM policies that rollover indices daily, force-merge after 1 day, move to warm after 7 days, delete after 30 days. Monitor disk usage with alerts at 70% and 80%. Use curator or ILM to automate index management.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+                <details class="problem-card">
+                    <summary class="problem-header">
+                        <span class="problem-number">3</span>
+                        <span class="problem-title">Dashboard queries for 30-day aggregations take over 60 seconds</span>
+                    </summary>
+                    <div class="problem-body">
+                        
+                        <div class="problem-field">
+                            <strong>Cause:</strong> Elasticsearch is querying across hundreds of daily indices with billions of documents. Aggregation queries require scanning all matching documents.
+                        </div>
+                        <div class="problem-field">
+                            <strong>Solution:</strong> Pre-compute rollup aggregations (hourly/daily summaries) and store them in a dedicated analytics store (ClickHouse or TimescaleDB). Dashboard queries hit the rollup tables instead of raw data. For common queries, cache results in Redis with a 5-minute TTL.
+                        </div>
+                        
+                    </div>
+                </details>
+                
+            </div>
+        </section>
+        
+
+        
+        <section class="content-section">
+            <h2>Further Reading</h2>
+            <div class="resource-list">
+                
+                <a href="https://www.oreilly.com/library/view/observability-engineering/9781492076438/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag book">book</div>
+                    <div class="resource-title">Observability Engineering (O'Reilly)</div>
+                    
+                    <div class="resource-note">Comprehensive guide on building observable systems with logs, metrics, and traces</div>
+                    
+                </a>
+                
+                <a href="https://clickhouse.com/docs" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">ClickHouse Documentation</div>
+                    
+                    <div class="resource-note">Column-oriented database optimized for analytics on event data</div>
+                    
+                </a>
+                
+                <a href="https://getpino.io/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag documentation">documentation</div>
+                    <div class="resource-title">Pino - Super Fast Node.js Logger</div>
+                    
+                    <div class="resource-note">High-performance structured JSON logger for Node.js applications</div>
+                    
+                </a>
+                
+                <a href="https://www.uber.com/blog/logging/" target="_blank" rel="noopener" class="resource-card">
+                    <div class="resource-type-tag article">article</div>
+                    <div class="resource-title">Uber's Logging Infrastructure</div>
+                    
+                    <div class="resource-note">How Uber handles petabytes of logs per day</div>
+                    
+                </a>
+                
+            </div>
+        </section>
+        
+
+        <div class="lesson-nav">
+            
+            <a href="/backend-learning/lesson/9.6.2-js.html" class="btn">&larr; Design an Email Service (Gmail)</a>
+            
+            
+            <a href="/backend-learning/lesson/9.6.4-js.html" class="btn">Design a Recommendation Engine &rarr;</a>
+            
+        </div>
+
+        <div class="footer">
+            <a href="/backend-learning/phase/phase-9-js.html">&larr; Back to System Design Interview Prep</a>
+        </div>
+    </div>
+</body>
+</html>
